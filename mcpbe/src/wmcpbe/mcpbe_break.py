@@ -6,14 +6,9 @@ from typing import Tuple
 
 import numpy as np
 
-# External JIT kernels
+# JIT helpers for CDF table generation (still needed for breakage)
 from pbe_core.func.jit_mcpbe import _build_table_1d_jit, _build_tables_2d_jit
-from pbe_core.func.jit_kernel_break import (
-    calc_B_R_1d as _kb_BR1_all,
-    calc_B_R_2d_flat as _kb_BR2_all,
-    calc_break_rate_1d as _kb_br1_single,
-    calc_break_rate_2d_flat as _kb_br2_single,
-)
+
 from .fenwick_new import FenwickSampler
 
 _ONE_SHOT_ADAPTER_NAMES = {"LMCRankAdapter", "LMCCopulaAdapter", "LMCFlowAdapter"}
@@ -34,16 +29,14 @@ class MCPBEBreak:
         return type(adapter).__name__ if adapter is not None else ""
 
     def _prepare_break_config(self) -> None:
-        """Cache breakage configuration that is effectively constant during one solve run."""
+        """Cache breakage configuration from kernel parameters."""
         self._bf_ready = False
-        self._break_G = float(getattr(self, "G", 1.0))
-        self._break_pl_P1 = float(getattr(self, "pl_P1", 1.0))
+        self._break_G = float(getattr(self, "G", 1000))
+        self._break_pl_P1 = float(getattr(self, "pl_P1", 3e-2))
         self._break_pl_P2 = float(getattr(self, "pl_P2", 1.0))
         self._break_pl_P3 = float(getattr(self, "pl_P3", 1.0))
         self._break_pl_P4 = float(getattr(self, "pl_P4", 1.0))
-        self._break_BREAKRVAL = int(getattr(self, "BREAKRVAL", 1))
-        self._break_BREAKFVAL = int(getattr(self, "BREAKFVAL", 1))
-        self._break_pl_v = float(getattr(self, "pl_v", 1.0))
+        self._break_pl_v = float(getattr(self, "pl_v", 2.0))
         self._break_pl_q = float(getattr(self, "pl_q", 1.0))
 
         self._prepare_break_delta_config()
@@ -58,7 +51,7 @@ class MCPBEBreak:
         Stored in self._break_rate[:a] as:
             propensity_i = W[i] * S_i / delta_i
         with delta_i = min(break_dW_const, W[i]).
-        where S_i is the single-particle breakage rate from MLP/JIT.
+        where S_i is the single-particle breakage rate from Kernel/MLP/JIT.
         """
         a = self.a_tot
         if a <= 0:
@@ -76,11 +69,42 @@ class MCPBEBreak:
         delta = self._delta_from_weights(W, dW_const=float(self._break_dW_const))
         self._delta_break[:a] = delta
     
+        # --------- Branch 0: Kernel Framework ---------
+        if hasattr(self, 'kernel_manager') and self.kernel_manager is not None and self.kernel_manager.break_kernel is not None:
+            self.V = self.V_flat[-1, :a]
+            self.B_R = np.zeros(a, dtype=float)
+            
+            # Compute breakage rates for all particles via kernel
+            for i in range(a):
+                v_particle = float(self.V_flat[-1, i])
+                Si = self.kernel_manager.compute_break_rate(
+                    v_particle,
+                    particle_idx=i,
+                    solver=self
+                )
+                self.B_R[i] = Si
+            
+            rates = np.asarray(self.B_R, dtype=float)
+            prop = np.divide(
+                W * rates,
+                delta,
+                out=np.zeros_like(W, dtype=float),
+                where=delta > 0.0,
+            )
+            np.maximum(prop, 0.0, out=prop)
+            self._break_rate[:a] = prop
+            if self._break_rate.shape[0] > a:
+                self._break_rate[a:] = 0.0
+                self._delta_break[a:] = 0.0
+            return
+    
         # --------- Branch 1: MLP model ---------
-        use_mlp = bool(self.lmc_use_breakage_model) and (self.lmc_breakage_adapter is not None)
+        use_mlp = bool(getattr(self, "lmc_use_breakage_model", False)) and (getattr(self, "lmc_breakage_adapter", None) is not None)
         if use_mlp:
-            rates = self.lmc_breakage_adapter.compute_rates_full(self)
-            rates = np.asarray(rates, dtype=float)
+            adapter = getattr(self, "lmc_breakage_adapter", None)
+            if adapter is None:
+                raise RuntimeError("MLP breakage model enabled but adapter not configured")
+            rates = np.asarray(adapter.compute_rates_full(self), dtype=float)
 
             prop = np.divide(
                 W * rates,
@@ -95,29 +119,14 @@ class MCPBEBreak:
                 self._delta_break[a:] = 0.0
             return
     
-        # --------- Branch 2: original JIT kernels (single-particle rates) ---------
-        self.V = self.V_flat[-1, :a]
-        self.B_R = np.zeros(a, dtype=float)
-
-        if self.dim == 1:
-            _kb_BR1_all(self)
-        elif self.dim == 2:
-            _kb_BR2_all(self)
-        else:
-            raise RuntimeError(f"Unsupported dim={self.dim} for breakage kernels.")
-    
-        rates = np.asarray(self.B_R, dtype=float)
-        prop = np.divide(
-            W * rates,
-            delta,
-            out=np.zeros_like(W, dtype=float),
-            where=delta > 0.0,
-        )
-        prop[prop < 0.0] = 0.0
-        self._break_rate[:a] = prop
+        # --------- Branch 2: No breakage configured ---------
+        # If no kernel and no MLP, assume breakage is disabled.
+        # Set all rates to zero (no breakage events will occur).
+        self._break_rate[:a] = 0.0
         if self._break_rate.shape[0] > a:
             self._break_rate[a:] = 0.0
             self._delta_break[a:] = 0.0
+        return
 
     def _break_rate_single(self, i: int) -> float:
         """Single-particle BREAKAGE PROPENSITY.
@@ -125,7 +134,7 @@ class MCPBEBreak:
         Returns:
             propensity_i = W[i] * S_i / delta_i
         with delta_i = min(break_dW_const, W[i]).
-        where S_i is the single-particle breakage rate from MLP/JIT.
+        where S_i is the single-particle breakage rate from MLP/JIT/Kernel.
         """
         a = self.a_tot
         if i < 0 or i >= a:
@@ -140,54 +149,42 @@ class MCPBEBreak:
         if delta_i <= 0.0:
             return 0.0
     
-        # --------- Branch 1: MLP model ---------
-        use_mlp = bool(self.lmc_use_breakage_model) and (self.lmc_breakage_adapter is not None)
-        if use_mlp:
-            Si = float(self.lmc_breakage_adapter.compute_rate_single(self, i))
+        # --------- Branch 1: Kernel Framework ---------
+        if hasattr(self, 'kernel_manager') and self.kernel_manager is not None and self.kernel_manager.break_kernel is not None:
+            v_particle = float(self.V_flat[-1, i])
+            Si = self.kernel_manager.compute_break_rate(
+                v_particle,
+                particle_idx=i,
+                solver=self
+            )
             val = Wi * Si / delta_i
             return float(val) if val > 0.0 else 0.0
     
-        # --------- Branch 2: original JIT single-particle rate ---------
-        if self.dim == 1:
-            Si = float(
-                _kb_br1_single(
-                    self.V_flat[-1, :a],
-                    self._break_pl_P1,
-                    self._break_pl_P2,
-                    self._break_G,
-                    self._break_BREAKRVAL,
-                    i,
-                )
-            )
-        else:
-            Si = float(
-                _kb_br2_single(
-                    self.V_flat[-1, :a],
-                    self.V_flat[0, :a],
-                    self.V_flat[1, :a],
-                    self._break_G,
-                    self._break_pl_P1,
-                    self._break_pl_P2,
-                    self._break_pl_P3,
-                    self._break_pl_P4,
-                    self._break_BREAKRVAL,
-                    self._break_BREAKFVAL,
-                    i,
-                )
-            )
+        # --------- Branch 2: MLP model ---------
+        use_mlp = bool(getattr(self, "lmc_use_breakage_model", False)) and (getattr(self, "lmc_breakage_adapter", None) is not None)
+        if use_mlp:
+            adapter = getattr(self, "lmc_breakage_adapter", None)
+            if adapter is None:
+                Si = 0.0
+            else:
+                Si = float(adapter.compute_rate_single(self, i))
+            val = Wi * Si / delta_i
+            return float(val) if val > 0.0 else 0.0
     
-        val = Wi * Si / delta_i
-        return float(val) if val > 0.0 else 0.0
+        # No kernel or MLP configured
+        raise RuntimeError("Breakage kernel not initialized and no MLP model available")
 
     # ------------------------------------------------------------------
     # Two-level CDF builder (cached)
     # ------------------------------------------------------------------
     def _build_break_function(self, num_points: int = 1000):
         """Build two-level CDF tables for breakage fragment distributions (1D/2D)."""
+        # BREAKFVAL=1 is the default (single breakage mode)
+        BREAKFVAL = 1
         key = (
             int(self.dim),
             int(num_points),
-            self._break_BREAKFVAL,
+            BREAKFVAL,
             self._break_pl_v,
             self._break_pl_q,
         )
@@ -206,8 +203,7 @@ class MCPBEBreak:
             rel = np.linspace(0.0, 1.0, num_points).astype(np.float64)
             v = self._break_pl_v
             q = self._break_pl_q
-            bf = self._break_BREAKFVAL
-            cdf = _build_table_1d_jit(rel, v, q, bf)
+            cdf = _build_table_1d_jit(rel, v, q, BREAKFVAL)
             self._bf1_rel = rel
             self._bf1_cdf = cdf
             self._bf_cache[key] = (self._bf1_rel, self._bf1_cdf)
@@ -216,8 +212,7 @@ class MCPBEBreak:
             rel3 = np.linspace(0.0, 1.0, num_points).astype(np.float64)
             v = self._break_pl_v
             q = self._break_pl_q
-            bf = self._break_BREAKFVAL
-            rowsum_cdf, row_cdf = _build_tables_2d_jit(rel1, rel3, v, q, bf)
+            rowsum_cdf, row_cdf = _build_tables_2d_jit(rel1, rel3, v, q, BREAKFVAL)
             self._bf2_rel1 = rel1
             self._bf2_rel3 = rel3
             self._bf2_rowsum_cdf = rowsum_cdf
@@ -252,7 +247,7 @@ class MCPBEBreak:
                 - Otherwise:
                     use JIT-generated tables via _build_break_function() and self._bf*.
         """
-        use_lmc = bool(self.use_lmc_pre_model and self.lmc_adapter is not None)
+        use_lmc = bool(getattr(self, "use_lmc_pre_model", False) and getattr(self, "lmc_adapter", None) is not None)
         if not use_lmc:
             if not self._bf_ready:
                 self._build_break_function()
@@ -378,25 +373,149 @@ class MCPBEBreak:
         if not frags:
             return
     
+        # Get parent liquid volume (PER PHYSICAL PARTICLE - intensive property)
+        lv_parent = float(self.liquid_volume[k]) if hasattr(self, "liquid_volume") else 0.0
+        V_parent_total = float(np.sum(Vrem_k)) if self.dim == 1 else float(Vrem_k[0] + Vrem_k[1])
+    
         new_indices: list[int] = []
     
+        # Calculate total fragment volume for proportional liquid distribution
+        frag_volumes = [float(np.sum(f)) for f in frags]
+        total_frag_vol = sum(frag_volumes)
+    
         # 1) Append ALL fragments as new particles, each carrying weight dW
-        for f in frags:
+        # IMPORTANT: liquid_volume is PER PHYSICAL PARTICLE (intensive).
+        # When a particle breaks, its liquid is distributed among fragments.
+        # Each fragment inherits a fraction of the parent's liquid proportional to its volume.
+        # Total liquid is conserved: sum(fragment_liquid) = parent_liquid
+        for idx_frag, f in enumerate(frags):
             self._append_particle_column(f)
             new_idx = self.a_tot - 1
             new_indices.append(new_idx)
     
             self.W[new_idx] = dW
+            
+            # Distribute liquid volume proportionally to fragment volume
+            # This conserves total liquid: sum(lv_frag) = lv_parent
+            if hasattr(self, "liquid_volume") and total_frag_vol > 0.0:
+                vol_fraction = frag_volumes[idx_frag] / total_frag_vol
+                self.liquid_volume[new_idx] = lv_parent * vol_fraction
+            
+            # Phase 2: Compute fragment porosity via PorosityGrowthKernel
+            # ================================================================
+            # CRITICAL: Use kernel for consistent physics!
+            # Default: volume_mixing (fragments inherit parent porosity)
+            # Advanced: cone_model/incomplete_mixing (pore collapse during breakage)
+            # ================================================================
+            # NOTE: This loop handles liquid distribution per fragment.
+            # Porosity computation is deferred until all fragments are collected
+            # if the kernel requires multi-fragment context (e.g., cone_model).
+            # ================================================================
+            if hasattr(self, "porosity"):
+                parent_poro = self.porosity[k]
+                
+                # Calculate V_solid from fragment (f is already V_solid fraction)
+                V_solid_frag = float(np.sum(f))
+                
+                # Get porosity growth kernel (create default if not exists)
+                porosity_kernel = None
+                if hasattr(self, 'kernel_manager') and self.kernel_manager is not None:
+                    porosity_kernel = self.kernel_manager.porosity_growth_kernel
+                
+                if porosity_kernel is None:
+                    # Create default volume_mixing kernel
+                    from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
+                    porosity_kernel = get_porosity_growth_kernel('volume_mixing')
+                
+                # Estimate breakage energy (simplified: proportional to particle volume)
+                breakage_energy = None
+                
+                # Check if kernel supports multi-fragment API (cone_model does)
+                # If yes, compute porosities AFTER collecting all fragments
+                # Otherwise, compute per-fragment as before (volume_mixing)
+                if len(frags) > 1 and hasattr(porosity_kernel, '_compute_fragment_porosity_multi'):
+                    # Defer porosity computation - will be done after loop
+                    # Store placeholder, will be overwritten below
+                    frag_poro = parent_poro  # Temporary placeholder
+                else:
+                    # Single-fragment or legacy kernel: compute immediately
+                    frag_poro = porosity_kernel.compute_fragment_porosity(
+                        parent_porosity=parent_poro,
+                        fragment_volume=V_solid_frag,
+                        parent_volume=float(np.sum(self.V_flat[:self.dim, k])),
+                        breakage_energy=breakage_energy,
+                        solver=self
+                    )
+                
+                self.porosity[new_idx] = frag_poro
+                
+                # Calculate V_dry from V_solid and NEW porosity
+                # IMPORTANT: Use frag_poro, NOT parent_poro!
+                if np.isnan(frag_poro):
+                    # Vollkörper: V_dry = V_solid
+                    V_dry_frag = V_solid_frag
+                else:
+                    # Porous: V_dry = V_solid / (1 - porosity)
+                    V_dry_frag = V_solid_frag / (1.0 - frag_poro)
+                
+                # Update V_flat[-1] to V_dry
+                self.V_flat[-1, new_idx] = V_dry_frag
+                # V_flat[:dim] already contains V_solid (from fragment f), keep as is
+            
             self._update_delta_single(new_idx, attr_name="_delta_break", dW_const=float(self._break_dW_const))
     
             br_new = self._break_rate_single(new_idx)  # already returns W*Si
             self._break_rate[new_idx] = br_new
             if self._break_sampler is not None:
                 self._break_sampler.update(new_idx, br_new)
-    
-        # 2) Reduce parent weight but keep its volume unchanged
+        
+        # ================================================================
+        # Phase 2b: Deferred porosity computation for multi-fragment kernels
+        # ================================================================
+        # If kernel supports multi-fragment API (e.g., cone_model), compute
+        # all fragment porosities NOW with full context of all fragments.
+        # This is required for cone_model to calculate ΔV between fragments.
+        # ================================================================
+        if (hasattr(self, "porosity") and len(frags) > 1 and 
+            hasattr(porosity_kernel, '_compute_fragment_porosity_multi')):
+            
+            # Collect all fragment solid volumes
+            parent_volume_solid = float(np.sum(self.V_flat[:self.dim, k]))
+            frag_solid_volumes = [float(np.sum(f)) for f in frags]
+            
+            # Compute ALL fragment porosities at once (cone_model needs this!)
+            poros_all = porosity_kernel._compute_fragment_porosity_multi(
+                parent_porosity=parent_poro,
+                fragment_volumes=frag_solid_volumes,
+                parent_volume=parent_volume_solid,
+                breakage_energy=breakage_energy,
+                solver=self
+            )
+            
+            # Update porosities and V_dry for all fragments
+            for idx_frag, new_idx in enumerate(new_indices):
+                frag_poro = poros_all[idx_frag]
+                self.porosity[new_idx] = frag_poro
+                
+                V_solid_frag = frag_solid_volumes[idx_frag]
+                
+                if np.isnan(frag_poro):
+                    V_dry_frag = V_solid_frag
+                else:
+                    V_dry_frag = V_solid_frag / (1.0 - frag_poro)
+                
+                self.V_flat[-1, new_idx] = V_dry_frag
+        
+        # 2) Reduce parent weight but keep its volume and liquid unchanged
         w_rem = w_parent_old - dW
         self.W[k] = w_rem
+        
+        # IMPORTANT: DO NOT scale liquid_volume!
+        # liquid_volume is PER PHYSICAL PARTICLE (intensive property).
+        # The remaining computational particles (weight w_rem) still represent
+        # physical particles with the SAME liquid content per particle.
+        # Only the NUMBER of represented particles changes, not their properties.
+        
         if w_rem > 0.0:
             self._update_delta_single(k, attr_name="_delta_break", dW_const=float(self._break_dW_const))
             br_k = self._break_rate_single(k)  # uses new W[k]
@@ -425,7 +544,7 @@ class MCPBEBreak:
     # from table/builtin CDFs one by one.
     def _build_fragments_stepwise(self, Vrem_k: np.ndarray) -> list[np.ndarray]:
         *_, pexp = self._get_break_tables_for_state(Vrem_k)
-        p = float(pexp) if (pexp is not None and self.use_lmc_pre_model) else float(self.frag_num)
+        p = float(pexp) if (pexp is not None and getattr(self, "use_lmc_pre_model", False)) else float(getattr(self, "frag_num", 2))
         fl = int(math.floor(p))
         ce = int(math.ceil(p))
         if fl <= 1:
@@ -454,7 +573,7 @@ class MCPBEBreak:
           fragments, keeping the overall composition unchanged.
         """
         # Prefer NO_FRAG from the live LMC adapter; fall back to 2 if missing.
-        n = int(self.lmc_NO_FRAG)
+        n = int(getattr(self, "lmc_NO_FRAG", 2))
         if n < 2:
             n = 2
 
@@ -481,7 +600,7 @@ class MCPBEBreak:
           ("ok", frags) or ("disable", [])
         """
         # 1) Live LMC first
-        if self.use_lmc_live and (self.lmc_live is not None):
+        if getattr(self, "use_lmc_live", False) and (getattr(self, "lmc_live", None) is not None):
             try:
                 frags, _E = self.lmc_live.sample_one_shot(Vrem_k, self._rng)
                 return "ok", frags
@@ -493,8 +612,8 @@ class MCPBEBreak:
                     #   - if a table/rank model (or adapter) is available, keep the
                     #     original behavior and fall through to those models;
                     #   - otherwise, fall back to a simple uniform NO_FRAG split.
-                    has_tables = bool(self.use_lmc_pre_model)
-                    has_adapter = self.lmc_adapter is not None
+                    has_tables = bool(getattr(self, "use_lmc_pre_model", False))
+                    has_adapter = getattr(self, "lmc_adapter", None) is not None
 
                     if has_tables or has_adapter:
                         # Old behavior: do nothing here and let the code fall through
@@ -512,7 +631,10 @@ class MCPBEBreak:
                     raise
     
         # 2) One-shot distribution adapters: rank / copula / flow
-        lmc_ad = self.lmc_adapter
+        lmc_ad = getattr(self, "lmc_adapter", None)
+        if lmc_ad is None:
+            # No adapter available, fall through to stepwise split
+            return "ok", self._build_fragments_stepwise(Vrem_k)
         ad_name = self._adapter_type_name(lmc_ad)
         if ad_name in _ONE_SHOT_ADAPTER_NAMES:
         # if ad_name in {"LMCRankAdapter", "LMCCopulaAdapter"}:
@@ -553,7 +675,7 @@ class MCPBEBreak:
         # 3) Marginal-table / analytic-function path: stepwise split
         #    (LMCTableAdapter or pure JIT analytic model)
         if ad_name == _TABLE_ADAPTER_NAME:
-            if lmc_ad.small_particle_policy == "disable":
+            if getattr(lmc_ad, "small_particle_policy", None) == "disable":
                 A = float(Vrem_k[0]) if self.dim == 1 else float(Vrem_k[0] + Vrem_k[1])
                 if not lmc_ad.eligible_for_tables(A):
                     return "disable", []

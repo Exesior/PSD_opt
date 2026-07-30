@@ -65,6 +65,13 @@ class MCPBEBase(BaseSolver):
         if load_attr:
             self._load_attributes(config_path)
 
+        # Nucleation parameters (loaded from config, with defaults)
+        self.liquid_flow_rate = float(getattr(self, 'liquid_flow_rate', 0.0))
+        self.droplet_diameter = float(getattr(self, 'droplet_diameter', 0.0))
+        self.nucleation_enable = bool(getattr(self, 'nucleation_enable', False))
+        self.nucleation_duration = float(getattr(self, 'nucleation_duration', 0.0))  # Duration of liquid addition [s]
+        self._nucleation_time_elapsed = 0.0  # Track elapsed time for nucleation
+
         # RNG (single point of instantiation)
         if rng is not None:
             self._rng = rng
@@ -390,6 +397,11 @@ class MCPBEBase(BaseSolver):
         self.X = np.zeros(self._cap, dtype=float)
         self.X[:a0_eff] = self._vol2diam(self.V_flat[-1, :a0_eff])
 
+        # Liquid volume, Porosity and saturationper particle
+        self.liquid_volume = np.zeros(self._cap, dtype=float)
+        self.porosity = np.zeros(self._cap, dtype=float)
+        self.saturation = np.zeros(self._cap, dtype=float)
+
         # Time & saved snapshots
         self.t = [0.0]
         if self.t_vec is None:
@@ -466,6 +478,20 @@ class MCPBEBase(BaseSolver):
         self.X = X_new
         self._cap = new_cap
 
+        # Liquid volume capacity growth
+        liquid_new = np.zeros(new_cap, dtype=float)
+        liquid_new[:self.a_tot] = self.liquid_volume[:self.a_tot]
+        self.liquid_volume = liquid_new
+        
+        # Porosity and saturation capacity growth
+        poro_new = np.zeros(new_cap, dtype=float)
+        poro_new[:self.a_tot] = self.porosity[:self.a_tot]
+        self.porosity = poro_new
+        
+        sat_new = np.zeros(new_cap, dtype=float)
+        sat_new[:self.a_tot] = self.saturation[:self.a_tot]
+        self.saturation = sat_new
+
         # Extend auxiliary arrays if present
         if hasattr(self, "_r_agg") and self._r_agg is not None:
             r_new = np.zeros(new_cap, dtype=float)
@@ -503,6 +529,9 @@ class MCPBEBase(BaseSolver):
         X_active = self.X[:self.a_tot]
         V_dup = np.concatenate((V_active, V_active), axis=1)
         X_dup = np.concatenate((X_active, X_active))
+        liquid_dup = np.concatenate((self.liquid_volume[:self.a_tot], self.liquid_volume[:self.a_tot]))
+        porosity_dup = np.concatenate((self.porosity[:self.a_tot], self.porosity[:self.a_tot]))
+        saturation_dup = np.concatenate((self.saturation[:self.a_tot], self.saturation[:self.a_tot]))
         self.a_tot = V_dup.shape[1]
 
         # Ensure capacity and write back
@@ -510,13 +539,23 @@ class MCPBEBase(BaseSolver):
             self._cap = int(self.a_tot * 1.2) + 8
             V_new = np.zeros((self.dim + 1, self._cap), dtype=float)
             X_new = np.zeros(self._cap, dtype=float)
+            liquid_new = np.zeros(self._cap, dtype=float)
             V_new[:, :self.a_tot] = V_dup
             X_new[:self.a_tot] = X_dup
+            liquid_new[:self.a_tot] = liquid_dup
+            poro_new[:self.a_tot] = porosity_dup
+            sat_new[:self.a_tot] = saturation_dup
             self.V_flat = V_new
             self.X = X_new
+            self.liquid_volume = liquid_new
+            self.porosity = poro_new
+            self.saturation = sat_new
         else:
             self.V_flat[:, :self.a_tot] = V_dup
             self.X[:self.a_tot] = X_dup
+            self.liquid_volume[:self.a_tot] = liquid_dup
+            self.porosity[:self.a_tot] = porosity_dup
+            self.saturation[:self.a_tot] = saturation_dup
 
         if hasattr(self, "V0") and isinstance(self.V0, np.ndarray):
             self.V0 = np.concatenate((self.V0, self.V0), axis=1)
@@ -589,7 +628,20 @@ class MCPBEBase(BaseSolver):
         next_save_idx = 1 if len(self.t_vec) > 1 else 0
         self._elapsed = 0.0
         self._iter_count = 0
-
+        
+        # Nucleation tracking
+        timer_nucleation = 0.0
+        dtd_nucleation = 0.0
+        
+        # Check if nucleation is enabled and configured
+        nuc_enabled = getattr(self, 'nucleation_enable', False)
+        if nuc_enabled:
+            # Initialize nucleation (calculate droplet rate, etc.)
+            self.initialize_nucleation()
+            # Set initial dt for nucleation (use small default if no other process)
+            if self._droplet_rate > 0:
+                dtd_nucleation = 1.0 / self._droplet_rate if self._droplet_rate > 0 else float('inf')
+        
         cancel_flag = getattr(self, "cancel_flag", None)
         while self.t[-1] <= float(self.t_vec[-1]) and count < maxiter:
             if cancel_flag is not None and cancel_flag.get("cancel", False):
@@ -602,6 +654,7 @@ class MCPBEBase(BaseSolver):
             t_prev = self.t[-1]
             V_prev_active = self.V_flat[:, :self.a_tot].copy()
 
+            # Determine which process happens next
             if pt == "agglomeration":
                 self._do_one_agg()  # from AgglomerationMixin
                 elapsed_time = timer_agg
@@ -612,17 +665,89 @@ class MCPBEBase(BaseSolver):
                 elapsed_time = timer_break
                 dtd_break = self._dt_break()
                 timer_break += dtd_break
+            elif pt == "nucleation" and nuc_enabled:
+                # Nucleation-only mode: advance time by droplet interval
+                # IMPORTANT: Do NOT distribute here - distribution happens AFTER the if/elif/else block!
+                dtd_nucleation = 1.0 / self._droplet_rate if self._droplet_rate > 0 else float('inf')
+                timer_nucleation += dtd_nucleation
+                elapsed_time = timer_nucleation  # Use UPDATED time!
             else:  # mix
-                if timer_agg <= timer_break:
+                # Find minimum time among active processes
+                timers = []
+                if pt in ("agglomeration", "mix"):
+                    timers.append(("agg", timer_agg))
+                if pt in ("breakage", "mix"):
+                    timers.append(("break", timer_break))
+                if nuc_enabled:
+                    timers.append(("nuc", timer_nucleation))
+                
+                if not timers:
+                    break  # No active processes
+                
+                # Get process with smallest timer
+                next_process = min(timers, key=lambda x: x[1])[0]
+                
+                if next_process == "agg":
                     self._do_one_agg()
                     elapsed_time = timer_agg
                     dtd_agg = self._dt_agg()
                     timer_agg += dtd_agg
-                else:
+                elif next_process == "break":
                     self._do_one_break()
                     elapsed_time = timer_break
                     dtd_break = self._dt_break()
                     timer_break += dtd_break
+                elif next_process == "nuc" and nuc_enabled:
+                    # FIX: In mix mode, advance nucleation timer but don't execute event
+                    # Distribution happens in the dedicated block below
+                    elapsed_time = timer_nucleation
+                    dtd_nucleation = 1.0 / self._droplet_rate if self._droplet_rate > 0 else float('inf')
+                    timer_nucleation += dtd_nucleation
+
+            # NUKLEATION: Verteile Tropfen basierend auf accumulierter Zeit
+            # WICHTIG: Dies muss NACH dem Event-Block kommen, da elapsed_time erst dort gesetzt wird!
+            if nuc_enabled:
+                # Prüfe ob Flüssigkeitszugabe noch aktiv ist (duration check)
+                nuc_duration = getattr(self, 'nucleation_duration', 0.0)
+                current_nuc_time = getattr(self, '_nucleation_time_elapsed', 0.0)
+                
+                if nuc_duration <= 0 or current_nuc_time < nuc_duration:
+                    # FIX: Verwende IMMER die aktuelle Simulationszeit als dt für Nukleation
+                    # Im "nucleation"-only mode: elapsed_time = timer_nucleation (akkumuliert)
+                    # Im "mix"-mode: elapsed_time = min(agg, break, nuc) Timer
+                    # Wir müssen die ZEITDIFFERENZ zum letzten Aufruf berechnen
+                    
+                    # Erste Iteration: last_nucleation_time ist nicht definiert, verwende 0
+                    if count == 0:
+                        last_nuc = 0.0
+                    else:
+                        last_nuc = getattr(self, '_last_nucleation_time', 0.0)
+                    
+                    dt_for_nuc = elapsed_time - last_nuc
+                    
+                    if dt_for_nuc > 1e-12:  # Nur verteilen wenn signifikante Zeit vergangen
+                        # Berechne verfügbare Zeit unter Berücksichtigung der Duration
+                        available_nuc_time = dt_for_nuc
+                        if nuc_duration > 0:
+                            remaining_duration = nuc_duration - current_nuc_time
+                            available_nuc_time = min(dt_for_nuc, remaining_duration)
+                        
+                        if available_nuc_time > 1e-12:
+                            # Verteile Tropfen für diese Zeitspanne
+                            n_droplets = self.distribute_droplets_for_timestep(available_nuc_time)
+                            
+                            # Update elapsed time tracking for nucleation
+                            self._nucleation_time_elapsed += available_nuc_time
+                            
+                            # Stop liquid flow if duration exceeded
+                            if nuc_duration > 0 and self._nucleation_time_elapsed >= nuc_duration:
+                                self.liquid_flow_rate = 0.0
+                                self._calculate_droplet_rate()
+                                if self.VERBOSE:
+                                    print(f"[Nukleation] Flüssigkeitszugabe gestoppt nach {self._nucleation_time_elapsed:.2f} s")
+                    
+                    # Speichere aktuelle Zeit für nächsten Durchlauf
+                    self._last_nucleation_time = elapsed_time
 
             self.t.append(elapsed_time)
             
@@ -1158,7 +1283,8 @@ class MCPBEBase(BaseSolver):
         big_attrs = ("V_flat", "X", "V0", "X0",
              "V0_save", "V_save", "Vc_save",
              "_r_agg", "_break_rate",
-             "_agg_sampler", "_break_sampler")
+             "_agg_sampler", "_break_sampler",
+             "liquid_volume", "porosity", "saturation")
         for name in big_attrs:
             setattr(self, name, None)
         self._bf_cache.clear()

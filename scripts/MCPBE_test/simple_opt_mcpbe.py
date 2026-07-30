@@ -6,7 +6,7 @@ Created on Thu Jan  4 14:53:00 2024
 """
 import os
 from pathlib import Path
-import ray
+#import ray
 from pbe_optimizer.optimizer.opt_base import OptBase
 import numpy as np
 import time

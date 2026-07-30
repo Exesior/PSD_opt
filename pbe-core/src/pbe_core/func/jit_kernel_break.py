@@ -29,6 +29,9 @@ def breakage_func_1d(x,y,v,q,BREAKFVAL):
         theta = 2.0
         # p = 2.0
     ## product function of power law. --> See Diemer_Olson (2002)
+    ## PHYSICAL NOTE: This requires q=1.0 for numerical stability!
+    ## q!=1.0 creates singularities at z=0 or z=1 (U-shaped distribution)
+    ## Only use q!=1.0 if you specifically need this behavior and handle it properly.
     elif BREAKFVAL == 3:     
         euler_beta = beta_func(q,q*(v-1))
         z = x/y
@@ -44,6 +47,10 @@ def breakage_func_1d(x,y,v,q,BREAKFVAL):
         z = x/y
         theta = (v+2)*(v+1)*z**(v-1)*(1-z)
         # p = (v+2) / v
+    else:
+        # Unknown BREAKFVAL, return 0
+        return 0.0
+    
     return theta / y
 
 @njit

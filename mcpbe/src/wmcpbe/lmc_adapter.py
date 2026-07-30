@@ -1313,12 +1313,19 @@ class LMCLiveAdapter:
         """
         Convert parent phase volumes V_parent into (A, X1).
 
+        Phase 2 Note: V_parent now represents TOTAL volume (V_ges), not solid volume.
+        This is correct for LMC as it models hydrodynamic behavior (breakage depends on
+        total particle size including pores).
+
         Cases
         -----
         - len(V_parent) == 1:
-            Single-phase parent, treated as A = V_parent[0], X1 = 1.
+            Single-phase parent, treated as A = V_parent[0] (V_ges), X1 = 1.
         - len(V_parent) == 2:
-            Two-phase parent, A = V_A + V_B, X1 = V_A / (V_A + V_B).
+            Two-phase parent, A = V_A + V_B (total V_ges), X1 = V_A / (V_A + V_B).
+        
+        Fragments returned will also be V_ges values (scaled to conserve total volume).
+        Porosity inheritance is handled by the caller (MCPBEBreak._break_apply_and_maintain).
         """
         if V_parent.size == 1:
             A = float(V_parent[0])

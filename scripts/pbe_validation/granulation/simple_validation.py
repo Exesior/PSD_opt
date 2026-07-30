@@ -32,16 +32,16 @@ def main() -> None:
     )
 
     wmcpbe_variants = [
-        WMCPBEVariantConfig(
-            name="WMCPBE baseline",
-            repeats=1,
-            base_seed=42,
-            attrs={
-                "recon_enable": False,
-                "break_dW_max": 1.0,
-                "agg_dW_max": 1.0,
-            },
-        ),
+         WMCPBEVariantConfig(
+             name="WMCPBE baseline",
+             repeats=1,
+             base_seed=42,
+             attrs={
+                 "recon_enable": False,
+                 "break_dW_max": 1.0,
+                 "agg_dW_max": 1.0,
+             },
+         ),
         WMCPBEVariantConfig(
             name="WMCPBE reconstructed",
             repeats=1,
@@ -52,7 +52,7 @@ def main() -> None:
                 "recon_N_max": 4000,
                 "recon_bins": 30,
                 "recon_RS_target": 1000,
-                "break_dW_max": 1.0,
+                "break_dW_max": 10.0,
                 "agg_dW_max": 1.0,
             },
         ),
@@ -61,7 +61,7 @@ def main() -> None:
     config = GranulationValidationConfig(
         case=case,
         wmcpbe_variants=wmcpbe_variants,
-        verbose=False,
+        verbose=True,
     )
 
     result = GranulationValidationRunner(config).run()

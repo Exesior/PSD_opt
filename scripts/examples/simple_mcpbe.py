@@ -26,7 +26,7 @@ Key Features:
 import numpy as np
 import copy
 import time
-from optframework.mcpbe import MCPBESolver
+from mcpbe import MCPBESolver
 
 def run_mcpbe(m):
     """
