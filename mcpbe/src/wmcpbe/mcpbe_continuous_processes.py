@@ -165,58 +165,50 @@ class ContinuousProcessesHandler:
     def _apply_internalization(self, dt: float) -> None:
         """
         Apply liquid internalization to all particles.
-        
+
         Updates saturation based on capillary-driven uptake.
         Total liquid per particle is conserved.
-        
+
+        Vectorised over the active particle slice: this runs once per
+        Monte-Carlo event, so a Python loop here costs O(n) interpreter
+        overhead per event and used to dominate granulation runs.
+
         Args:
             dt: Time step [s]
         """
-        a_tot = self.solver.a_tot
+        solver = self.solver
+        a_tot = solver.a_tot
         if a_tot < 1:
             return
-        
-        particles_internalized = 0
-        
-        # Iterate over active particles
-        for i in range(a_tot):
-            porosity = self.solver.porosity[i]
-            
-            # Skip Vollkörper (no pores → no internalization)
-            if np.isnan(porosity) or porosity <= 0:
-                continue
-            
-            # Get current state
-            saturation = self.solver.saturation[i]
-            v_dry = self.solver.V_flat[-1, i]
-            l_total = self.solver.liquid_volume[i]
-            
-            # Calculate pore volume: v_pore = v_dry × porosity
-            v_pore = v_dry * porosity
-            
-            # Skip if pore volume invalid
-            if v_pore <= 0 or not np.isfinite(v_pore):
-                continue
-            
-            # Compute new saturation using kernel
-            if self.internalization_kernel is not None:
-                saturation_new = self.internalization_kernel.compute(
-                    saturation=saturation,
-                    v_pore=v_pore,
-                    l_total=l_total,
-                    dt=dt
-                )
-            else:
-                # Fallback: use config parameter directly
-                saturation_new = self._internalization_fallback(
-                    saturation, v_pore, l_total, dt
-                )
-            
-            # Update saturation
-            self.solver.saturation[i] = saturation_new
-            particles_internalized += 1
-        
-        self._particles_internalized_total += particles_internalized
+
+        porosity = solver.porosity[:a_tot]
+        v_dry = solver.V_flat[-1, :a_tot]
+        v_pore = v_dry * porosity  # NaN porosity propagates to NaN pore volume
+
+        # Vollkoerper (NaN porosity) and degenerate pores take no liquid.
+        mask = ~np.isnan(porosity) & (porosity > 0) & (v_pore > 0) & np.isfinite(v_pore)
+        n_active = int(np.count_nonzero(mask))
+        if n_active == 0:
+            return
+
+        saturation = solver.saturation[:a_tot]
+        l_total = solver.liquid_volume[:a_tot]
+
+        sat_sel = saturation[mask]
+        pore_sel = v_pore[mask]
+        liq_sel = l_total[mask]
+
+        if self.internalization_kernel is not None:
+            saturation_new = self.internalization_kernel.compute_array(
+                saturation=sat_sel, v_pore=pore_sel, l_total=liq_sel, dt=dt
+            )
+        else:
+            saturation_new = self._internalization_fallback_array(
+                sat_sel, pore_sel, liq_sel, dt
+            )
+
+        saturation[mask] = saturation_new
+        self._particles_internalized_total += n_active
     
     def _internalization_fallback(
         self,
@@ -254,9 +246,48 @@ class ContinuousProcessesHandler:
         # Update
         l_intern_new = l_intern + dl
         l_intern_new = max(0.0, min(l_intern_new, l_total, v_pore))
-        
+
         return l_intern_new / v_pore
-    
+
+    def _internalization_fallback_array(
+        self,
+        saturation: np.ndarray,
+        v_pore: np.ndarray,
+        l_total: np.ndarray,
+        dt: float,
+    ) -> np.ndarray:
+        """Vectorised counterpart of :meth:`_internalization_fallback`.
+
+        Explicit Euler step of the Braumann equation
+        ``dl_intern/dt = k_int * l_ex * (v_pore - l_intern)``.
+        """
+        k_int = self.config.k_int
+        sat = np.clip(saturation, 0.0, 1.0)
+
+        if k_int <= 0:
+            return np.where(l_total > 0, sat, saturation)
+
+        # k_int <= 0, v_pore <= 0 or l_total <= 0 -> saturation unchanged.
+        # (v_pore > 0 is guaranteed by the caller's mask.)
+        unchanged = l_total <= 0
+        out = np.where(unchanged, saturation, sat)
+
+        active = ~unchanged & (sat < 1.0)
+        if not np.any(active):
+            return np.where(unchanged, saturation, np.minimum(sat, 1.0))
+
+        vp = v_pore[active]
+        lt = l_total[active]
+        l_intern = sat[active] * vp
+        l_ex = lt - l_intern
+        v_empty = vp - l_intern
+
+        l_new = l_intern + (k_int * l_ex * v_empty) * dt
+        l_new = np.maximum(0.0, np.minimum(np.minimum(l_new, lt), vp))
+
+        out[active] = l_new / vp
+        return out
+
     def _apply_compression(self, dt: float) -> None:
         """
         Apply porosity compression to all particles.
@@ -268,92 +299,78 @@ class ContinuousProcessesHandler:
         Args:
             dt: Time step [s]
         """
-        a_tot = self.solver.a_tot
+        solver = self.solver
+        a_tot = solver.a_tot
         if a_tot < 1:
             return
-        
+
         min_poro = self.config.min_porosity
-        particles_compressed = 0
-        
-        # Iterate over active particles
-        for i in range(a_tot):
-            current_poro = self.solver.porosity[i]
-            
-            # Skip Vollkörper (NaN porosity)
-            if np.isnan(current_poro):
-                continue
-            
-            # Only compress if above minimum
-            if current_poro > min_poro:
-                # Compute new porosity using kernel
-                if self.compression_kernel is not None:
-                    new_poro = self.compression_kernel.compute(
-                        porosity=current_poro,
-                        dt=dt
-                    )
-                else:
-                    # Fallback: exponential decay
-                    rate = self.config.compression_rate
-                    new_poro = min_poro + (current_poro - min_poro) * np.exp(-rate * dt)
-                
-                self.solver.porosity[i] = new_poro
-                
-                # ==========================================
-                # Compression: Conserve V_solid, reduce V_pore
-                # ==========================================
-                V_dry_old = self.solver.V_flat[-1, i]
-                
-                # SAFETY: Skip if V_dry is invalid
-                if V_dry_old <= 0 or not np.isfinite(V_dry_old):
-                    continue
-                
-                # Ensure (1 - new_poro) is not too close to zero
-                one_minus_poro = 1.0 - new_poro
-                if one_minus_poro < 1e-10:
-                    continue
-                
-                if (1.0 - current_poro) > 1e-10:
-                    # Step 1: Calculate V_solid (CONSERVED)
-                    V_solid = V_dry_old * (1.0 - current_poro)
-                    
-                    # Step 2: Calculate old and new pore volumes
-                    V_pore_old = V_dry_old * current_poro
-                    
-                    if one_minus_poro > 1e-10:
-                        V_pore_new = V_solid * new_poro / one_minus_poro
-                    else:
-                        V_pore_new = 0.0
-                    
-                    # Step 3: Calculate new V_dry
-                    V_dry_new = V_solid + V_pore_new
-                    
-                    if V_dry_new > 0 and np.isfinite(V_dry_new):
-                        # Step 4: Update V_flat[-1] (V_dry changes)
-                        self.solver.V_flat[-1, i] = V_dry_new
-                    
-                    # Step 5: Handle saturation increase and liquid externalization
-                    if hasattr(self.solver, 'saturation') and hasattr(self.solver, 'liquid_volume'):
-                        current_sat = self.solver.saturation[i]
-                        
-                        # Current internal liquid
-                        V_liq_total = self.solver.liquid_volume[i]
-                        V_liq_int_old = min(V_liq_total, V_pore_old * current_sat)
-                        
-                        # New saturation (internal liquid / new pore volume)
-                        if V_pore_new > 0:
-                            new_sat = V_liq_int_old / V_pore_new
-                            
-                            # If saturation exceeds 1, externalize the excess
-                            if new_sat > 1.0:
-                                new_sat = 1.0
-                                # Excess liquid becomes external
-                                # V_liq_total unchanged (intensive property per particle)
-                            
-                            self.solver.saturation[i] = new_sat
-                
-                particles_compressed += 1
-        
-        self._particles_compressed_total += particles_compressed
+        # Views onto the active slice; writes go straight into solver state.
+        poro_view = solver.porosity[:a_tot]
+        v_dry_view = solver.V_flat[-1, :a_tot]
+        sat_view = solver.saturation[:a_tot]
+        poro_old = poro_view.copy()
+
+        # Vollkoerper (NaN) cannot be compressed, and neither can particles that
+        # already sit at or below the asymptotic minimum porosity.
+        active = ~np.isnan(poro_old) & (poro_old > min_poro)
+        if not np.any(active):
+            return
+
+        # ------------------------------------------------------------------
+        # Step 1: new porosity
+        # ------------------------------------------------------------------
+        if self.compression_kernel is not None:
+            poro_new = self.compression_kernel.compute_array(poro_old, dt)
+        else:
+            # Fallback: analytical exponential decay towards min_porosity.
+            rate = self.config.compression_rate
+            poro_new = min_poro + (poro_old - min_poro) * np.exp(-rate * dt)
+
+        poro_view[active] = poro_new[active]
+
+        # ------------------------------------------------------------------
+        # Step 2: conserve V_solid, shrink V_pore
+        # ------------------------------------------------------------------
+        V_dry_old = v_dry_view
+        one_minus_new = 1.0 - poro_new
+
+        # Guards mirroring the original per-particle `continue` statements: the
+        # porosity update above still applies to these particles, only the
+        # volume/saturation bookkeeping is skipped.
+        reached = (
+            active
+            & (V_dry_old > 0)
+            & np.isfinite(V_dry_old)
+            & (one_minus_new >= 1e-10)
+        )
+        vol_ok = reached & ((1.0 - poro_old) > 1e-10)
+
+        if np.any(vol_ok):
+            V_solid = V_dry_old * (1.0 - poro_old)
+            V_pore_old = V_dry_old * poro_old
+
+            V_pore_new = np.zeros_like(V_solid)
+            np.divide(V_solid * poro_new, one_minus_new, out=V_pore_new, where=vol_ok)
+
+            V_dry_new = V_solid + V_pore_new
+            write_dry = vol_ok & (V_dry_new > 0) & np.isfinite(V_dry_new)
+            v_dry_view[write_dry] = V_dry_new[write_dry]
+
+            # Step 3: saturation rises as pores shrink; excess liquid becomes
+            # external. `liquid_volume` (total per particle) stays untouched, so
+            # total liquid is conserved by construction.
+            sat_mask = vol_ok & (V_pore_new > 0)
+            if np.any(sat_mask):
+                V_liq_int_old = np.minimum(
+                    solver.liquid_volume[:a_tot], V_pore_old * sat_view
+                )
+                new_sat = np.zeros_like(V_pore_new)
+                np.divide(V_liq_int_old, V_pore_new, out=new_sat, where=sat_mask)
+                np.minimum(new_sat, 1.0, out=new_sat)
+                sat_view[sat_mask] = new_sat[sat_mask]
+
+        self._particles_compressed_total += int(np.count_nonzero(reached))
     
     def get_statistics(self) -> dict:
         """Return continuous processes statistics dict."""

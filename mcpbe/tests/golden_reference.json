@@ -1,0 +1,112 @@
+[
+  {
+    "scenario": "agg_shear_1d",
+    "hash": "ac038f0f154b56e3779ad7faa5b218fc848247eb6f3d8ffde04b2085d2d149b5",
+    "events": 383,
+    "a_tot": 253,
+    "sim_time": 120.3264141283405,
+    "sum_W": 253.0,
+    "solid_volume": 2.617993877991494e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.13606250000884756
+  },
+  {
+    "scenario": "agg_shear_1d_large",
+    "hash": "510d656388e26961dc0f09e3e986aac10a366e61e30d8f8ecc823cca3b830674",
+    "events": 149,
+    "a_tot": 1855,
+    "sim_time": 8.184038586192496,
+    "sum_W": 1855.0,
+    "solid_volume": 1.0471975511965973e-15,
+    "liquid_volume": 0.0,
+    "seconds": 0.33825879999494646
+  },
+  {
+    "scenario": "agg_constant_1d",
+    "hash": "8d412467f06013aa2ac86e57c118947397734e06e270d974a296c2f2bb9c76da",
+    "events": 399,
+    "a_tot": 233,
+    "sim_time": 2.1069467264600107e-13,
+    "sum_W": 233.0,
+    "solid_volume": 2.6179938779914936e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.06801099999574944
+  },
+  {
+    "scenario": "agg_sum_1d",
+    "hash": "04458a3b8701f6c4a8478c079bd834cb58c0605e43e0b06cebbb16d3e9c3cb2a",
+    "events": 399,
+    "a_tot": 250,
+    "sim_time": 117784.83129204139,
+    "sum_W": 250.0,
+    "solid_volume": 2.617993877991494e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.13575620000483468
+  },
+  {
+    "scenario": "agg_brownian_1d",
+    "hash": "f250883ccaa9c991267b0c97da2e4812bc3c1f69308a3f15d3436e48e3d47769",
+    "events": 0,
+    "a_tot": 499,
+    "sim_time": 19.415070787848375,
+    "sum_W": 499.0,
+    "solid_volume": 2.6179938779914936e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.014669300013338216
+  },
+  {
+    "scenario": "agg_liquid_bridge_1d",
+    "hash": "06c5f5292e8a543f9b3e82654b2d4786e91c8e7abdd5d0217afb09b8d7f839ec",
+    "events": 7,
+    "a_tot": 142,
+    "sim_time": 129.6578799829689,
+    "sum_W": 142.0,
+    "solid_volume": 7.853981633974482e-17,
+    "liquid_volume": 0.0,
+    "seconds": 0.00644280000415165
+  },
+  {
+    "scenario": "agg_shear_2d",
+    "hash": "1e10d9d0dd401509e27ee7186a0292138d07fce9ee881b20d1219d5d31f32256",
+    "events": 299,
+    "a_tot": 286,
+    "sim_time": 86.47492470587775,
+    "sum_W": 286.0,
+    "solid_volume": 2.617993877991494e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.11717290000524372
+  },
+  {
+    "scenario": "break_powerlaw_1d",
+    "hash": "96bd43fb581ffabfdef97780ff4593aeb46b6ec9bc248a4c358b254ed0bd8317",
+    "events": 1499,
+    "a_tot": 2000,
+    "sim_time": 138.85444234946996,
+    "sum_W": 2000.0,
+    "solid_volume": 2.617993877991494e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.2883386000030441
+  },
+  {
+    "scenario": "mix_1d",
+    "hash": "191bbaf2476c199de4bf2a613182d7b7eb8e733632d42b9ad5b2967f56db663a",
+    "events": 299,
+    "a_tot": 541,
+    "sim_time": 29.97398523973531,
+    "sum_W": 541.0,
+    "solid_volume": 2.617993877991494e-16,
+    "liquid_volume": 0.0,
+    "seconds": 0.18786170000385027
+  },
+  {
+    "scenario": "granulation_1d",
+    "hash": "5f07b8e8693d96c81336e2b188f86d6fe962aa27c67d60d044a7b7e03ad40f39",
+    "events": 299,
+    "a_tot": 401,
+    "sim_time": 1.021910131696554,
+    "sum_W": 397.99999999999096,
+    "solid_volume": 2.0943951023931954e-16,
+    "liquid_volume": 9.999999999999995e-19,
+    "seconds": 0.308460100000957
+  }
+]

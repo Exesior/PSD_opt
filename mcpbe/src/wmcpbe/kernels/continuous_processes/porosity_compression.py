@@ -119,8 +119,38 @@ class PorosityCompressionKernel(CompressionKernel):
     
         delta_poro = porosity - self.eps_min
         porosity_new = self.eps_min + delta_poro * np.exp(-self.k * dt)
-        
+
         # Ensure we don't go below minimum (numerical safety)
         porosity_new = max(self.eps_min, porosity_new)
-        
+
         return float(porosity_new)
+
+    def compute_array(self, porosity: np.ndarray, dt: float) -> np.ndarray:
+        """Vectorised form of :meth:`compute`.
+
+        Bit-identical to a loop of scalar calls: the decay factor
+        ``exp(-k*dt)`` is a scalar, so only multiplications and clamps are
+        applied elementwise.
+
+        Args:
+            porosity: Current porosities; NaN entries ("Vollkoerper") pass
+                      through unchanged.
+            dt:       Time step [s]
+
+        Returns:
+            Updated porosities, same shape as ``porosity``.
+        """
+        poro = np.asarray(porosity, dtype=float)
+        out = poro.copy()
+
+        finite = ~np.isnan(poro)
+        if not np.any(finite):
+            return out
+
+        clipped = np.clip(poro[finite], 0.0, 1.0)
+        decay = np.exp(-self.k * dt)
+        updated = self.eps_min + (clipped - self.eps_min) * decay
+        updated = np.maximum(self.eps_min, updated)
+        # At or below the floor there is nothing left to compress.
+        out[finite] = np.where(clipped <= self.eps_min, self.eps_min, updated)
+        return out

@@ -101,15 +101,73 @@ class ReconstructionMixin:
         self.reconstruct(method=method, reason=reason, iter_count=iter_count)
         return True
 
+    #: Set to True to run reconstruction on a population that carries liquid or
+    #: porosity anyway, accepting that those fields will be discarded. Only
+    #: meaningful for dry (non-granulation) studies - see the guard below.
+    recon_allow_granulation_state: bool = False
+
+    def _assert_reconstruction_is_safe(self) -> None:
+        """Refuse to reconstruct a population whose granulation state would be lost.
+
+        Reconstruction rebuilds ``V_flat``, ``W`` and ``X`` from scratch
+        (:meth:`_recon_replace_active_particles`) but does **not** carry over the
+        intensive granulation state:
+
+        * ``liquid_volume``, ``porosity`` and ``saturation`` keep the values of
+          whatever particle previously occupied each index, so they no longer
+          describe the particle stored there;
+        * ``V_flat[-1]`` is overwritten with ``sum(V_flat[:dim])``, i.e. the dry
+          volume is set equal to the solid volume, silently discarding the pore
+          space.
+
+        Together these break both solid- and liquid-mass conservation: a single
+        reconstruction step on a wet population was measured to lose ~0.4 % of
+        the solid phase, and the error accumulates with every further step.
+
+        Rather than let that pass silently, refuse the operation. Dry runs
+        (no liquid, no porosity) are unaffected and proceed normally.
+        """
+        if self.recon_allow_granulation_state:
+            return
+
+        a = int(getattr(self, "a_tot", 0))
+        if a <= 0:
+            return
+
+        liquid = getattr(self, "liquid_volume", None)
+        porosity = getattr(self, "porosity", None)
+
+        has_liquid = liquid is not None and bool(np.any(liquid[:a] > 0.0))
+        has_porosity = porosity is not None and bool(np.any(~np.isnan(porosity[:a])))
+
+        if not (has_liquid or has_porosity):
+            return
+
+        carrying = ", ".join(
+            name for name, flag in (("liquid_volume", has_liquid), ("porosity", has_porosity)) if flag
+        )
+        raise NotImplementedError(
+            "Reconstruction does not carry the intensive granulation state "
+            f"({carrying}) across the resampling step, so enabling it here would "
+            "silently violate solid- and liquid-mass conservation.\n"
+            "Options:\n"
+            "  * run reconstruction only for dry cases (recon_enable=False here), or\n"
+            "  * set solver.recon_allow_granulation_state=True to proceed anyway and "
+            "accept that liquid/porosity/saturation are discarded.\n"
+            "See docs/REFACTORING_FINDINGS.md (F-02) for the required fix."
+        )
+
     def reconstruct(self, method: str = "CAM", reason: str = "", iter_count: Optional[int] = None) -> None:
         method = str(method).upper().strip()
         if method not in ("CAM", "RS", "2PM", "QMX", "4PM", "4PMC"):
             raise NotImplementedError(f"Reconstruction method '{method}' is not implemented in this file.")
-    
+
         a = int(self.a_tot)
         if a <= 0:
             return
-    
+
+        self._assert_reconstruction_is_safe()
+
         dim = int(self.dim)
         Vcomp = np.asarray(self.V_flat[:dim, :a], dtype=float)  # (dim, a)
         Vtot = np.asarray(self.V_flat[-1, :a], dtype=float)
@@ -646,6 +704,7 @@ class ReconstructionMixin:
 
         self.X[:n_new] = self._vol2diam(self.V_flat[-1, :n_new])
         self.a_tot = n_new
+        self._invalidate_particle_array_cache()
 
         # rebuild propensities & samplers
         self._initialize_samplers()

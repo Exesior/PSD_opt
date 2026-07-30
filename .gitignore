@@ -46,3 +46,10 @@ poetry.lock
 *.pptx
 *.svg
 *.mjs
+
+# local virtualenv
+.venv/
+
+# regression fingerprints must be tracked (the repo-wide *.json rule
+# above would otherwise hide them)
+!mcpbe/tests/golden_reference.json

@@ -172,7 +172,32 @@ class BreakageKernel(KernelBase):
             particle size, porosity, saturation, and local stress conditions.
         """
         pass
-    
+
+    def compute_rate_array(self, v_particles: np.ndarray,
+                           solver: Optional[Any] = None) -> np.ndarray:
+        """
+        Compute breakage rates for a whole particle slice.
+
+        The solver calls this once per event, so a Python loop here costs O(n)
+        interpreter overhead per event. Kernels whose rate is a pure function of
+        the particle volume should override this with a vectorised expression;
+        the default implementation simply loops over :meth:`compute_rate` and is
+        therefore always correct, just not fast.
+
+        Args:
+            v_particles: Particle volumes [m³], shape (n,)
+            solver: Reference to solver for accessing state arrays (optional)
+
+        Returns:
+            rates: Breakage rates [1/s], shape (n,)
+        """
+        v = np.asarray(v_particles, dtype=float)
+        out = np.empty(v.shape[0], dtype=float)
+        for i in range(v.shape[0]):
+            out[i] = self.compute_rate(float(v[i]), particle_idx=i, solver=solver)
+        return out
+
+
     def compute_fragment_distribution(self, v_parent: np.ndarray,
                                        n_fragments_target: float,
                                        solver: Optional[Any] = None
