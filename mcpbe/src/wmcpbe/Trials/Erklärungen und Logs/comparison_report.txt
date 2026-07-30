@@ -1,0 +1,198 @@
+PROJECT COMPARISON REPORT
+================================================================================
+
+Generated: 2026-07-15T10:37:08.016613
+
+NEW FILES:
+  + REFACTORING_PROGRESS.md
+  + Trials\Erklärungen und Logs\ARCHITECTURE_EXPLANATION.md
+  + Trials\Erklärungen und Logs\Anweisungen Nucleation klasse.txt
+  + Trials\Erklärungen und Logs\CODE_COMPARISON_ANALYSIS.md
+  + Trials\Erklärungen und Logs\IMPLEMENTATION_CONTEXT.md
+  + Trials\Erklärungen und Logs\KERNEL_LMC_RELATIONSHIP.md
+  + Trials\Erklärungen und Logs\LIQUID_BUG_EXPLAINED.md
+  + Trials\Erklärungen und Logs\LMC_EXPLANATION.md
+  + Trials\Erklärungen und Logs\MINIMAL_CASE_GUIDE.md
+  + Trials\Erklärungen und Logs\README_TESTS.md
+  + Trials\Erklärungen und Logs\VALIDATION_REPORT.md
+  + Trials\Erklärungen und Logs\V_ges_refactoring_phase2.md
+  + Trials\Erklärungen und Logs\analyze_liquid_bug.md
+  + Trials\Erklärungen und Logs\cv_doubling_analysis.md
+  + Trials\Erklärungen und Logs\vc_analysis.md
+  + Trials\Results\liquid_debug_log_20260709_201120.txt
+  + Trials\Results\liquid_debug_log_20260709_201124.txt
+  + Trials\Results\liquid_debug_log_20260709_201300.txt
+  + Trials\Results\liquid_debug_log_20260709_201557.txt
+  + Trials\Results\liquid_debug_log_20260709_201654.txt
+  + Trials\Results\liquid_debug_log_20260709_201739.txt
+  + Trials\Results\liquid_debug_log_20260709_201931.txt
+  + Trials\Results\liquid_log_20260709_202638.txt
+  + Trials\Results\liquid_log_20260709_205721.txt
+  + Trials\Results\liquid_log_20260709_210836.txt
+  + Trials\Results\liquid_log_20260709_210840.txt
+  + Trials\Results\liquid_summary_20260709_202638.txt
+  + Trials\Results\liquid_summary_20260709_205721.txt
+  + Trials\Results\liquid_summary_20260709_210836.txt
+  + Trials\Results\liquid_summary_20260709_210840.txt
+  + Trials\__init__.py
+  + Trials\check_paths.py
+  + Trials\old\CDF_TABLE_ANALYSIS.md
+  + Trials\old\__init__.py
+  + Trials\old\analyze_liquid_bug.py
+  + Trials\old\check_nan_mean.py
+  + Trials\old\debug_breakage.py
+  + Trials\old\debug_breakage_detailed.py
+  + Trials\old\debug_breakage_params.py
+  + Trials\old\debug_breakage_rate.py
+  + Trials\old\debug_breakage_rng.py
+  + Trials\old\debug_cdf_build.py
+  + Trials\old\debug_cdf_sampling.py
+  + Trials\old\debug_cdf_state.py
+  + Trials\old\debug_coleval3.py
+  + Trials\old\debug_do_one_break.py
+  + Trials\old\debug_first_break_event.py
+  + Trials\old\debug_fragments.py
+  + Trials\old\debug_init_phase.py
+  + Trials\old\debug_init_samplers.py
+  + Trials\old\debug_kernel_params.py
+  + Trials\old\debug_liquid_flow.py
+  + Trials\old\debug_nucleation.py
+  + Trials\old\debug_nucleation_detail.py
+  + Trials\old\debug_nucleation_physics.py
+  + Trials\old\debug_rng_consumption.py
+  + Trials\old\debug_rng_difference.py
+  + Trials\old\debug_rng_location.py
+  + Trials\old\debug_simple_rng.py
+  + Trials\old\debug_solve_progress.py
+  + Trials\old\debug_vsolid_loss.py
+  + Trials\old\debug_zero_volume.py
+  + Trials\old\find_method.py
+  + Trials\old\find_vc_bug.py
+  + Trials\old\quick_test.py
+  + Trials\old\reproduce_2003_calls.py
+  + Trials\old\reproduce_fixed.py
+  + Trials\old\simple_trace.py
+  + Trials\old\test_breakage_simple.py
+  + Trials\old\test_compression.py
+  + Trials\old\test_cv_doubling.py
+  + Trials\old\test_dsmc_nucleation.py
+  + Trials\old\test_exact_copy.py
+  + Trials\old\test_fix.py
+  + Trials\old\test_liquid_addition_timing_debug.py
+  + Trials\old\test_liquid_conservation.py
+  + Trials\old\test_liquid_debug_detailed.py
+  + Trials\old\test_liquid_debug_simple.py
+  + Trials\old\test_liquid_logging.py
+  + Trials\old\test_liquid_mc_simple.py
+  + Trials\old\test_liquid_mix_debug.py
+  + Trials\old\test_liquid_volumes.py
+  + Trials\old\test_nucleation.py
+  + Trials\old\test_nucleation_both_modes.py
+  + Trials\old\test_nucleation_debug.py
+  + Trials\old\test_nucleation_timing_cases.py
+  + Trials\old\test_nucleation_unified.py
+  + Trials\old\test_nucleation_uniform_sampling.py
+  + Trials\old\test_simple_breakage.py
+  + Trials\old\test_simple_breakage2.py
+  + Trials\old\test_volume_semantics.py
+  + Trials\old\trace_liquid.py
+  + Trials\old\vc_scaling_check.py
+  + Trials\project_compare.py
+  + Trials\test_all_processes.py
+  + Trials\test_kernel_framework.py
+  + Trials\test_kernel_integration.py
+  + Trials\test_liquid_simple.py
+  + Trials\test_nucleation_debug.py
+  + Trials\validate_kernels_only.py
+  + Trials\validate_old_vs_new.py
+  + Trials\verify_kernel_integration.py
+  + Trials\verify_no_fallback_abuse.py
+  + __pycache__\__init__.cpython-311.pyc
+  + __pycache__\__init__.cpython-313.pyc
+  + __pycache__\fenwick_new.cpython-311.pyc
+  + __pycache__\kernel_integration.cpython-311.pyc
+  + __pycache__\mcpbe.cpython-311.pyc
+  + __pycache__\mcpbe.cpython-313.pyc
+  + __pycache__\mcpbe_agg.cpython-311.pyc
+  + __pycache__\mcpbe_base.cpython-311.pyc
+  + __pycache__\mcpbe_base.cpython-313.pyc
+  + __pycache__\mcpbe_break.cpython-311.pyc
+  + __pycache__\mcpbe_compression.cpython-311.pyc
+  + __pycache__\mcpbe_nucleation.cpython-311.pyc
+  + __pycache__\mcpbe_post.cpython-311.pyc
+  + __pycache__\mcpbe_time_helper.cpython-311.pyc
+  + __pycache__\reconstruction_mixin.cpython-311.pyc
+  + kernel_integration.py
+  + kernels\KERNEL_UEBERSICHT.md
+  + kernels\README.md
+  + kernels\__init__.py
+  + kernels\__pycache__\__init__.cpython-311.pyc
+  + kernels\__pycache__\base.cpython-311.pyc
+  + kernels\aggregation\__init__.py
+  + kernels\aggregation\__pycache__\__init__.cpython-311.pyc
+  + kernels\aggregation\__pycache__\brownian_tsouris1995._beta_brownian_jit-26.py311.1.nbc
+  + kernels\aggregation\__pycache__\brownian_tsouris1995._beta_brownian_jit-26.py311.nbi
+  + kernels\aggregation\__pycache__\brownian_tsouris1995.cpython-311.pyc
+  + kernels\aggregation\__pycache__\constant._beta_constant_jit-19.py311.1.nbc
+  + kernels\aggregation\__pycache__\constant._beta_constant_jit-19.py311.nbi
+  + kernels\aggregation\__pycache__\constant.cpython-311.pyc
+  + kernels\aggregation\__pycache__\jit_kernels.cpython-311.pyc
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_brownian-127.py311.1.nbc
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_brownian-127.py311.nbi
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_constant-227.py311.1.nbc
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_constant-227.py311.nbi
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_shear-54.py311.1.nbc
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_shear-54.py311.nbi
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_sum-197.py311.1.nbc
+  + kernels\aggregation\__pycache__\jit_kernels.rebuild_r_array_sum-197.py311.nbi
+  + kernels\aggregation\__pycache__\liquid_bridge.cpython-311.pyc
+  + kernels\aggregation\__pycache__\shear_chin1998._beta_shear_jit-26.py311.1.nbc
+  + kernels\aggregation\__pycache__\shear_chin1998._beta_shear_jit-26.py311.nbi
+  + kernels\aggregation\__pycache__\shear_chin1998.cpython-311.pyc
+  + kernels\aggregation\__pycache__\sum_kernel._beta_sum_jit-19.py311.1.nbc
+  + kernels\aggregation\__pycache__\sum_kernel._beta_sum_jit-19.py311.nbi
+  + kernels\aggregation\__pycache__\sum_kernel.cpython-311.pyc
+  + kernels\aggregation\brownian_tsouris1995.py
+  + kernels\aggregation\constant.py
+  + kernels\aggregation\jit_kernels.py
+  + kernels\aggregation\liquid_bridge.py
+  + kernels\aggregation\shear_chin1998.py
+  + kernels\aggregation\sum_kernel.py
+  + kernels\base.py
+  + kernels\breakage\__init__.py
+  + kernels\breakage\__pycache__\__init__.cpython-311.pyc
+  + kernels\breakage\__pycache__\power_law.cpython-311.pyc
+  + kernels\breakage\__pycache__\stress_based.cpython-311.pyc
+  + kernels\breakage\power_law.py
+  + kernels\breakage\stress_based.py
+  + kernels\compression\__init__.py
+  + kernels\compression\__pycache__\__init__.cpython-311.pyc
+  + kernels\compression\__pycache__\exponential_decay.cpython-311.pyc
+  + kernels\compression\__pycache__\stress_compaction.cpython-311.pyc
+  + kernels\compression\exponential_decay.py
+  + kernels\compression\stress_compaction.py
+  + kernels\liquid_distribution\__init__.py
+  + kernels\liquid_distribution\__pycache__\__init__.cpython-311.pyc
+  + kernels\liquid_distribution\__pycache__\saturation_preferential.cpython-311.pyc
+  + kernels\liquid_distribution\__pycache__\surface_weighted.cpython-311.pyc
+  + kernels\liquid_distribution\__pycache__\uniform_weighted.cpython-311.pyc
+  + kernels\liquid_distribution\saturation_preferential.py
+  + kernels\liquid_distribution\surface_weighted.py
+  + kernels\liquid_distribution\uniform_weighted.py
+  + kernels\porosity_growth\__init__.py
+  + kernels\porosity_growth\__pycache__\__init__.cpython-311.pyc
+  + kernels\porosity_growth\__pycache__\incomplete_mixing.cpython-311.pyc
+  + kernels\porosity_growth\__pycache__\volume_mixing.cpython-311.pyc
+  + kernels\porosity_growth\incomplete_mixing.py
+  + kernels\porosity_growth\volume_mixing.py
+  + mcpbe_compression.py
+  + mcpbe_nucleation.py
+
+REMOVED FILES:
+
+MODIFIED FILES:
+  ~ mcpbe_agg.py (+170.3%)
+  ~ mcpbe_base.py (+15.9%)
+  ~ mcpbe.py (+1094.4%)
+  ~ mcpbe_break.py (+8.8%)
+  ~ __init__.py (-5.2%)

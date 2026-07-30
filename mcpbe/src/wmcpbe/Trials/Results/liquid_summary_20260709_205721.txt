@@ -1,0 +1,15 @@
+LIQUID VOLUME TEST - SUMMARY
+==================================================
+
+Timestamp: 2026-07-09T21:02:01.606841
+Log: liquid_log_20260709_205721.txt
+
+CORR_BETA: 1.0e-08
+Duration: 2.0 s
+
+Error (added):   -0.1596%
+Error (system):  +9842.1399%
+CV-Doublings:    0
+MC Events:       245
+
+STATUS: ✗ FEHLGESCHLAGEN (+9842.14%)

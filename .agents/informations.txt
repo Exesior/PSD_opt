@@ -1,0 +1,1384 @@
+# WMCPBE Projekt - Detaillierte Architekturbeschreibung für Refactoring
+
+## 1. Physikalischer Hintergrund
+
+Das Projekt simuliert eine **Nassgranulation mittels Monte-Carlo-Simulation** (Weighted DSMC - Direct Simulation Monte Carlo). 
+
+### Prozessbeschreibung:
+1. **Ausgangszustand**: Monodisperse Pulverpartikel in einem Hochleistungsmischer
+2. **Flüssigkeitszugabe**: Flüssigkeit wird in den Mischer gesprüht (Droplet-Größe ~1µm)
+3. **Agglomeration**: Durch Flüssigkeitsbrücken beginnen Partikel zu agglomerieren
+4. **Ziel**: Berechnung der Partikelgrößenverteilung (PSD - Particle Size Distribution) am Ende des Prozesses
+
+### Wichtige physikalische Konzepte:
+
+#### Computational Weight (W) - ZENTRALES KONZEPT:
+- Jedes computational particle repräsentiert W physical particles
+- Formel: `W = N_physical / N_computational`
+- Hohes W = viele physikalische Partikel werden durch ein simulationspartikel repräsentiert
+- W ändert sich während der Simulation (Agglomeration erhöht W, Breakage verringert W)
+
+**KRITISCHE UNTERSCHEIDUNG: n_phys vs n_comp**
+```
+n_comp (computational particles):
+  - Anzahl der Partikel im Simulator (Array-Länge a_tot)
+  - Typisch: 500 - 4000 Partikel (für Performance)
+  - Wird durch Rekonstruktion kontrolliert (recon_N_max)
+
+n_phys (physical particles):
+  - Tatsächliche Anzahl realer Partikel im Experiment
+  - Typisch: 10^6 - 10^12 Partikel
+  - Berechnet aus: n_phys = Sum(W_i) für alle computational particles i
+
+Beispiel:
+  n_comp = 1000 computational particles
+  W = [10, 20, 15, ..., 25] (variiert pro Partikel)
+  n_phys = Sum(W) = 1.5 × 10^7 physical particles
+  
+  Ein computational particle mit W=50 repräsentiert
+  50 identische physikalische Partikel!
+```
+
+#### Partikelintensiv vs. Partikelextensiv - SPEICHERUNG DER EIGENSCHAFTEN:
+
+**WICHTIG FÜR REFACTORING:** Alle Partikeleigenschaften werden **PARTIKELINTENSIV** gespeichert!
+
+Das bedeutet: Eigenschaften gelten PRO PHYSIKALISCHEM PARTIKEL (n_phys), nicht pro computational particle!
+
+```python
+# Intensive Eigenschaften (pro physical particle):
+V_flat[i]           # Volumen EINZELNES physical particle [m³]
+liquid_volume[i]    # Flüssigkeit EINZELNES physical particle [m³]
+porosity[i]         # Porosität EINZELNES physical particle (dimensionslos)
+saturation[i]       # Sättigung EINZELNES physical particle (0-1)
+X[i]                # Durchmesser EINZELNES physical particle [m]
+
+# Extensive Eigenschaften (skalieren mit W):
+# Werden NICHT direkt gespeichert, sondern berechnet:
+V_total_particle_i = W[i] * V_flat[i]     # Gesamtvolumen aller repräsentierten Partikel
+liquid_total_i = W[i] * liquid_volume[i]  # Gesamtflüssigkeit aller repräsentierten Partikel
+```
+
+**Warum ist das wichtig?**
+
+1. **Bei Vc-Verdopplung (DSMC):**
+   ```python
+   # W wird verdoppelt (mehr physical particles repräsentiert)
+   W_new = np.concatenate((W_active, W_active))  # W × 2
+   
+   # ABER: Intensive properties bleiben GLEICH!
+   # Denn jedes physical particle hat immer noch dieselben Eigenschaften
+   liquid_volume[:old_a] = lv_active
+   liquid_volume[old_a:a_tot] = lv_active  # KOPIEREN, nicht skalieren!
+   porosity[:old_a] = por_active
+   porosity[old_a:a_tot] = por_active      # KOPIEREN, nicht skalieren!
+   ```
+
+2. **Bei Agglomeration:**
+   ```python
+   # Zwei computational particles i, j agglomerieren
+   # Jeder repräsentiert W[i] bzw. W[j] physical particles
+   
+   # Child bekommt intensive properties der Eltern (gewichteter Durchschnitt)
+   # liquid_volume[child] = (W[i]*liq[i] + W[j]*liq[j]) / (W[i] + W[j])
+   # POROSITÄT wird über Kernel berechnet (nicht einfach mitteln!)
+   
+   # W[child] = dW (neues Gewicht für merged particles)
+   ```
+
+3. **Bei Breakage:**
+   ```python
+   # Parent bricht in Fragmente
+   # liquid_volume wird proportional zu Volumen verteilt
+   # liquid_volume[frag_k] = liquid_volume[parent] × (V_frag_k / V_parent)
+   # Denn: Flüssigkeit pro physical particle skaliert mit Partikelgröße
+   ```
+
+**Häufige Fehlerquelle beim Refactoring:**
+```python
+# ❌ FALSCH: liquid_volume mit W skalieren
+liquid_volume[i] *= W[i]  # NEIN! liquid_volume ist bereits pro physical particle!
+
+# ✅ RICHTIG: liquid_volume bleibt unverändert bei W-Änderung
+# Nur bei Ereignissen (Agg/Break/Nuc) ändern sich intensive properties
+```
+
+#### Control Volume (Vc):
+- DSMC hält Partikeldichte konstant: `Sum(W) / Vc = constant`
+- Bei Agglomeration: Partikelanzahl ↓ → Vc wird verdoppelt → Partikel werden dupliziert
+- Wichtig für korrekte physikalische Skalierung der Ereignisse
+
+#### Volumen-Semantik (kritisch für Massenerhaltung):
+- `V_flat[:dim]` = V_solid (Feststoffvolumen OHNE Poren)
+- `V_flat[-1]` = V_dry (Gesamtvolumen MIT Poren)
+- Für poröse Partikel: `V_dry = V_solid / (1 - porosity)`
+- Für Vollkörper (keine Porosität): `V_dry = V_solid`
+
+---
+
+## 2. Software-Architektur
+
+### 2.1 Hauptklassen-Hierarchie
+
+```
+MCPBESolver (Hauptsolver)
+├── MCPBEBase (Basis-Klasse via Mehrfachvererbung)
+│   ├── Partikelzustand (V_flat, W, X, liquid_volume, porosity, saturation)
+│   ├── Control Volume Management
+│   ├── Hauptsolve-Loop mit Event-driven Time Stepping
+│   └── KernelManager Integration
+├── MCPBEAgg (Agglomeration-Mixin)
+│   ├── Beta-Kernel-Berechnung (Partikelkollisionsrate)
+│   ├── Partner-Selection (Fenwick Sampler)
+│   └── Agglomerations-Event-Durchführung
+├── MCPBEBreak (Breakage-Mixin)
+│   ├── Breakage-Rate-Berechnung (MLP/JIT/Kernel)
+│   ├── Fragment-Verteilung (CDF-Tabellen, LMC-Adapter)
+│   └── Multi-Fragment-Event-Durchführung
+├── MCPBEPost (Post-Processing-Mixin)
+│   ├── Momentenberechnung (µ(i,j,t))
+│   └── PSD-CDF-Berechnung über Zeit
+├── ReconstructionMixin (Rekonstruktion/Resampling)
+│   ├── CAM (Cell Average Method)
+│   ├── RS (Resampling mit C-1 Korrektur)
+│   ├── 2PM (Two-Point-Methode)
+│   └── QMX (Quantile MiX - hybride Methode)
+└── Handler (Komposition, keine Vererbung)
+    ├── NucleationHandler (Flüssigkeitszugabe)
+    ├── CompressionHandler (Porositätskompression, legacy)
+    └── ContinuousProcessesHandler (Kontinuierliche Prozesse)
+```
+
+### 2.2 Method Resolution Order (MRO)
+
+```python
+MCPBESolver → MCPBEPost → MCPBEBreak → MCPBEAgg → MCPBEBase → ReconstructionMixin
+```
+
+**Warum diese Reihenfolge?**
+- Post-Processing muss zuletzt kommen für Zugriff auf alle States
+- Breakage vor Agglomeration für korrekte Event-Reihenfolge im Mix-Modus
+- Base enthält fundamentale Initialisierung
+
+---
+
+## 3. Dateistruktur
+
+```
+wmcpbe/
+├── mcpbe.py                      # Hauptsolver-Klasse (MCPBESolver)
+├── mcpbe_base.py                 # Basis-Solver mit DSMC-Logik
+├── mcpbe_agg.py                  # Agglomeration-Mixin
+├── mcpbe_break.py                # Breakage-Mixin
+├── mcpbe_post.py                 # Post-Processing-Mixin
+├── reconstruction_mixin.py       # Rekonstruktionsmethoden (CAM, RS, 2PM, QMX)
+├── mcpbe_nucleation.py           # NucleationHandler + Config
+├── mcpbe_compression.py          # CompressionHandler + Config (legacy)
+├── mcpbe_continuous_processes.py # ContinuousProcessesHandler + Config
+├── kernel_integration.py         # KernelManager für modulare Physik
+├── fenwick_new.py                # FenwickSampler für gewichtetes Sampling
+├── mcpbe_time_helper.py          # Zeitmanagement-Helfer
+├── kernels/                      # Modulare Physik-Kernels
+│   ├── aggregation/              # Aggregationskernel (shear, brownian, constant, etc.)
+│   ├── breakage/                 # Breakage-Kernel (power_law, etc.)
+│   ├── porosity_growth/          # Porositätswachstum bei Agglomeration
+│   ├── compression/              # Porositätskompression (legacy)
+│   ├── liquid_distribution/      # Flüssigkeitsverteilung
+│   ├── agglomeration_acceptance/ # Kollisionsakzeptanz (Stokes-Kriterium)
+│   └── continuous_processes/     # Kontinuierliche Prozesse
+├── lmc_adapter.py                # LMC-Adapter für Fragmentverteilung
+└── mlp_breakage_adapter.py       # MLP-Modell für Breakage-Raten
+```
+
+---
+
+## 4. Kernkomponenten im Detail
+
+### 4.1 MCPBEBase - Core Solver
+
+**Verantwortlichkeiten:**
+- Partikelarrays verwalten: `V_flat`, `W`, `X`, `liquid_volume`, `porosity`, `saturation`
+- Control Volume Management mit dynamischem Verdoppeln
+- Hauptsolve-Loop mit Event-driven Time Stepping
+- Capacity Management für Partikelarrays (dynamisches Wachstum)
+- KernelManager initialisieren
+
+**Wichtige Methoden:**
+```python
+_initialize_particles()     # Initialisiert Partikel aus Verteilung oder CDF
+_initialize_samplers()      # Baut FenwickSampler für Agg/Break
+_maybe_double_control_volume()  # DSMC: Vc verdoppeln wenn Partikel < 50%
+_ensure_capacity_for()      # Dynamisches Array-Wachstum
+```
+
+**State Arrays (alle Länge = _cap):**
+- `V_flat[dim+1, _cap]`: Volumina (dim Komponenten + total)
+- `W[_cap]`: Computational Weights
+- `X[_cap]`: Partikeldurchmesser (aus V_total berechnet)
+- `liquid_volume[_cap]`: Flüssigkeitsvolumen pro Partikel [m³]
+- `porosity[_cap]`: Porosität (NaN für Vollkörper)
+- `saturation[_cap]`: Sättigung (0-1, nur für poröse Partikel)
+
+### 4.2 MCPBEAgg - Agglomeration
+
+**Physikalisches Modell:**
+- Partikel kollidieren mit Rate β(i,j) abhängig von Radien r_i, r_j
+- Kollisionseffizienz α(i,j) für 2D-Systeme (4 Komponentenkombinationen)
+- Effektive Rate: `β_eff = β × α`
+
+**Algorithmus:**
+1. Wähle Partikel i proportional zu Propensität r_i = Σⱼ Wⱼ×β(i,j)
+2. Wähle Partner j proportional zu Wⱼ (gewichtetes Sampling)
+3. Berechne β(i,j) via Kernel
+4. Akzeptanzprüfung (SIZEEVAL, Stokes-Kriterium via Kernel)
+5. Erzeuge neues Partikel mit dW Gewicht
+6. Reduziere Eltern-Gewichte um dW
+7. Rebuild Propensities (O(n²) via JIT oder Kernel)
+
+**Wichtige Methoden:**
+```python
+_beta(i, j)                    # Berechnet β(i,j) via Kernel
+_rebuild_all_propensities()    # Neuberechne alle r_i (parallel via JIT)
+_do_one_agg()                  # Führt ein Agglomerationsereignis durch
+_pick_partner_kernel()         # Wählt Partner j gewichtet nach W
+```
+
+**JIT-optimierte Kernel:**
+- `rebuild_r_array_shear()`: Scherungsgetriebene Agglomeration
+- `rebuild_r_array_brownian()`: Brownsche Bewegung
+- `rebuild_r_array_constant()`: Konstanter Kernel
+- `rebuild_r_array_sum()`: Summenkernel
+
+### 4.3 MCPBEBreak - Breakage
+
+**Physikalisches Modell:**
+- Breakage-Rate S(V) abhängig von Partikelvolumen
+- Fragmentverteilung aus CDF-Tabellen oder LMC (Lattice Monte Carlo)
+
+**Fragmentverteilungs-Methoden:**
+1. **Precomputed Tables**: Tabelle/Rank/Copula/Flow-Adapter
+2. **Live LMC**: Echtzeit-Fragmentgenerierung
+3. **Analytisch**: Stepwise Splitting aus Beta-Funktion
+
+**Algorithmus:**
+1. Wähle Partikel k proportional zu Propensität W_k × S_k
+2. Bestimme Fragmentanzahl n (stochastisches Runden von E[n])
+3. Generiere n Fragmente via CDF-Sampling
+4. Erzeuge neue Partikel für Fragmente (jeweils Gewicht dW)
+5. Reduziere Elterngewicht um dW
+6. Update Breakage/Agg Samplers
+
+**Wichtige Methoden:**
+```python
+_calc_break_rates_full()       # Berechnet alle Breakage-Raten
+_break_rate_single(i)          # Einzelne Breakage-Rate
+_build_break_function()        # Baut CDF-Tabellen für Fragmente
+_produce_one_frag_from_remaining()  # Sampling eines Fragments
+_do_one_break()                # Führt ein Breakage-Ereignis durch
+```
+
+**LMC-Adapter:**
+- `LMCTableAdapter`: Marginaltabellen
+- `LMCRankAdapter`: Rank-basierte Tabellen
+- `LMCCopulaAdapter`: Copula-basierte Korrelationen
+- `LMCFlowAdapter`: Flow-basierte Modelle
+- `LMCLiveAdapter`: Live-LMC-Simulator
+
+### 4.4 NucleationHandler - Flüssigkeitszugabe
+
+**Physikalisches Modell:**
+- Flüssigkeit wird als diskrete Tropfen (Droplets) zugegeben
+- Alle Partikel haben gleiche Kollisionswahrscheinlichkeit (uniform sampling by weight W)
+- DSMC-Skalierung: `physical_droplets = (Vc_ref / Vc) × W_selected`
+
+**Duration-Spezifikation (mutually exclusive):**
+- **Option A**: Direkte Duration via `liquid_addition_duration` [s]
+- **Option B**: Berechnet aus `target_wt_percent + solid_mass_in_mixer + densities`
+  - Formel: `duration = (solid_mass × wt%/100 / rho_liquid) / flow_rate`
+
+**DSMC-Skalierung (kritisch!):**
+```
+Computational Weight (W):
+  W = N_physical / N_computational
+  Beispiel: W=50 bedeutet 50 physikalische Partikel pro computational particle
+
+Droplet distribution:
+  droplet_comp = 1 (ein computational event)
+  droplet_phys = (Vc_ref / Vc) × W_selected
+  
+Beispiel: Vc_ref=1e-6 m³, Vc=2e-6 m³, W=50
+  → Physical droplets = (1e-6/2e-6) × 50 = 25 droplets
+```
+
+**Wichtige Methoden:**
+```python
+step(current_time, dt_event)        # Ein Nucleation-Schritt
+_distribute_liquid_volume()         # Verteilt Flüssigkeit als Droplets
+_select_particle_uniform_physical() # Wählt Partikel uniform nach phys. Count
+_ensure_samplers()                  # Baut FenwickSampler für W-gewichtetes Sampling
+```
+
+**Statistiken:**
+- `_droplets_added_total`: Gesamte physikalische Droplets (weighted sum)
+- `_liquid_volume_added_total`: Gesamtes Flüssigkeitsvolumen [m³]
+- `_liquid_remainder`: Akkumulierter Rest für nächste Iteration (Massenerhaltung!)
+
+### 4.5 ContinuousProcessesHandler - Kontinuierliche Prozesse
+
+**Prozesse:**
+1. **Liquid Internalization** (Braumann et al. 2007):
+   - Kapillar-getriebenes Eindringen von Flüssigkeit in Poren
+   - Gleichung: `dl_intern/dt = k × l_ex × (v_pore - l_intern)`
+   
+2. **Porosity Compression**:
+   - Exponentieller Porositätszerfall unter Scherkräften
+   - Gleichung: `ε(t) = ε_min + (ε_0 - ε_min) × exp(-rate × t)`
+
+**Prozessreihenfolge pro Zeitschritt:**
+1. Liquid Internalization updaten (Sättigung ändern)
+2. Porosity Compression anwenden (Porenvolumen reduzieren)
+3. Überschüssige Flüssigkeit externalisieren wenn S > 1
+
+**Wichtige Methoden:**
+```python
+step(current_time, dt_event)     # Ein Schritt kontinuierlicher Prozesse
+_apply_internalization(dt)       # Wendet Internalisierung an
+_apply_compression(dt)           # Wendet Kompression an
+```
+
+### 4.6 ReconstructionMixin - Rekonstruktion/Resampling
+
+**Zweck:**
+- Reduziere Partikelanzahl wenn zu groß (> recon_N_max)
+- Erhalte statistische Momente (M0, M1, M2)
+- Vermeide numerische Diffusion der PSD
+
+**Methoden:**
+
+#### CAM (Cell Average Method):
+- Baue Grid in Komponenten-Volumenraum
+- Berechne Mittelwert pro Zelle (gewichtet nach W)
+- Verteile Zellmasse auf benachbarte Pivot-Punkte (linear/bilinear)
+
+#### RS (Resampling mit C-1 Korrektur):
+- Bucket Partikel nach CAM-Zellen
+- Resample pro Zelle nach M0-Proportion
+- Two-weight correction für M1-Erhaltung (1D/2D)
+
+#### 2PM (Two-Point-Methode):
+- Pro Zelle: zwei Repräsentanten bei x₁ = mean - σ, x₂ = mean + σ
+- Gewichte w₁ = w₂ = M0/2
+- Erhält M0, M1, M2 exakt
+
+#### QMX (Quantile MiX - hybrid):
+- Partitioniere Partikel nach Vtot-Quantilen (small/mid/tail)
+- Wende unterschiedliche Methoden pro Partition an:
+  - Small: 2PM (gut für kleine Partikel)
+  - Mid: RS (effizient, gute Genauigkeit)
+  - Tail: CAM (erhält Tail-Struktur)
+
+**Wichtige Methoden:**
+```python
+maybe_reconstruct(iter_count)    # Prüft ob Rekonstruktion nötig
+reconstruct(method="CAM")        # Führt Rekonstruktion durch
+_kernel_cam()/RS()/2pm()/qmx()   # Kernel-spezifische Logik
+```
+
+---
+
+## 5. Kernel Framework (modulare Physik)
+
+### 5.1 KernelManager
+
+**Zweck:**
+- Zentrale Verwaltung aller Physik-Kernels
+- Ermöglicht Austausch von Physikmodellen ohne Codeänderung
+- Delegiert Berechnungen an spezifische Kernel-Implementierungen
+
+**Kernel-Typen:**
+```python
+agg_kernel                     # Aggregationsrate β(r1, r2)
+break_kernel                   # Breakage-Rate S(V)
+porosity_growth_kernel         # Porosität bei Agglomeration
+compression_kernel             # Porositätskompression (legacy)
+liquid_dist_kernel             # Partikelauswahl für Flüssigkeit
+agglomeration_acceptance_kernel # Kollisionsakzeptanz (Stokes)
+porosity_compression_kernel    # Kontinuierliche Kompression
+liquid_internalization_kernel  # Kontinuierliche Internalisierung
+liq_internalisation_agglomeration_kernel # Internalisierung bei Agglomeration
+```
+
+### 5.2 Kernel-Initialisierung
+
+```python
+solver = MCPBESolver(
+    agg_kernel_name='shear_chin1998',
+    agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+    break_kernel_name='power_law',
+    break_kernel_params={'p1': 3e-2, 'pl_v': 2.0},
+    porosity_growth_kernel_name='volume_mixing',
+    liquid_internalization_kernel_name='braumann2007',
+    liquid_internalization_kernel_params={'k_int': 1e12},
+)
+```
+
+### 5.3 Verfügbare Kernel (Beispiele)
+
+**Aggregation:**
+- `shear_chin1998`: Scherungsgetrieben (Chin et al. 1998)
+- `brownian_tsouris1995`: Brownsche Bewegung
+- `constant`: Konstanter Kernel
+- `sum`: Summenkernel (r1 + r2)
+- `liquid_bridge`: Flüssigkeitsbrücken-modelliert
+
+**Breakage:**
+- `power_law`: Potenzgesetz-basiert
+- `mlp_model`: MLP-neuronales Netz
+
+**Porosity Growth:**
+- `volume_mixing`: Einfache Volumenmittelung
+- `incomplete_mixing`: Unvollständige Mischung
+- `cone_model`: Kegelmodell für Porenkollaps
+
+---
+
+## 6. FenwickSampler - Effizientes gewichtetes Sampling
+
+**Zweck:**
+- O(log n) Sampling nach Gewichten W
+- O(log n) Updates bei Gewichtsänderung
+- Kritisch für Performance bei vielen Partikeln (>10.000)
+
+**API:**
+```python
+sampler = FenwickSampler(weights)
+idx = sampler.sample(rng)           # Sample Index nach weights
+sampler.update(idx, new_weight)     # Update einzelnes Gewicht O(log n)
+sampler.append(weight)              # Neues Element hinzufügen
+sampler.remove(idx)                 # Element entfernen (swap-with-last)
+total = sampler.total()             # Summe aller Gewichte
+```
+
+**Implementierung:**
+- Binary Indexed Tree (Fenwick Tree)
+- Numba-JIT für Performance
+- Prefix-Sum-Suche für Sampling
+
+---
+
+## 7. Wichtige physikalische Invarianten
+
+### 7.1 Massenerhaltung
+
+**Bei Agglomeration:**
+```python
+# V_flat[:dim] = V_solid (CONSTANT!)
+V_solid_merged = V_solid_i + V_solid_j  # Masse erhalten!
+
+# V_flat[-1] = V_dry (ändert sich mit Porosität)
+V_dry_merged = V_solid_merged / (1 - porosity_merged)
+```
+
+**Bei Breakage:**
+```python
+# Fragment-Volumina summieren zu Parent-Volumen
+sum(V_frag) = V_parent
+
+# liquid_volume wird proportional verteilt
+liquid_frag = liquid_parent × (V_frag / V_parent)
+```
+
+**Bei Nucleation:**
+```python
+# Total liquid added = flow_rate × duration
+# Keine systematischen Verluste durch _liquid_remainder
+```
+
+### 7.2 Intensive vs. extensive Eigenschaften
+
+Siehe auch **Abschnitt 1: Partikelintensiv vs. Partikelextensiv** für detaillierte Erklärung.
+
+**Kurzfassung:**
+
+| Eigenschaft | Typ | Verhalten bei Vc-Verdopplung |
+|-------------|-----|------------------------------|
+| `W` | Extensiv | Wird verdoppelt (×2) |
+| `V_flat` | Intensiv | Bleibt gleich (pro physical particle) |
+| `liquid_volume` | Intensiv | Bleibt gleich (pro physical particle) |
+| `porosity` | Intensiv | Bleibt gleich |
+| `saturation` | Intensiv | Bleibt gleich |
+| `X` | Intensiv | Bleibt gleich |
+
+**Vc-Verdopplung Code:**
+```python
+# W wird verdoppelt (repräsentiert mehr physical particles)
+W_new = np.concatenate((W_active, W_active))
+
+# Intensive properties werden KOPIERT (nicht skaliert!)
+liquid_volume[:old_a] = lv_active
+liquid_volume[old_a:a_tot] = lv_active  # Gleiche Werte!
+```
+
+---
+
+## 8. Refactoring-Anforderungen
+
+### 8.1 Plausibilitätsprüfung
+
+Beim Refactoring MUSS folgende Plausibilitätsprüfung implementiert werden:
+
+**Vor jeder Änderung:**
+1. **Massenerhaltung prüfen:**
+   - `sum(W × V_solid)` vor/nach Operation vergleichen
+   - Toleranz: < 0.1% relative Abweichung
+   
+2. **Liquid Conservation prüfen:**
+   - `sum(W × liquid_volume)` vor/nach Operation
+   - Besonders kritisch bei Nucleation und Breakage
+
+3. **Bounds-Checks:**
+   - `W > 0` für alle aktiven Partikel
+   - `0 <= porosity < 1` (oder NaN für Vollkörper)
+   - `0 <= saturation <= 1` (für poröse Partikel)
+   - `V_flat > 0` für alle Volumina
+
+4. **DSMC-Invarianten:**
+   - `Sum(W) / Vc ≈ constant` (Partikeldichte erhalten)
+   - Nach Vc-Verdopplung: `Sum(W)_new ≈ 2 × Sum(W)_old`
+
+**Nach jeder Änderung:**
+1. **Array-Konsistenz:**
+   - Alle Arrays gleiche Länge (_cap)
+   - `a_tot <= _cap`
+   - Indizes im gültigen Bereich
+
+2. **Sampler-Konsistenz:**
+   - `FenwickSampler.total() ≈ sum(W[:a_tot])`
+   - Alle Gewichte nicht-negativ
+
+3. **Zeitentwicklung:**
+   - `t_vec` monoton steigend
+   - `dt_event > 0` für alle Events
+
+### 8.2 Dokumentation der Änderungen
+
+Jede Änderung MUSS dokumentiert werden mit:
+
+1. **Betroffene Dateien:**
+   ```markdown
+   - wmcpbe/mcpbe_agg.py: Zeilen 150-200
+   - wmcpbe/kernel_integration.py: Zeilen 50-75
+   ```
+
+2. **Art der Änderung:**
+   - [ ] Bugfix
+   - [ ] Performance-Optimierung
+   - [ ] Neue Feature
+   - [ ] Refactoring (ohne Funktionsänderung)
+   - [ ] Dokumentation
+
+3. **Physikalische Auswirkung:**
+   - Welche Gleichung/Formel wurde geändert?
+   - Referenz zu Literatur/Quelle
+
+4. **Tests:**
+   - [ ] Unit-Tests aktualisiert
+   - [ ] Plausibilitätsprüfung bestanden
+   - [ ] Vergleich mit Referenzsimulation
+
+5. **Versionierung:**
+   - Commit-Message im Format: `[TYPE] kurze Beschreibung`
+   - Beispiel: `[REFACTOR] MCPBEAgg: Beta-Berechnung auf Kernel delegieren`
+
+---
+
+## 9. Bekannte Probleme und technische Schulden
+
+### 9.1 Inkonsistente Volumen-Semantik
+
+**Problem:**
+- Legacy-Code behandelt `V_flat[:dim]` teilweise als V_dry, teilweise als V_solid
+- Führt zu Massenerhaltungsproblemen bei porösen Partikeln
+
+**Lösung im Refactoring:**
+- Explizite Benennung: `V_solid` vs `V_dry`
+- Helper-Methoden: `get_V_solid(i)`, `get_V_dry(i)`
+- Strikte Validierung bei Initialisierung
+
+### 9.2 Performance-Engpässe
+
+**Kritische Stellen:**
+1. `_rebuild_all_propensities()`: O(n²) für große Partikelanzahlen
+   - Lösung: Kernel-basierte JIT-Batch-Funktionen nutzen
+   
+2. `_pick_partner_kernel()`: Python-Loop für nicht-standard Kernel
+   - Lösung: Numba-JIT auch für custom Kernel
+
+3. FenwickSampler-Updates bei jedem Event
+   - Lösung: Incremental updates (_pending_weight_updates)
+
+### 9.3 Testabdeckung
+
+**Fehlende Tests:**
+- Nucleation mit variabler Vc
+- Breakage mit LMC-Adaptern
+- Rekonstruktion (CAM/RS/QMX) Grenzfälle
+- Continuous Processes mit allen Kerneln
+
+---
+
+## 10. Empfohlene Refactoring-Schritte
+
+### Phase 1: Vorbereitung
+1. [ ] Umfassende Test-Suite erstellen
+2. [ ] Referenzsimulationen speichern
+3. [ ] Plausibilitätsprüfungen implementieren
+
+### Phase 2: Volumen-Semantik klären
+1. [ ] Helper-Methoden für V_solid/V_dry einführen
+2. [ ] Alle Stellen identifizieren wo V_flat verwendet wird
+3. [ ] Konsistente Semantik durchsetzen
+
+### Phase 3: Kernel Framework konsolidieren
+1. [ ] Alle Physics-Berechnungen auf Kernel delegieren
+2. [ ] Legacy-Code (COLEVAL, BREAKRVAL) entfernen
+3. [ ] Kernel-API vereinheitlichen
+
+### Phase 4: Performance-Optimierung
+1. [ ] Numba-JIT für kritische Loops
+2. [ ] Incremental Sampler-Updates
+3. [ ] Memory-Layout optimieren (SoA vs AoS)
+
+### Phase 5: Dokumentation und Tests
+1. [ ] Docstrings aktualisieren
+2. [ ] Unit-Tests für alle Kernel
+3. [ ] Integrationstests für Gesamtsystem
+
+---
+
+## 11. Wichtige Konstanten und Default-Werte
+
+```python
+# Agglomeration
+CORR_BETA = 1e-3          # Agglomerationsrate
+G = 1000                  # Scherrate [1/s]
+alpha_prim = 1.0          # Kollisionseffizienz (1D)
+alpha_prim = [1,1,1,1]    # Kollisionseffizienz (2D, 4 Kombinationen)
+
+# Breakage
+pl_P1 = 3e-2              # Breakage-Rate Parameter
+pl_v = 2.0                # Breakage-Funktion Exponent
+pl_q = 1.0                # Breakage-Funktion Exponent
+
+# Nucleation
+batch_size = 25.0         # Computational weight per Droplet-Event
+consistency_tol = 0.001   # 0.1% Toleranz für Parameter-Checks
+
+# Compression
+compression_rate = 0.02   # 1/s
+min_porosity = 0.3        # Minimale Porosität
+
+# Liquid Internalization
+k_int = 1e12              # 1/(m³·s)
+
+# Reconstruction
+recon_N_max = 4000        # Trigger bei >4000 Partikeln
+recon_bins = 500          # Bins pro Dimension für CAM
+recon_RS_target = 2000    # Zielpartikelanzahl nach RS
+
+# DSMC
+maybe_double_control_volume = False  # Vc-Verdopplung deaktivierbar
+```
+
+---
+
+## 12. Glossar
+
+| Begriff | Bedeutung |
+|---------|-----------|
+| DSMC | Direct Simulation Monte Carlo |
+| PBE | Population Balance Equation |
+| PSD | Particle Size Distribution |
+| Vc | Control Volume |
+| W | Computational Weight (N_physical / N_computational) |
+| n_comp | Anzahl computational particles (Simulator) |
+| n_phys | Anzahl physical particles (real, = Sum(W)) |
+| V_solid | Feststoffvolumen (ohne Poren) |
+| V_dry | Gesamtvolumen (mit Poren) |
+| V_pore | Porenvolumen |
+| Intensive Eigenschaft | Pro physical particle (z.B. porosity, liquid_volume) |
+| Extensive Eigenschaft | Skaliert mit W (z.B. Gesamtmasse = W × V_solid) |
+| Saturation (S) | V_liq_intern / V_pore |
+| LMC | Lattice Monte Carlo (Fragmentverteilung) |
+| CAM | Cell Average Method (Rekonstruktion) |
+| RS | Resampling (Rekonstruktion) |
+| 2PM | Two-Point Method (Rekonstruktion) |
+| QMX | Quantile MiX (hybride Rekonstruktion) |
+| Fenwick Tree | Binary Indexed Tree für effizientes Sampling |
+
+---
+
+## 13. Kontakt und Ressourcen
+
+- **Projekt-Root**: `C:\Users\ericb\Documents\GitHub\PSD_opt\`
+- **Hauptcode**: `C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe\`
+- **Eintrittspunkt**: `mcpbe.py` (MCPBESolver Klasse)
+- **Konfiguration**: `config/MCPBE_config.py` (falls vorhanden)
+
+---
+
+## 14. Entwicklungsumgebung (Windows-spezifisch)
+
+### 14.1 Systemanforderungen
+
+**Betriebssystem:**
+- Windows 10/11 (64-bit)
+- PowerShell 5.1+ oder Windows Terminal empfohlen
+- Administrator-Rechte für Package-Installationen
+
+**Hardware-Empfehlungen:**
+- CPU: 8+ Kerne für parallele JIT-Kompilierung (Numba)
+- RAM: 16GB+ für große Simulationen (>10.000 Partikel)
+- SSD: Für schnelle I/O bei großen LMC-Tabellen
+
+### 14.2 Python-Umgebung
+
+**Unterstützte Python-Versionen:**
+```toml
+# Aus pyproject.toml
+python = ">=3.9,<3.12"
+```
+
+**Empfohlene Version:** Python 3.10 oder 3.11
+
+**Installation auf Windows:**
+```powershell
+# 1. Python von python.org installieren (nicht Microsoft Store!)
+#    https://www.python.org/downloads/
+#    ☑️ "Add Python to PATH" aktivieren
+
+# 2. Poetry installieren (Package Manager)
+pip install poetry
+
+# 3. Virtuelle Umgebung erstellen und aktivieren
+cd C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe
+poetry install
+poetry shell
+
+# Alternative mit venv:
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+### 14.3 IDE und Editor-Empfehlungen
+
+**Visual Studio Code (empfohlen):**
+```json
+// settings.json für Python-Entwicklung
+{
+    "python.defaultInterpreterPath": "C:\\Users\\ericb\\Documents\\GitHub\\PSD_opt\\mcpbe\\.venv\\Scripts\\python.exe",
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "python.formatting.provider": "black",
+    "editor.formatOnSave": true,
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        ".venv": true
+    }
+}
+```
+
+**Empfohlene VS Code Extensions:**
+- Python (Microsoft)
+- Pylance
+- Black Formatter
+- isort
+- GitLens
+
+**PyCharm (Alternative):**
+- Interpreter auf Poetry-Virtualenv setzen
+- Type Checker: mypy aktivieren
+
+### 14.4 Windows-spezifische Herausforderungen
+
+**Pfad-Längen-Begrenzung:**
+- Windows hat 260-Zeichen-Pfadlimit
+- Lösung: Registry-Key setzen oder LongPathsEnable
+```powershell
+# Als Administrator in PowerShell:
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+    -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+```
+
+**Numba JIT auf Windows:**
+- Erste Ausführung langsam (JIT-Kompilierung)
+- Cache in `%USERPROFILE%\.numba` wird automatisch erstellt
+- Bei Problemen: Cache leeren
+```powershell
+Remove-Item -Recurse -Force $env:USERPROFILE\.numba\cache
+```
+
+**Dateisystem-Case-Sensitivity:**
+- Windows ist case-insensitive (im Gegensatz zu Linux)
+- Import-Pfade sollten exakt mit Dateinamen übereinstimmen
+- Beispiel: `from wmcpbe.kernels.aggregation import ...` (kleingeschrieben)
+
+---
+
+## 15. Build-System und Dependencies
+
+### 15.1 Poetry-Konfiguration (pyproject.toml)
+
+```toml
+[tool.poetry]
+name = "mcpbe"
+version = "0.7.0"
+description = "Monte Carlo Population Balance Equation solvers"
+authors = ["HR94 <haoran.ji@kit.edu>"]
+license = "GPL-3.0-only"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.12"
+numpy = "^2.3.5"
+numba = "^0.63.1"
+scipy = "^1.16.3"
+matplotlib = "^3.10.8"
+pbe-core = "^0.7"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+```
+
+### 15.2 Wichtige Dependencies
+
+| Package | Version | Zweck |
+|---------|---------|-------|
+| numpy | ^2.3.5 | Array-Operationen, lineare Algebra |
+| numba | ^0.63.1 | JIT-Kompilierung für Performance |
+| scipy | ^1.16.3 | Wissenschaftliche Funktionen, Integration |
+| matplotlib | ^3.10.8 | Plotting, Visualisierung |
+| pbe-core | ^0.7 | Gemeinsame Basis-Klassen, JIT-Helfer |
+
+### 15.3 Externe Abhängigkeit: pbe-core
+
+**pbe-core** ist ein separates Package das bereitstellt:
+- `BaseSolver`: Basis-Klasse für alle PBE-Solver
+- `jit_mcpbe`: Numba-JIT-Funktionen für Fenwick-Tree, CDF-Tables
+- `func`: Mathematische Hilfsfunktionen
+
+**Installation:**
+```toml
+# In pyproject.toml
+pbe-core = "^0.7"
+
+# Oder direkt von Git (für Entwicklung)
+pbe-core = { git = "https://github.com/.../pbe-core.git", branch = "main" }
+```
+
+**Wichtige Funktionen aus pbe-core:**
+```python
+from pbe_core.func.jit_mcpbe import (
+    nb_fenwick_add,
+    nb_fenwick_build,
+    nb_fenwick_update,
+    nb_fenwick_append_arrays,
+    nb_fenwick_remove_swap_last,
+    nb_fenwick_prefix_sum_1based,
+    _build_table_1d_jit,
+    _build_tables_2d_jit,
+)
+```
+
+### 15.4 Build-Befehle
+
+```powershell
+# Package installieren (Development Mode)
+cd C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe
+poetry install
+
+# Package bauen
+poetry build
+
+# Tests ausführen
+poetry run pytest tests/
+
+# Linting
+poetry run pylint wmcpbe/
+
+# Formatierung
+poetry run black wmcpbe/
+poetry run isort wmcpbe/
+```
+
+---
+
+## 16. Projektstruktur im Monorepo
+
+### 16.1 Gesamtstruktur
+
+```
+PSD_opt/
+├── .agents/
+│   └── informations.txt          # Diese Architekturdokumentation
+├── mcpbe/                         # Hauptpackage (dieses Dokument)
+│   ├── pyproject.toml
+│   ├── README.md
+│   ├── src/
+│   │   ├── mcpbe/                # Standard MC-PBE Solver
+│   │   ├── wmcpbe/               # Weighted MC-PBE Solver (Hauptfokus)
+│   │   └── wmcpbe_granulation/   # Granulation-spezifische Erweiterungen
+│   └── tests/
+├── pbe-core/                      # Gemeinsame Basis (separates Package)
+│   ├── base/
+│   │   └── base_solver.py        # BaseSolver Klasse
+│   ├── func/
+│   │   └── jit_mcpbe.py          # JIT-Helferfunktionen
+│   └── kernels/                   # Gemeinsame Kernel-Basen
+└── simulations/                   # Simulationsdaten, Ergebnisse
+    ├── config/
+    ├── results/
+    └── scripts/
+```
+
+### 16.2 Package-Struktur (wmcpbe)
+
+```
+wmcpbe/
+├── __init__.py                   # Exportiert MCPBESolver
+├── mcpbe.py                      # Hauptsolver (MCPBESolver Klasse)
+├── mcpbe_base.py                 # Basis-Logik (DSMC, Partikelarrays)
+├── mcpbe_agg.py                  # Agglomeration-Mixin
+├── mcpbe_break.py                # Breakage-Mixin
+├── mcpbe_post.py                 # Post-Processing-Mixin
+├── reconstruction_mixin.py       # Rekonstruktionsmethoden
+├── mcpbe_nucleation.py           # NucleationHandler
+├── mcpbe_compression.py          # CompressionHandler (legacy)
+├── mcpbe_continuous_processes.py # ContinuousProcessesHandler
+├── kernel_integration.py         # KernelManager
+├── fenwick_new.py                # FenwickSampler
+├── mcpbe_time_helper.py          # Zeitmanagement
+├── lmc_adapter.py                # LMC-Adapter
+├── mlp_breakage_adapter.py       # MLP Breakage Model
+└── kernels/                      # Modulare Physik-Kernels
+    ├── __init__.py
+    ├── aggregation/
+    │   ├── __init__.py
+    │   ├── jit_kernels.py        # JIT-batch Funktionen
+    │   ├── shear_chin1998.py
+    │   ├── brownian_tsouris1995.py
+    │   ├── constant.py
+    │   ├── sum.py
+    │   └── liquid_bridge.py
+    ├── breakage/
+    │   ├── __init__.py
+    │   └── power_law.py
+    ├── porosity_growth/
+    │   ├── __init__.py
+    │   ├── volume_mixing.py
+    │   ├── incomplete_mixing.py
+    │   └── cone_model.py
+    ├── compression/
+    │   └── __init__.py
+    ├── liquid_distribution/
+    │   └── __init__.py
+    ├── agglomeration_acceptance/
+    │   └── __init__.py
+    └── continuous_processes/
+        └── __init__.py
+```
+
+---
+
+## 17. Test-Infrastruktur
+
+### 17.1 Test-Organisation
+
+**Empfohlene Struktur:**
+```
+tests/
+├── __init__.py
+├── conftest.py                   # Pytest Fixtures
+├── test_mcpbe_base.py            # Tests für Basis-Solver
+├── test_mcpbe_agg.py             # Agglomeration-Tests
+├── test_mcpbe_break.py           # Breakage-Tests
+├── test_nucleation.py            # Nucleation-Tests
+├── test_reconstruction.py        # CAM/RS/QMX Tests
+├── test_kernels/                 # Kernel-spezifische Tests
+│   ├── test_aggregation.py
+│   ├── test_breakage.py
+│   └── test_porosity_growth.py
+└── test_integration/             # Integrationstests
+    └── test_full_simulation.py
+```
+
+### 17.2 Test-Typen
+
+**Unit-Tests:**
+- Einzelne Methoden/Funktionen
+- Mocking von Dependencies
+- Schnelle Ausführung (<1s pro Test)
+
+**Integration-Tests:**
+- Ganze Solver-Pipeline
+- Realistische Parameter
+- Längere Ausführung (10-60s)
+
+**Plausibilitätstests:**
+- Massenerhaltung prüfen
+- Energiebilanz prüfen
+- Bounds-Checks
+
+### 17.3 Pytest-Fixtures (Beispiel)
+
+```python
+# tests/conftest.py
+import pytest
+import numpy as np
+from wmcpbe import MCPBESolver
+
+@pytest.fixture
+def solver_1d():
+    """1D Solver für Standardtests."""
+    return MCPBESolver(
+        dim=1,
+        t_total=100,
+        t_write=10,
+        agg_kernel_name='constant',
+        agg_kernel_params={'corr_beta': 1e-3},
+        init=True
+    )
+
+@pytest.fixture
+def solver_2d():
+    """2D Solver für Mehrkomponenten-Tests."""
+    return MCPBESolver(
+        dim=2,
+        t_total=100,
+        t_write=10,
+        agg_kernel_name='shear_chin1998',
+        agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+        init=True
+    )
+
+@pytest.fixture
+def sample_particles():
+    """Test-Partikel mit bekannten Eigenschaften."""
+    return {
+        'V_flat': np.array([[1e-18], [1e-18]]),
+        'W': np.array([10.0]),
+        'porosity': np.array([0.4]),
+        'saturation': np.array([0.5]),
+    }
+```
+
+### 17.4 Plausibilitätsprüfungen als Tests
+
+```python
+# tests/test_plausibility.py
+import numpy as np
+
+def test_mass_conservation_after_agglomeration(solver_1d):
+    """Prüfe Massenerhaltung nach Agglomerations-Event."""
+    # Initial state
+    V_solid_before = np.sum(solver_1d.W[:solver_1d.a_tot] * 
+                            solver_1d.V_flat[0, :solver_1d.a_tot])
+    
+    # Execute one agglomeration event
+    solver_1d._do_one_agg()
+    
+    # Final state
+    V_solid_after = np.sum(solver_1d.W[:solver_1d.a_tot] * 
+                           solver_1d.V_flat[0, :solver_1d.a_tot])
+    
+    # Check conservation (tolerance 0.1%)
+    rel_diff = abs(V_solid_after - V_solid_before) / V_solid_before
+    assert rel_diff < 0.001, f"Mass not conserved: {rel_diff*100:.3f}% change"
+
+def test_weights_positive(solver_1d):
+    """Alle Gewichte müssen positiv sein."""
+    assert np.all(solver_1d.W[:solver_1d.a_tot] > 0), "Negative weights found"
+
+def test_porosity_bounds(solver_1d):
+    """Porosität muss in [0, 1) oder NaN sein."""
+    poro = solver_1d.porosity[:solver_1d.a_tot]
+    valid = np.isnan(poro) | ((poro >= 0) & (poro < 1))
+    assert np.all(valid), "Porosity out of bounds"
+```
+
+---
+
+## 18. Performance-Überlegungen
+
+### 18.1 Kritische Performance-Stellen
+
+| Operation | Komplexität | Optimierung |
+|-----------|-------------|-------------|
+| `_rebuild_all_propensities()` | O(n²) | JIT-Batch-Funktionen |
+| `_pick_partner_kernel()` | O(n) | Fenwick-Sampling O(log n) |
+| `_calc_break_rates_full()` | O(n) | Vektorisierung |
+| `_ensure_samplers()` | O(n) | Incremental Updates |
+| `_distribute_liquid_volume()` | O(droplets) | Batch-Verteilung |
+
+### 18.2 Numba-JIT Optimierung
+
+**Best Practices:**
+```python
+from numba import njit, prange
+
+# Parallel für große Arrays
+@njit(parallel=True, cache=True)
+def rebuild_r_array_parallel(W, R, beta_params):
+    n = len(W)
+    r = np.zeros(n)
+    for i in prange(n):  # Parallel loop
+        ri = 0.0
+        for j in range(n):
+            ri += W[j] * compute_beta(R[i], R[j], beta_params)
+        r[i] = ri
+    return r
+
+# Cache für wiederholte Aufrufe
+@njit(cache=True)
+def compute_beta(r1, r2, params):
+    # Wird beim ersten Aufruf kompiliert, dann gecached
+    return params['corr_beta'] * (r1 + r2)**3
+```
+
+**Windows-spezifisch:**
+- NUMBA_ENABLE_CUDASIM=1 für Testing ohne GPU
+- NUMBA_CACHE_DIR=%USERPROFILE%\.numba\cache für Pfadkontrolle
+
+### 18.3 Memory-Optimierung
+
+**SoA (Structure of Arrays) vs AoS (Array of Structures):**
+
+Aktuell (SoA - gut für Vektorisierung):
+```python
+V_flat[dim+1, _cap]  # Alle Volumina zusammen
+W[_cap]              # Alle Gewichte zusammen
+X[_cap]              # Alle Durchmesser zusammen
+```
+
+Vorteile:
+- Bessere Cache-Lokalität
+- SIMD-Vektorisierung möglich
+- Einfacheres JIT-Compiling
+
+### 18.4 Profiling auf Windows
+
+```python
+# Profiling-Skript
+import cProfile
+import pstats
+from wmcpbe import MCPBESolver
+
+def profile_simulation():
+    solver = MCPBESolver(
+        dim=1,
+        t_total=60,
+        agg_kernel_name='shear_chin1998',
+        agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+    )
+    solver.solve()
+
+# Profiler starten
+cProfile.run('profile_simulation()', 'output.prof')
+
+# Statistik anzeigen
+stats = pstats.Stats('output.prof')
+stats.sort_stats('cumulative').print_stats(20)
+
+# Visualisierung (Snakeviz)
+# pip install snakeviz
+# snakeviz output.prof
+```
+
+---
+
+## 19. Debugging-Tips
+
+### 19.1 Häufige Fehler und Lösungen
+
+| Fehler | Ursache | Lösung |
+|--------|---------|--------|
+| `IndexError: index out of range` | a_tot > _cap | `_ensure_capacity_for()` aufrufen |
+| `ValueError: negative weight` | W wurde negativ gesetzt | Bounds-Check vor Assignment |
+| `RuntimeWarning: divide by zero` | delta_i = 0 | `where=delta>0` in np.divide |
+| Numba compilation error | Typ-Inferenz fehlgeschlagen | Explizite Typen (`dtype=float`) |
+| Memory Error | Zu viele Partikel | `recon_N_max` reduzieren |
+
+### 19.2 Logging und Debug-Ausgaben
+
+```python
+# Debug-Modus aktivieren
+solver.mcpbe_debug = True
+solver.VERBOSE = True
+
+# Custom Logger einrichten
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('wmcpbe')
+
+# In kritischen Methoden:
+logger.debug(f"Agglomeration: i={i}, j={j}, dW={dW}, V_solid={V_solid_merged}")
+```
+
+### 19.3 State-Inspection Helper
+
+```python
+def inspect_solver_state(solver, label="State"):
+    """Hilfreiche Funktion zum Inspizieren des Solver-States."""
+    print(f"\n=== {label} ===")
+    print(f"a_tot: {solver.a_tot}")
+    print(f"_cap: {solver._cap}")
+    print(f"Vc: {solver.Vc:.6e}")
+    print(f"Sum(W): {np.sum(solver.W[:solver.a_tot]):.2f}")
+    print(f"Sum(W×V_solid): {np.sum(solver.W[:solver.a_tot] * solver.V_flat[0, :solver.a_tot]):.6e}")
+    print(f"Sum(W×liquid): {np.sum(solver.W[:solver.a_tot] * solver.liquid_volume[:solver.a_tot]):.6e}")
+    print(f"W range: [{solver.W[:solver.a_tot].min():.2f}, {solver.W[:solver.a_tot].max():.2f}]")
+    print(f"Porosity range: [{np.nanmin(solver.porosity[:solver.a_tot]):.3f}, {np.nanmax(solver.porosity[:solver.a_tot]):.3f}]")
+    print(f"Saturation range: [{solver.saturation[:solver.a_tot].min():.3f}, {solver.saturation[:solver.a_tot].max():.3f}]")
+```
+
+---
+
+## 20. Erweiterungsmöglichkeiten
+
+### 20.1 Neue Kernel hinzufügen
+
+**Schritt-für-Schritt:**
+
+1. **Kernel-Klasse erstellen:**
+```python
+# wmcpbe/kernels/aggregation/my_custom_kernel.py
+from .base import AggregationKernel
+
+class MyCustomKernel(AggregationKernel):
+    name = 'my_custom'
+    
+    def __init__(self, param_a=1.0, param_b=2.0):
+        self.param_a = param_a
+        self.param_b = param_b
+    
+    def compute_beta(self, r1, r2, particle1_idx=None, particle2_idx=None, solver=None):
+        return self.param_a * (r1 + r2) ** self.param_b
+```
+
+2. **Factory-Funktion registrieren:**
+```python
+# wmcpbe/kernels/aggregation/__init__.py
+def get_aggregation_kernel(name, **kwargs):
+    if name == 'my_custom':
+        return MyCustomKernel(**kwargs)
+    # ... andere Kernel
+```
+
+3. **Verwenden:**
+```python
+solver = MCPBESolver(
+    agg_kernel_name='my_custom',
+    agg_kernel_params={'param_a': 1e-3, 'param_b': 3.0}
+)
+```
+
+### 20.2 Neue Handler hinzufügen
+
+**Beispiel: TemperatureHandler:**
+```python
+# wmcpbe/mcpbe_temperature.py
+from dataclasses import dataclass
+
+@dataclass
+class TemperatureConfig:
+    enabled: bool = False
+    initial_temp: float = 293.15  # Kelvin
+    heat_transfer_coeff: float = 100.0
+
+class TemperatureHandler:
+    def __init__(self, solver, config: TemperatureConfig):
+        self.solver = solver
+        self.config = config
+        self.current_temp = config.initial_temp
+    
+    def step(self, current_time, dt_event):
+        # Temperaturänderung durch Agglomerationsexothermie
+        pass
+```
+
+### 20.3 Parallele Simulationen
+
+**Multiple Repeats parallelisieren:**
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+def run_single_repeat(seed):
+    solver = MCPBESolver(seed=seed, ...)
+    solver.solve()
+    return solver.get_results()
+
+# Parallel über Repeat-Nummern
+with ProcessPoolExecutor(max_workers=8) as executor:
+    results = list(executor.map(run_single_repeat, range(100)))
+```
+
+---
+
+## 21. Checkliste für Refactoring
+
+### Vor Beginn:
+- [ ] Vollständige Backup aller Dateien
+- [ ] Referenzsimulationen speichern (JSON/CSV)
+- [ ] Test-Suite zum Laufen bringen
+- [ ] Diese Dokumentation vollständig lesen
+
+### Während Refactoring:
+- [ ] Jede Änderung committen (kleine Commits!)
+- [ ] Plausibilitätsprüfung nach jeder Methode
+- [ ] Docstrings aktuell halten
+- [ ] Typ-Hints ergänzen
+
+### Nach Refactoring:
+- [ ] Alle Tests bestehen lassen
+- [ ] Performance-Vergleich mit Referenz
+- [ ] Dokumentation aktualisieren
+- [ ] Changelog pflegen
+
+---
+
+## 22. Wichtige Kontakte und Ressourcen
+
+**Projekt-Repository:**
+- Root: `C:\Users\ericb\Documents\GitHub\PSD_opt\`
+- Main Code: `C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe\`
+- Documentation: `C:\Users\ericb\Documents\GitHub\PSD_opt\.agents\informations.txt`
+
+**Externe Ressourcen:**
+- Numba Docs: https://numba.readthedocs.io/
+- NumPy Docs: https://numpy.org/doc/
+- DSMC Method: Bird, G.A. (1994). Molecular Gas Dynamics
+- PBE Theory: Ramkrishna, D. (2000). Population Balances
+
+**Interne Ansprechpartner:**
+- Original-Autor: HR94 (haoran.ji@kit.edu)
+- Current Maintainer: Siehe Git-Log
+
+---
+
+**Letzte Aktualisierung:** 2025-01-XX
+**Version:** 1.0
+**Für Refactoring freigegeben:** Ja
+**Plausibilitätsprüfung erforderlich:** Ja, bei JEDER Änderung
+**Änderungen dokumentieren:** Ja, detailliert mit Commit-Messages
+
+**Refactoring-Grundsatz:**
+> "Make it work, make it right, make it fast" - Kent Beck
+> 
+> 1. Korrektheit vor Performance
+> 2. Tests vor Refactoring
+> 3. Dokumentation während der Arbeit

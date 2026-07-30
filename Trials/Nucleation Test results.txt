@@ -1,0 +1,67 @@
+######################################################################
+# Nucleation Tests - Liquid Addition via Droplets
+######################################################################
+
+======================================================================
+TEST 1: Basic Nucleation
+======================================================================
+
+Initial state:
+  Particles: 30
+  Initial liquid: 0.000000e+00 m³
+
+Nucleation parameters:
+  Volumenstrom: 1.000000e-15 m³/s
+  Tropfendurchmesser: 1.000000e-06 m
+  Tropfenvolumen: 5.235988e-19 m³
+  Zugabedauer: 5.0 s
+  Expected liquid added: 5.000000e-15 m³
+  Expected droplets: ~9549
+
+Running simulation...
+
+Final state:
+  Particles: 1
+  Solid volume: 4.241150e-16 m³
+  Liquid volume: 2.742393e-16 m³
+
+Nucleation statistics:
+  Droplets added: 535
+  Liquid added: 2.743222e-16 m³
+
+Result: ✅ PASS
+
+======================================================================
+TEST 2: Nucleation Time Window
+======================================================================
+
+Nucleation window: t=0.0s to t=1.0s
+
+Final time: 0.224s
+Final liquid: 2.243591e-16 m³
+Droplets added: 438
+Liquid added: 2.244110e-16 m³
+
+Result: ✅ PASS
+
+======================================================================
+TEST 3: Nucleation + Mass Conservation
+======================================================================
+
+Liquid added (from nucleation): 4.646461e-13 m³
+Liquid in system (final): 4.646460e-13 m³
+
+Conservation error: 1.930421e-07 (0.0000%)
+
+Mass conservation: ✅ PASS
+
+======================================================================
+SUMMARY
+======================================================================
+  Basic Nucleation: ✅ PASS
+  Time Window: ✅ PASS
+  Mass Conservation: ✅ PASS
+
+======================================================================
+ALL TESTS PASSED! 🎉
+======================================================================
