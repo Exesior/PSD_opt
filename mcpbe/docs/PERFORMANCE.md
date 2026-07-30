@@ -63,6 +63,9 @@ JIT-Batchfunktion und fiel auf `n²` Python-Aufrufe zurück.
 
 ### 3.1 O(n²) → O(n): geschlossene Momentenform (der große Hebel)
 
+> Vollständige Herleitung, Zahlenbeispiel und Anleitung zum Erweitern auf neue
+> Kernel: [`MOMENT_MODE.md`](MOMENT_MODE.md).
+
 Alle vier eingebauten Aggregationskernel sind in `(r_i, r_j)` separabel. Damit
 kollabiert die innere Summe auf wenige gewichtete Momente der Population:
 

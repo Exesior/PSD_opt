@@ -6,7 +6,8 @@
 
 Dieses Dokument listet jeden gefundenen Defekt bzw. jede technische Schuld auf,
 mit Nachweis (Messung), Ursache und der gewählten Lösung. Reine
-Performance-Arbeit ist in [`PERFORMANCE.md`](PERFORMANCE.md) beschrieben, die
+Performance-Arbeit ist in [`PERFORMANCE.md`](PERFORMANCE.md) beschrieben, der
+O(n)-Moment-Modus im Detail in [`MOMENT_MODE.md`](MOMENT_MODE.md), die
 Massenerhaltungs-Verifikation in [`CONSERVATION.md`](CONSERVATION.md).
 
 ## Legende
@@ -294,7 +295,8 @@ Der Selbstkollisions-Term wird anschließend exakt korrigiert
 (`(r_i+r_j)²/(r_i r_j) = r_i/r_j + 2 + r_j/r_i`) und Sum
 (`β = c(v_i+v_j)`). Der Constant-Kernel war bereits geschlossen.
 
-Das ist **algebraisch exakt**, keine Näherung. Umgesetzt sind zwei Modi:
+Das ist **algebraisch exakt**, keine Näherung — Herleitung für alle Kernel in
+[`MOMENT_MODE.md`](MOMENT_MODE.md). Umgesetzt sind zwei Modi:
 
 | `agg_propensity_mode` | Verfahren | Kosten | Bitgenau zum Original |
 |---|---|---|---|

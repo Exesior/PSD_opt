@@ -25,7 +25,7 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `bench/golden_reference.py` | Bitgenaue Regressions-Fingerprints (SHA-256 über alle float64-Bytes). |
 | `bench/bench_wmcpbe.py` | Wandzeit-Benchmark mit Vorher/Nachher-Vergleich. |
 | `bench/profile_wmcpbe.py` | `cProfile` für ein einzelnes Szenario. |
-| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment`. |
+| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`docs/MOMENT_MODE.md`](../docs/MOMENT_MODE.md)). |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `golden_reference.json` | Eingecheckte Referenz-Fingerprints. |
 
