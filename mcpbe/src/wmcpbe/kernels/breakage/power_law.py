@@ -168,5 +168,39 @@ class PowerLawBreakageKernel(BreakageKernel):
         else:
             # Default to constant rate
             rate = self.p1
-        
+
         return max(0.0, float(rate))
+
+    def compute_rate_array(self, v_particles, solver=None):
+        """
+        Vectorised form of :meth:`compute_rate`.
+
+        The power-law rate depends only on the particle volume, so the whole
+        slice can be evaluated with a handful of numpy operations instead of
+        one Python call per particle. Same expressions, same order, so results
+        match :meth:`compute_rate` element for element.
+        """
+        v = np.asarray(v_particles, dtype=float)
+        positive = v > 0
+
+        if self.breakrval == 2:
+            # S = P1 * V^(1/3)
+            rate = self.p1 * np.power(v, 1.0 / 3.0, where=positive, out=np.zeros_like(v))
+        elif self.breakrval == 4:
+            # S = P1 * G^P2 * V^(pl_v/3)
+            alpha = getattr(self, "pl_v", self.p2) / 3.0
+            rate = (self.p1 * (self.g**self.p2)) * np.power(
+                v, alpha, where=positive, out=np.zeros_like(v)
+            )
+        elif self.breakrval == 5:
+            # S = P1 * G^P2 * (V/V_ref)^pl_q
+            pl_q = getattr(self, "pl_q", 0.5)
+            V_ref = 1e-18
+            rate = (self.p1 * (self.g**self.p2)) * np.power(
+                v / V_ref, pl_q, where=positive, out=np.zeros_like(v)
+            )
+        else:
+            # breakrval 1 and 3 (and any unknown value): constant rate S = P1
+            rate = np.full(v.shape, self.p1, dtype=float)
+
+        return np.where(positive, np.maximum(rate, 0.0), 0.0)

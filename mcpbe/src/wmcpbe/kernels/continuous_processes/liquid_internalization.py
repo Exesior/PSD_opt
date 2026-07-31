@@ -187,6 +187,71 @@ class LiquidInternalizationKernel(LiquidInternalizationKernel):
         
         return float(saturation_new)
     
+    def compute_array(self,
+                      saturation: np.ndarray,
+                      v_pore: np.ndarray,
+                      l_total: np.ndarray,
+                      dt: float,
+                      ) -> np.ndarray:
+        """Vectorised form of :meth:`compute` over whole particle arrays.
+
+        Evaluates exactly the same analytical ODE solution, term for term, so
+        that a batch call and a loop of scalar calls agree. Used by
+        ``ContinuousProcessesHandler`` to replace an O(n) Python loop that ran
+        once per Monte-Carlo event.
+
+        Args:
+            saturation: Current saturations S = l_intern / v_pore
+            v_pore:     Pore volumes [m³]
+            l_total:    Total liquid volumes [m³]
+            dt:         Time step [s]
+
+        Returns:
+            Updated saturations, same shape as the inputs.
+        """
+        saturation = np.asarray(saturation, dtype=float)
+        v_pore = np.asarray(v_pore, dtype=float)
+        l_total = np.asarray(l_total, dtype=float)
+
+        out = saturation.copy()
+
+        # v_pore invalid -> saturation unchanged; no liquid -> saturation 0.
+        pore_ok = (v_pore > 0) & np.isfinite(v_pore)
+        liquid_ok = (l_total > 0) & np.isfinite(l_total)
+        out[pore_ok & ~liquid_ok] = 0.0
+
+        sat = np.clip(saturation, 0.0, 1.0)
+        active = pore_ok & liquid_ok & (sat < 1.0) & (self.k_int > 0)
+        # Already-saturated particles keep their clipped saturation.
+        clipped_only = pore_ok & liquid_ok & ~active
+        out[clipped_only] = sat[clipped_only]
+
+        if not np.any(active):
+            return out
+
+        vp = v_pore[active]
+        lt = l_total[active]
+        l_intern = sat[active] * vp
+
+        alpha = self.k_int * (vp - lt)
+        exp_term = np.exp(alpha * dt)
+
+        A = vp - l_intern
+        B = lt - l_intern
+
+        numerator = vp * B - lt * A * exp_term
+        denominator = B - A * exp_term
+
+        l_max = np.minimum(lt, vp)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            l_new = numerator / denominator
+        # Division by ~0 means the pair is at equilibrium.
+        l_new = np.where(np.isfinite(l_new), l_new, l_max)
+        l_new = np.maximum(0.0, np.minimum(l_new, l_max))
+
+        out[active] = l_new / vp
+        return out
+
     def compute_with_solver(self, particle_idx: int, dt: float, solver) -> float:
         """
         Convenience method to compute internalization using solver state.

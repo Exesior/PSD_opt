@@ -190,11 +190,43 @@ class NucleationConfig:
     
     # Consistency check tolerance (relative)
     consistency_tol: float = 0.001  # 0.1%
+
+    # Relative tolerance used when looking for an existing particle with the
+    # same post-droplet state (see NucleationHandler._find_similar_particle).
+    similarity_tol: float = 0.00001
+
+    # What the liquid part of that tolerance is measured against.
+    #
+    #   "total"   (default, legacy) - relative to the particle's total liquid.
+    #             Merging two particles whose liquid differs by up to
+    #             similarity_tol * total books a full droplet in the statistics
+    #             while the state gains less, so the liquid phase drifts. The
+    #             error grows with how much liquid a particle already carries;
+    #             measured at 0.58 % over a short granulation run.
+    #   "droplet" - relative to the droplet volume. The merge is then
+    #             mass-neutral at droplet scale, at the cost of a lower merge
+    #             hit rate (more computational particles, slower).
+    #
+    # See docs/REFACTORING_FINDINGS.md (F-03).
+    liquid_match_scale: str = "total"
+
+    # Diagnostic output. The handler used to print progress unconditionally,
+    # which polluted stdout of every production run (and cost measurable time
+    # in tight loops). Set debug=True to restore that output.
+    debug: bool = False
     
     def __post_init__(self) -> None:
+        if self.liquid_match_scale not in ("total", "droplet"):
+            raise ValueError(
+                "liquid_match_scale must be 'total' or 'droplet', "
+                f"got {self.liquid_match_scale!r}"
+            )
+        if self.similarity_tol < 0.0:
+            raise ValueError("similarity_tol must be non-negative")
+
         if not self.enabled:
             return
-        
+
         # Basic validation (always required)
         if self.volumetric_flow_rate <= 0.0:
             raise ValueError("volumetric_flow_rate must be positive when enabled")
@@ -576,11 +608,11 @@ class NucleationHandler:
                 dt_remaining = window_end - last_window_time
                 v_liquid_remaining = self._flow_rate_scaled * dt_remaining
                 
-                print(f"\n[FINALIZE DEBUG] Processing remaining window time:")
-                print(f"  Last time IN WINDOW: {last_window_time:.6f}s")
-                print(f"  Window end:          {window_end:.6f}s")
-                print(f"  dt_remaining:        {dt_remaining:.6f}s")
-                print(f"  v_liquid:            {v_liquid_remaining:.6e} m³")
+                self._log(f"\n[FINALIZE DEBUG] Processing remaining window time:")
+                self._log(f"  Last time IN WINDOW: {last_window_time:.6f}s")
+                self._log(f"  Window end:          {window_end:.6f}s")
+                self._log(f"  dt_remaining:        {dt_remaining:.6f}s")
+                self._log(f"  v_liquid:            {v_liquid_remaining:.6e} m³")
                 
                 if v_liquid_remaining > 0:
                     self._ensure_samplers()
@@ -589,14 +621,14 @@ class NucleationHandler:
         # Distribute remaining liquid accumulated during last step
         # This handles the case where _liquid_remainder > 0 after window closes
         if hasattr(self, '_liquid_remainder'):
-            print(f"\n[FINALIZE DEBUG] _liquid_remainder before distribution: {self._liquid_remainder:.6e} m³")
+            self._log(f"\n[FINALIZE DEBUG] _liquid_remainder before distribution: {self._liquid_remainder:.6e} m³")
             if self._liquid_remainder > 0:
                 self._distribute_remaining_liquid(final_time)
-            print(f"[FINALIZE DEBUG] _liquid_remainder after distribution: {self._liquid_remainder:.6e} m³")
+            self._log(f"[FINALIZE DEBUG] _liquid_remainder after distribution: {self._liquid_remainder:.6e} m³")
         
         # Print final debug status
         self.print_debug_status(force=True)
-        print("\n[NUCLEATION DEBUG] Simulation complete - Final statistics printed above")
+        self._log("\n[NUCLEATION DEBUG] Simulation complete - Final statistics printed above")
     
     def _distribute_remaining_liquid(self, final_time: float) -> None:
         """
@@ -623,7 +655,7 @@ class NucleationHandler:
         # Discard only truly negligible remainders (< 0.001 droplets)
         # THRESHOLD REDUCED: From 0.1 to 0.001 to minimize systematic liquid loss
         if n_droplets_exact < 0.001:
-            print(f"\n[REMAINDER] Keeping {self._liquid_remainder:.3e} m³ "
+            self._log(f"\n[REMAINDER] Keeping {self._liquid_remainder:.3e} m³ "
                   f"({n_droplets_exact:.6f} droplets) as numerical remainder")
             return
         
@@ -634,7 +666,7 @@ class NucleationHandler:
         # Case 2: Fractional remainder (0.1-1.0 droplets) - distribute exact volume
         if n_droplets_exact >= 1.0:
             n_droplets_full = int(n_droplets_exact)
-            print(f"\n[REMAINDER] Distributing {n_droplets_full} remaining droplets "
+            self._log(f"\n[REMAINDER] Distributing {n_droplets_full} remaining droplets "
                   f"(exact: {n_droplets_exact:.2f}) at t={final_time:.4f}s...")
             
             v_target = n_droplets_full * v_droplet
@@ -663,7 +695,7 @@ class NucleationHandler:
             # Fractional droplet: distribute exact remaining volume
             # Note: _liquid_remainder is PHYSICAL volume (already scaled by flow_rate_per_particle).
             # We distribute it as a single computational event with capped dW.
-            print(f"\n[REMAINDER] Distributing fractional droplet "
+            self._log(f"\n[REMAINDER] Distributing fractional droplet "
                   f"({n_droplets_exact:.2f} × {v_droplet:.3e} m³) at t={final_time:.4f}s...")
             
             # CRITICAL: Pass ACTUAL droplet volume and cap max_physical_droplets!
@@ -687,13 +719,13 @@ class NucleationHandler:
                 self._liquid_volume_added_total += v_physical_distributed
                 self._liquid_remainder -= v_physical_distributed
                 
-                print(f"[REMAINDER] Distributed fractional droplet: "
+                self._log(f"[REMAINDER] Distributed fractional droplet: "
                       f"{v_physical_distributed:.3e} m³ (dW={dW:.4f}, effective_dW={effective_dW:.4f})")
                 
-                print(f"[REMAINDER] Distributed fractional droplet: "
+                self._log(f"[REMAINDER] Distributed fractional droplet: "
                       f"{v_physical_distributed:.3e} m³ (dW={dW:.2f}, effective_dW={effective_dW:.2f})")
             else:
-                print(f"[REMAINDER] WARNING: Failed to distribute fractional droplet")
+                self._log(f"[REMAINDER] WARNING: Failed to distribute fractional droplet")
         
         # Sanity check
         if self._liquid_remainder < -1e-15:
@@ -813,30 +845,30 @@ class NucleationHandler:
             stacklevel=2
         )
         
-        print(f"\n[MANUAL TRIGGER] Starting manual nucleation...")
+        self._log(f"\n[MANUAL TRIGGER] Starting manual nucleation...")
         
         # Calculate total liquid for the entire window
         v_liquid_total = self._flow_rate_scaled * self.config.liquid_addition_duration
         
         if v_liquid_total <= 0.0:
-            print(f"  [MANUAL TRIGGER] No liquid to add (v_liquid_total={v_liquid_total})")
+            self._log(f"  [MANUAL TRIGGER] No liquid to add (v_liquid_total={v_liquid_total})")
             return
         
         v_droplet = self.config.droplet_volume
         n_droplets_total = int(v_liquid_total / v_droplet)
         
-        print(f"  Total liquid to add: {v_liquid_total:.6e} m³")
-        print(f"  Number of droplets: {n_droplets_total:.0f}")
-        print(f"  Current n_comp: {self.solver.a_tot}")
+        self._log(f"  Total liquid to add: {v_liquid_total:.6e} m³")
+        self._log(f"  Number of droplets: {n_droplets_total:.0f}")
+        self._log(f"  Current n_comp: {self.solver.a_tot}")
         
         # Use common distribution logic (shared with regular step)
         # Pass is_manual_trigger=True for detailed progress output
         self._distribute_liquid_volume(v_liquid_total, is_manual_trigger=True)
         
-        print(f"  [MANUAL TRIGGER] Complete:")
-        print(f"    Total droplets distributed: {self._droplets_added_total:.2e}")
-        print(f"    Total liquid distributed: {self._liquid_volume_added_total:.6e} m³")
-        print(f"  Final n_comp: {self.solver.a_tot}")
+        self._log(f"  [MANUAL TRIGGER] Complete:")
+        self._log(f"    Total droplets distributed: {self._droplets_added_total:.2e}")
+        self._log(f"    Total liquid distributed: {self._liquid_volume_added_total:.6e} m³")
+        self._log(f"  Final n_comp: {self.solver.a_tot}")
         
         # Distribute any remaining liquid for consistency with natural nucleation
         if hasattr(self, '_liquid_remainder') and self._liquid_remainder > 0:
@@ -1074,67 +1106,71 @@ class NucleationHandler:
         # Sample weighted by W → uniform over physical particles
         return int(self._weight_sampler.sample(self._rng))
         
-    def _find_similar_particle(self, V_solid_target: float, liquid_target: float, 
-                                poro_target: Optional[float] = None, 
+    def _find_similar_particle(self, V_solid_target: float, liquid_target: float,
+                                poro_target: Optional[float] = None,
                                 sat_target: Optional[float] = None,
-                                tol: float = 0.00001) -> int:
+                                tol: float = 0.00001,
+                                liquid_tol_ref: Optional[float] = None) -> int:
         """
         Find existing particle with similar properties (for merging nucleated particles).
         
-        Uses NESTED IF structure for optimal performance:
-        - LEVEL 1: V_dry (fastest, most selective) → outermost
-        - LEVEL 2: liquid_volume (second fastest) → middle
-        - LEVEL 3: porosity (requires NaN check) → inner
-        - LEVEL 4: saturation (most expensive) → innermost
-        
+        Matching criteria, all relative to ``tol``:
+        1. dry volume, 2. liquid volume, 3. porosity (must not be NaN),
+        4. saturation. The lowest matching index is returned, exactly as the
+        previous short-circuiting Python loop did.
+
+        Implemented as a vectorised mask scan: this is called once per droplet,
+        and a Python loop over all particles made it one of the three hot spots
+        in granulation runs.
+
+        Note the comparisons are written as ``~(|delta| > tol)`` rather than
+        ``|delta| <= tol``. The two differ for NaN operands, and the original
+        loop's ``continue`` guards used the ``>`` form - keeping it preserves
+        behaviour for NaN state exactly.
+
         Args:
             V_solid_target: Target solid volume
             liquid_target: Target liquid volume
             poro_target: Target porosity (optional)
             sat_target: Target saturation (optional)
             tol: Relative tolerance for comparison
-            
+            liquid_tol_ref: Reference value the liquid tolerance is relative to.
+                Defaults to ``liquid_target`` (legacy). Pass the droplet volume
+                to make the match mass-neutral at droplet scale.
+
         Returns:
             Index of similar particle, or -1 if not found
         """
         solver = self.solver
         n_active = solver.a_tot
-        
-        # Pre-compute tolerances (avoid repeated multiplication/division)
+        if n_active <= 0:
+            return -1
+
+        # Pre-compute absolute tolerances from the relative one.
         V_tol = tol * V_solid_target
-        liq_tol = tol * liquid_target
-        poro_tol = tol * poro_target if poro_target is not None else 0.0
-        sat_tol = tol * sat_target if sat_target is not None else 0.0
-        
-        for k in range(n_active):
-            # ===== LEVEL 1: Dry Volume (fastest check, most selective) =====
-            V_dry_k = float(solver.V_flat[-1, k])
-            if abs(V_dry_k - V_solid_target) > V_tol:
-                continue  # Exit immediately - doesn't match
-            
-            # ===== LEVEL 2: Liquid Volume (second fastest) =====
-            liq_k = solver.liquid_volume[k] if hasattr(solver, 'liquid_volume') else 0.0
-            if abs(liq_k - liquid_target) > liq_tol:
-                continue  # Exit - liquid doesn't match
-            
-            # ===== LEVEL 3: Porosity (requires NaN check) =====
-            if poro_target is not None:
-                poro_k = solver.porosity[k]
-                if np.isnan(poro_k):
-                    continue  # Skip non-nucleated particles
-                if abs(poro_k - poro_target) > poro_tol:
-                    continue  # Exit - porosity doesn't match
-            
-            # ===== LEVEL 4: Saturation (innermost, most expensive) =====
-            if sat_target is not None:
-                sat_k = solver.saturation[k] if hasattr(solver, 'saturation') else 0.0
-                if abs(sat_k - sat_target) > sat_tol:
-                    continue  # Exit - saturation doesn't match
-            
-            # All criteria matched!
-            return k
-        
-        return -1
+        liq_tol = tol * (liquid_target if liquid_tol_ref is None else liquid_tol_ref)
+
+        match = ~(np.abs(solver.V_flat[-1, :n_active] - V_solid_target) > V_tol)
+        if not match.any():
+            return -1
+
+        match &= ~(np.abs(solver.liquid_volume[:n_active] - liquid_target) > liq_tol)
+        if not match.any():
+            return -1
+
+        if poro_target is not None:
+            poro = solver.porosity[:n_active]
+            match &= ~np.isnan(poro) & ~(np.abs(poro - poro_target) > tol * poro_target)
+            if not match.any():
+                return -1
+
+        if sat_target is not None:
+            sat = solver.saturation[:n_active]
+            match &= ~(np.abs(sat - sat_target) > tol * sat_target)
+            if not match.any():
+                return -1
+
+        return int(np.argmax(match))
     
     def _distribute_liquid_volume(self, v_liquid_to_distribute: float, 
                                    is_manual_trigger: bool = False) -> None:
@@ -1183,9 +1219,9 @@ class NucleationHandler:
         if not is_manual_trigger and not hasattr(self, '_debug_loop_printed'):
             self._debug_loop_printed = True
             v_liquid_expected = self._flow_rate_scaled * 0.1
-            print(f"    [LOOP DEBUG] n_droplets_full={n_droplets_full:.1f}, vc_scale={vc_scale:.3f}")
-            print(f"    [LOOP DEBUG] _liquid_remainder={self._liquid_remainder:.3e} (expected after 0.1s: {v_liquid_expected:.3e})")
-            print(f"    [LOOP DEBUG] W[0:5]={self.solver.W[:min(5,self.solver.a_tot)]}")
+            self._log(f"    [LOOP DEBUG] n_droplets_full={n_droplets_full:.1f}, vc_scale={vc_scale:.3f}")
+            self._log(f"    [LOOP DEBUG] _liquid_remainder={self._liquid_remainder:.3e} (expected after 0.1s: {v_liquid_expected:.3e})")
+            self._log(f"    [LOOP DEBUG] W[0:5]={self.solver.W[:min(5,self.solver.a_tot)]}")
         
         # Distribute droplets with DSMC weight handling.
         # Track accumulated liquid VOLUME (not droplet count) to avoid floating-point
@@ -1197,7 +1233,7 @@ class NucleationHandler:
         
         # For manual trigger: track progress
         if is_manual_trigger and n_droplets_full > 100:
-            print(f"  [MANUAL TRIGGER] Distributing {n_droplets_full} droplets...")
+            self._log(f"  [MANUAL TRIGGER] Distributing {n_droplets_full} droplets...")
         
         while v_distributed < v_target and consecutive_failures < max_consecutive_failures:
             # Convert remaining volume to physical droplets for dW capping
@@ -1225,7 +1261,7 @@ class NucleationHandler:
                 
                 if consecutive_failures >= max_consecutive_failures:
                     if is_manual_trigger:
-                        print(f"  [MANUAL TRIGGER] Stopping after {consecutive_failures} consecutive failures")
+                        self._log(f"  [MANUAL TRIGGER] Stopping after {consecutive_failures} consecutive failures")
                     break
         
         # Update remainder: subtract ACTUALLY distributed liquid volume
@@ -1253,11 +1289,18 @@ class NucleationHandler:
             if i >= 0 and i < solver.a_tot:
                 # For effective_dW = 1, we need dW = 1 / vc_scale
                 dW_for_one_physical = 1.0 / vc_scale
-                
-                # Create nucleated particle with the remainder volume
-                # This represents exactly ONE physical droplet
-                self._create_nucleated_particle_copy(i, dW_for_one_physical, self._liquid_remainder)
-                
+
+                # The child inherits the parent's liquid and ADDS the remainder
+                # droplet on top. Passing only the remainder (the pre-refactor
+                # behaviour) silently destroyed `dW * liquid_volume[i]` of liquid
+                # every time this path fired on an already-wet particle - it was
+                # the dominant term in the measured ~0.6 % liquid-phase loss.
+                # See docs/REFACTORING_FINDINGS.md (F-03).
+                parent_liquid = float(solver.liquid_volume[i])
+                self._create_nucleated_particle_copy(
+                    i, dW_for_one_physical, parent_liquid + self._liquid_remainder
+                )
+
                 # Reduce parent weight by dW
                 solver.W[i] -= dW_for_one_physical
                 self._record_weight_change(i, solver.W[i])
@@ -1274,7 +1317,7 @@ class NucleationHandler:
         
         # Log any remaining liquid (should be zero or negligible now)
         if not is_manual_trigger and self._liquid_remainder > 1e-20:
-            print(f"    [REMAINDER] {self._liquid_remainder:.3e} m³ carried to next step ({self._liquid_remainder/v_droplet:.2f} droplets)")
+            self._log(f"    [REMAINDER] {self._liquid_remainder:.3e} m³ carried to next step ({self._liquid_remainder/v_droplet:.2f} droplets)")
     
     def _distribute_one_droplet_with_dW(self, v_droplet: float, 
                                          max_physical_droplets: Optional[float] = None) -> float:
@@ -1390,15 +1433,36 @@ class NucleationHandler:
             V_liq_int_new = V_liq_int_current + v_droplet
             sat_new = V_liq_int_new / V_pore_i if V_pore_i > 0 else 0.0
             
-            # Find similar particle with ALL criteria
+            # Find an existing particle that already has the post-droplet state,
+            # so the dW physical particles can simply be re-labelled instead of
+            # spawning yet another computational particle.
+            #
+            # MASS-CONSERVATION NOTE (see docs/REFACTORING_FINDINGS.md, F-03):
+            # the merge books a full droplet in the statistics but the state
+            # actually gains `dW * (liquid[existing] - liquid[i])`. The default
+            # tolerance is relative to the particle's *total* liquid, while the
+            # increment being booked is one *droplet*. Once a particle carries N
+            # droplets, an in-tolerance match can be off by `tol * N` droplets,
+            # so the error grows linearly with run length (measured: 0.58 % of
+            # the liquid phase over a short granulation run).
+            #
+            # `liquid_match_scale="droplet"` compares against the droplet volume
+            # instead, which makes the merge mass-neutral at the cost of a lower
+            # merge hit rate (more computational particles).
+            if self.config.liquid_match_scale == "droplet":
+                liquid_tol_ref = v_droplet
+            else:
+                liquid_tol_ref = new_liquid
+
             existing = self._find_similar_particle(
                 V_solid_target=V_solid_i,
                 liquid_target=new_liquid,
                 poro_target=poro_i,
                 sat_target=sat_new,
-                tol=0.00001
+                tol=self.config.similarity_tol,
+                liquid_tol_ref=liquid_tol_ref,
             )
-            
+
             if existing >= 0 and existing != i:
                 # Found similar particle: transfer dW weight to it
                 solver.W[existing] += dW
@@ -2059,6 +2123,11 @@ class NucleationHandler:
         # Reset debug tracking
         self._debug_last_print_time = -1.0
     
+    def _log(self, *args, **kwargs) -> None:
+        """Emit diagnostic output, but only when ``config.debug`` is set."""
+        if getattr(self.config, "debug", False):
+            print(*args, **kwargs)
+
     def print_debug_status(self, force: bool = False) -> None:
         """
         Print debug status of nucleation process.
@@ -2110,7 +2179,7 @@ class NucleationHandler:
         n_phys = sum_W / solver.Vc
         
         # Print formatted status
-        print(
+        self._log(
             f"\n[NUCLEATION DEBUG] t={t_elapsed:.4f}s ({t_percent:.1f}% of total) | "
             f"Real time: {real_time_elapsed:.2f}s | "
             f"Droplets: {n_droplets:.2e} ({percent_of_expected:.1f}% of expected) | "

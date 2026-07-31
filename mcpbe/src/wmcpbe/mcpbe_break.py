@@ -9,7 +9,7 @@ import numpy as np
 # JIT helpers for CDF table generation (still needed for breakage)
 from pbe_core.func.jit_mcpbe import _build_table_1d_jit, _build_tables_2d_jit
 
-from .fenwick_new import FenwickSampler
+from .fenwick_new import rebuild_sampler
 
 _ONE_SHOT_ADAPTER_NAMES = {"LMCRankAdapter", "LMCCopulaAdapter", "LMCFlowAdapter"}
 _TABLE_ADAPTER_NAME = "LMCTableAdapter"
@@ -72,19 +72,18 @@ class MCPBEBreak:
         # --------- Branch 0: Kernel Framework ---------
         if hasattr(self, 'kernel_manager') and self.kernel_manager is not None and self.kernel_manager.break_kernel is not None:
             self.V = self.V_flat[-1, :a]
-            self.B_R = np.zeros(a, dtype=float)
-            
-            # Compute breakage rates for all particles via kernel
-            for i in range(a):
-                v_particle = float(self.V_flat[-1, i])
-                Si = self.kernel_manager.compute_break_rate(
-                    v_particle,
-                    particle_idx=i,
-                    solver=self
-                )
-                self.B_R[i] = Si
-            
-            rates = np.asarray(self.B_R, dtype=float)
+            # Batch evaluation. Kernels whose rate is a pure function of volume
+            # override compute_rate_array() with a vectorised expression; the
+            # base class falls back to a per-particle loop, so state-dependent
+            # kernels keep working unchanged.
+            self.B_R = np.asarray(
+                self.kernel_manager.break_kernel.compute_rate_array(
+                    self.V_flat[-1, :a], solver=self
+                ),
+                dtype=float,
+            )
+
+            rates = self.B_R
             prop = np.divide(
                 W * rates,
                 delta,
@@ -530,7 +529,7 @@ class MCPBEBreak:
         pt = self.process_type
         if pt in ("agglomeration", "mix") and self._agg_sampler is not None:
             self._rebuild_all_propensities()
-            self._agg_sampler = FenwickSampler(self._r_agg[:self.a_tot])
+            self._agg_sampler = rebuild_sampler(self._agg_sampler, self._r_agg[:self.a_tot])
     
     # Mark particle as unbreakable: zero out breakage rate and update sampler.
     def _mark_unbreakable(self, k: int) -> None:
