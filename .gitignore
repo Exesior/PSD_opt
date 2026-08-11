@@ -1,5 +1,5 @@
 # ignore file
-.log
+*.log
 *.gif
 *.xlsx
 *.png
@@ -53,3 +53,7 @@ poetry.lock
 # regression fingerprints must be tracked (the repo-wide *.json rule
 # above would otherwise hide them)
 !mcpbe/tests/golden_reference.json
+
+# WMCPBE Trials: generated debug-run text reports (*.csv/*.log outputs are
+# already covered by the rules above). analyze_logs.py itself stays tracked.
+mcpbe/src/wmcpbe/Trials/debug_logs/*.txt
