@@ -1,13 +1,18 @@
 # Kernel-Übersicht: WMCPBE Solver
 
+**Stand:** Juli 2026
+
 ## 📑 Inhaltsverzeichnis
 
 1. [Agglomeration-Kernels](#agglomeration-kernels)
 2. [Breakage-Kernels](#breakage-kernels)
 3. [Porosity Growth-Kernels](#porosity-growth-kernels)
-4. [Compression-Kernels](#compression-kernels)
+4. [Compression-Kernels (REMOVED)](#compression-kernels-removed)
 5. [Liquid Distribution-Kernels](#liquid-distribution-kernels)
-6. [Syntax für Flüssigkeit & Porosität](#syntax-für-flüssigkeit--porosität)
+6. [Agglomeration Acceptance-Kernels](#agglomeration-acceptance-kernels)
+7. [Continuous Processes-Kernels](#continuous-processes-kernels)
+8. [Syntax für Flüssigkeit & Porosität](#syntax-für-flüssigkeit--porosität)
+9. [Alle Kernel im Überblick](#alle-kernel-im-überblick)
 
 ---
 
@@ -60,8 +65,9 @@ kernel = get_aggregation_kernel('liquid_bridge',
 | Kernel | Formel | Parameter | Flüssigkeit? | Porosität? |
 |--------|--------|-----------|--------------|------------|
 | **power_law** (Standard) | `S = P1 × G^P2 × V^(pl_v/3)` | `p1`, `p2`, `g`, `breakrval`, `pl_v`, `pl_q` | ❌ | ❌ |
-| **stress_based** ⭐ | `P(break) = 1 - exp(-(σ/σ_crit)^m)` | `critical_stress`, `weibull_modulus`, `g`, `stress_size_exp`, `porosity_weakening` | ❌ | ✅ **JA!** |
-| **powerlaw_rumpf** ⭐⭐ | `S = P1 × (1/σ) × G^P2 × V^alpha` | `p1`, `p2`, `g`, `breakrval`, `pl_v`, `k`, `alpha`, `gamma`, `delta`, `x_s` | ✅ **JA!** | ✅ **JA!** |
+| **powerlaw_rumpf** ⭐ | `S = P1 × (1/σ) × G^P2 × V^alpha` | `p1`, `p2`, `g`, `breakrval`, `pl_v`, `k`, `alpha`, `gamma`, `delta`, `x_s` | ✅ **JA!** | ✅ **JA!** |
+
+**Hinweis:** `stress_based` wurde entfernt (nicht verwendet).
 
 ### Details
 
@@ -265,39 +271,48 @@ poro_new = 0.4  # Konsistent mit volume_mixing
 
 ---
 
-## Compression-Kernels
+## Compression-Kernels (REMOVED) ⚠️
 
-| Kernel | Formel | Parameter | Flüssigkeit? |
-|--------|--------|-----------|--------------|
-| **exponential_decay** (Standard) | `p(t) = p_min + (p0-p_min) × exp(-rate×t)` | `rate`, `min_porosity` | ❌ |
-| **stress_compaction** ⭐ | `dp/dt = -k × (σ_applied - σ_yield)` | `compaction_rate`, `yield_stress`, `g` | ❌ |
+**Das Modul `kernels/compression/` wurde entfernt!**
 
-### Details
+Verwenden Sie stattdessen **ContinuousProcessesHandler** mit den Kerneln aus `kernels/continuous_processes/`.
 
-#### `exponential_decay` (Einfach)
+### Migration Guide
+
+**ALT (nicht mehr verfügbar):**
 ```python
-kernel = get_compression_kernel('exponential_decay',
-    rate=0.02,          # 1/s
-    min_porosity=0.3    # Minimale Restporosität
+solver = MCPBESolver(
+    compression_kernel_name='exponential_decay',
+    compression_kernel_params={'rate': 0.02, 'min_porosity': 0.3},
 )
 ```
-- **Anwendung**: Zeitabhängige Verdichtung (z.B. Alterung)
 
-#### `stress_compaction` (Physikalisch) ⭐
+**NEU (empfohlen):**
 ```python
-kernel = get_compression_kernel('stress_compaction',
-    compaction_rate=1e-6,   # 1/(Pa·s)
-    yield_stress=1e5,       # Pa (Fließgrenze)
-    g=1000                  # Scherrate für Spannungsabschätzung
+solver = MCPBESolver(...)  # Ohne compression_kernel_name
+
+# ContinuousProcessesHandler erstellen
+solver.create_continuous_processes_handler(
+    enabled=True,
+    compression_rate=0.02,    # 1/s
+    min_porosity=0.3,         # Minimale Porosität
+    k_int=1e12,               # Optional: Liquid Internalization
 )
 ```
-- **Physik**: Nur Spannung oberhalb Fließgrenze verdichtet
-- **Zugriff auf Solver-Zustand**:
-  ```python
-  sigma = mu * g  # Einfache Spannungsabschätzung
-  if sigma > yield_stress:
-      dp/dt = -rate * (sigma - yield_stress)
-  ```
+
+### Warum wurde das Modul entfernt?
+
+1. **Redundanz**: Die Funktionalität ist in `continuous_processes` enthalten
+2. **Konsistenz**: Alle zeitkontinuierlichen Prozesse in einem Modul
+3. **Erweiterbarkeit**: Einfacher neue Prozesse hinzufügen (Operator Splitting)
+
+### Verfügbare Ersatz-Kernel
+
+| Prozess | Kernel | Modul |
+|---------|--------|-------|
+| Porositätskompression | `porosity_compression` | `continuous_processes` |
+| Flüssigkeitsaufnahme | `liquid_internalization` | `continuous_processes` |
+| Poren-Einschluss (Agg) | `liq_internalisation_agglomeration` | `continuous_processes` |
 
 ---
 
@@ -390,7 +405,88 @@ if hasattr(solver, 'saturation'):
 
 ---
 
-### 🔹 Kombination in Kernels
+---
+
+## Agglomeration Acceptance-Kernels
+
+Diese Kernel entscheiden, ob eine Kollision zur Agglomeration führt oder ob die Partikel abprallen.
+
+| Kernel | Kriterium | Parameter | Flüssigkeit? | Porosität? |
+|--------|-----------|-----------|--------------|------------|
+| **stokes_krit** (Standard) | `St < St_crit` → akzeptiert | `U_coll`, `binder_viscosity`, `rho_solid`, `rho_liquid`, `h_a` | ✅ | ❌ |
+| **fittable** | `rng() < u_acc` | `u_acc` | ❌ | ❌ |
+
+### Details
+
+#### `stokes_krit` (Braumann et al. 2007)
+```python
+kernel = get_agglomeration_acceptance_kernel('stokes_krit',
+    U_coll=1.0,           # m/s (Kollisionsgeschwindigkeit)
+    binder_viscosity=0.1, # Pa·s (Binder-Viskosität)
+    rho_solid=2500.0,     # kg/m³ (Feststoffdichte)
+    rho_liquid=1000.0,    # kg/m³ (Flüssigkeitsdichte)
+    h_a=500e-9            # m (minimale Filmdicke)
+)
+```
+- **Physik**: Stokes-Zahl vergleicht Trägheit mit viskoser Dämpfung
+- **Anwendung**: Nassgranulation mit viskosem Bindemittel
+- **Referenz**: Braumann, A.P., et al. (2007)
+
+#### `fittable` (Einfach)
+```python
+kernel = get_agglomeration_acceptance_kernel('fittable',
+    u_acc=0.8  # Akzeptanzwahrscheinlichkeit [0-1]
+)
+```
+- **Physik**: Konstante Akzeptanzrate (fitting parameter)
+- **Anwendung**: Vereinfachte Modelle, Kalibrierung
+
+---
+
+## Continuous Processes-Kernels
+
+Diese Kernel modellieren zeitkontinuierliche Prozesse (via Operator Splitting).
+
+| Kernel | Prozess | Formel | Parameter |
+|--------|---------|--------|-----------|
+| **porosity_compression** | Porositätskompression | `p(t) = p_min + (p₀-p_min) × exp(-rate×t)` | `rate`, `min_porosity` |
+| **liquid_internalization** | Flüssigkeitsaufnahme | `dl_intern/dt = k × l_ex × (v_pore - l_intern)` | `k_int` |
+| **liq_internalisation_agglomeration** | Poren-Einschluss bei Agg | Braumann 2007 Formel | - |
+
+### Details
+
+#### `porosity_compression`
+```python
+from wmcpbe.kernels.continuous_processes import get_continuous_kernel
+
+kernel = get_continuous_kernel('porosity_compression',
+    rate=0.02,          # 1/s
+    min_porosity=0.3    # Minimale Restporosität
+)
+```
+- **Anwendung**: Zeitabhängige Verdichtung unter Scherung
+
+#### `liquid_internalization`
+```python
+kernel = get_continuous_kernel('liquid_internalization',
+    k_int=1e12  # 1/(m³·s) (Internalisierungsrate)
+)
+```
+- **Physik**: Kapillar-getriebene Porenfüllung (Braumann et al. 2007)
+- **Zeitskala**: 
+  - Schnell: k_int > 1e9 (sofortige Füllung)
+  - Mittel: k_int ≈ 1e6-1e8 (Sekunden bis Minuten)
+
+#### `liq_internalisation_agglomeration`
+```python
+kernel = get_continuous_kernel('liq_internalisation_agglomeration')
+```
+- **Physik**: Einschluss externer Flüssigkeit bei Partikelkontakt
+- **Formel**: Siehe Braumann et al. (2007), Eq. 15
+
+---
+
+## 🔹 Kombination in Kernels
 
 **Beispiel: Liquid Bridge mit Porosität**
 
@@ -431,10 +527,12 @@ class LiquidBridgeKernel(AggregationKernel):
 | Kernel-Typ | Unterstützt Flüssigkeit? | Unterstützt Porosität? |
 |------------|-------------------------|------------------------|
 | **Agglomeration** | ✅ (liquid_bridge) | ✅ (liquid_bridge) |
-| **Breakage** | ❌ | ✅ (stress_based) |
+| **Breakage** | ✅ (powerlaw_rumpf) | ✅ (stress_based, powerlaw_rumpf) |
 | **Porosity Growth** | ✅ (incomplete_mixing) | ✅ (alle!) |
-| **Compression** | ❌ | ✅ (alle) |
+| **Compression** | ❌ | ✅ | ⚠️ **REMOVED** - Use `continuous_processes` |
 | **Liquid Distribution** | ✅ (alle!) | ✅ (saturation_preferential) |
+| **Agg. Acceptance** | ✅ (stokes_krit) | ❌ |
+| **Continuous Processes** | ✅ (liquid_internalization) | ✅ (porosity_compression) |
 
 ---
 
@@ -495,6 +593,79 @@ V_flat Struktur für dim=1:
 
 - **volume_mixing**: `poro_frag = poro_parent` (Vererbung)
 - **incomplete_mixing**: `poro_frag = poro_parent × (1 - collapse_factor)` (Kollaps)
+
+---
+
+## Alle Kernel im Überblick
+
+### Komplette Kernel-Liste nach Kategorie
+
+#### 1. Aggregation (5 Kernel)
+| Name | Beschreibung | Flüssigkeit | Porosität |
+|------|--------------|-------------|----------|
+| `shear_chin1998` | Scherungsgetrieben (Chin 1998) | ❌ | ❌ |
+| `brownian_tsouris1995` | Brownsche Bewegung | ❌ | ❌ |
+| `constant` | Konstante Rate | ❌ | ❌ |
+| `sum` | Summenkernel | ❌ | ❌ |
+| `liquid_bridge` ⭐ | Mit Flüssigkeitsbrücken | ✅ | ✅ |
+
+#### 2. Breakage (3 Kernel)
+| Name | Beschreibung | Flüssigkeit | Porosität |
+|------|--------------|-------------|----------|
+| `power_law` | Potenzgesetz (Legacy) | ❌ | ❌ |
+| `stress_based` ⭐ | Weibull-Spannungsmodell | ❌ | ✅ |
+| `powerlaw_rumpf` ⭐⭐ | Rumpf-Theorie mit Sättigung | ✅ | ✅ |
+
+#### 3. Porosity Growth (3 Kernel)
+| Name | Beschreibung | Agg | Break | Nuc |
+|------|--------------|-----|-------|-----|
+| `volume_mixing` | Volumina additiv | + | Vererbung | 0.4 |
+| `incomplete_mixing` ⭐ | +Trapped Pores | +ΔV | Kollaps | 0.4 |
+| `cone_model` | Kegelmodell | Geometrisch | - | 0.4 |
+
+#### 4. Compression (❌ ENTFERNT)
+| Name | Beschreibung | Status |
+|------|--------------|--------|
+| `exponential_decay` | Exponentieller Zerfall | ❌ REMOVED |
+| `stress_compaction` | Spannungsgetrieben | ❌ REMOVED |
+
+⚠️ **Achtung**: Modul `kernels/compression/` wurde entfernt! 
+Verwenden Sie `kernels/continuous_processes/` mit `porosity_compression` Kernel.
+
+#### 5. Liquid Distribution (3 Kernel)
+| Name | Auswahlregel | Bias |
+|------|--------------|------|
+| `uniform_weighted` | `P ∝ W` | - |
+| `surface_weighted` | `P ∝ r²` | - |
+| `saturation_preferential` ⭐ | `P ∝ (1-S)^bias` | konfigurierbar |
+
+#### 6. Agglomeration Acceptance (2 Kernel)
+| Name | Kriterium | Physik |
+|------|-----------|--------|
+| `stokes_krit` | Stokes-Zahl | Braumann et al. 2007 |
+| `fittable` | Konstante Wahrscheinlichkeit | Fitting-Parameter |
+
+#### 7. Continuous Processes (3 Kernel)
+| Name | Prozess | Parameter |
+|------|---------|----------|
+| `porosity_compression` | Porositätsabbau | `rate`, `min_porosity` |
+| `liquid_internalization` | Kapillare Aufnahme | `k_int` |
+| `liq_internalisation_agglomeration` | Poren-Einschluss | - |
+
+---
+
+## 🎯 Empfehlungen für Anwendungsszenarien
+
+| Szenario | Empfohlene Kernel-Kombination |
+|----------|-------------------------------|
+| **Trockene Agglomeration** | `shear_chin1998` + `volume_mixing` + `create_continuous_processes_handler(compression_enabled=True, compression_rate=0.02)` |
+| **Feuchte Granulation (einfach)** | `liquid_bridge` + `volume_mixing` + `uniform_weighted` |
+| **Feuchte Granulation (vollständig)** | `liquid_bridge` + `powerlaw_rumpf` + `incomplete_mixing` + `saturation_preferential` + `stokes_krit` + `liquid_internalization` |
+| **Spröde Materialien** | `stress_based` + `volume_mixing` |
+| **High-Shear mit Bruch** | `shear_chin1998` + `power_law(breakrval=4)` |
+| **Nasse Sprühgranulation** | `liquid_bridge` + `incomplete_mixing` + `saturation_preferential` + `liq_internalisation_agglomeration` |
+| **Porositätsentwicklung studieren** | `incomplete_mixing` (zeigt Porenentstehung/-kollaps) |
+| **Validierung/Tests** | `constant` + `volume_mixing` (analytische Lösungen) |
 
 ---
 

@@ -19,6 +19,33 @@ from typing import Optional, Any, Dict
 import numpy as np
 
 
+class KernelEvaluationError(RuntimeError):
+    """
+    Exception raised when a kernel evaluation fails.
+    
+    This error indicates that a physics kernel (aggregation, breakage, etc.)
+    encountered invalid input or failed during computation. The simulation
+    may continue with degraded physics (e.g., zero collision rate) but
+    the user should investigate the root cause.
+    
+    Attributes:
+        kernel_name: Name of the kernel that failed
+        message: Detailed error description
+        original_exception: The underlying exception (if any)
+    
+    Example:
+        >>> try:
+        ...     beta = kernel.compute_beta(r1=-1e-6, r2=2e-6)
+        ... except KernelEvaluationError as e:
+        ...     logger.warning(f"Kernel {e.kernel_name} failed: {e}")
+    """
+    
+    def __init__(self, kernel_name: str, message: str, original_exception: Optional[Exception] = None):
+        self.kernel_name = kernel_name
+        self.original_exception = original_exception
+        super().__init__(f"{kernel_name}: {message}")
+
+
 class KernelManager:
     """
     Manages kernel instances for WMCPBE solver.
@@ -32,11 +59,11 @@ class KernelManager:
         agg_kernel: Aggregation kernel instance
         break_kernel: Breakage kernel instance
         porosity_growth_kernel: Porosity growth kernel instance
-        compression_kernel: Compression kernel instance (legacy, use continuous_processes)
         liquid_dist_kernel: Liquid distribution kernel instance
         agglomeration_acceptance_kernel: Agglomeration acceptance kernel instance
         porosity_compression_kernel: Porosity compression kernel (continuous process)
         liquid_internalization_kernel: Liquid internalization kernel (continuous process)
+        liq_internalisation_agglomeration_kernel: Liquid internalization during agglomeration (event-based)
     """
     
     def __init__(
@@ -50,9 +77,6 @@ class KernelManager:
         # Porosity growth kernel config
         porosity_growth_kernel_name: Optional[str] = None,
         porosity_growth_kernel_params: Optional[Dict[str, Any]] = None,
-        # Compression kernel config (legacy)
-        compression_kernel_name: Optional[str] = None,
-        compression_kernel_params: Optional[Dict[str, Any]] = None,
         # Liquid distribution kernel config
         liquid_dist_kernel_name: Optional[str] = None,
         liquid_dist_kernel_params: Optional[Dict[str, Any]] = None,
@@ -90,8 +114,6 @@ class KernelManager:
         self.break_kernel_params = break_kernel_params or {}
         self.porosity_growth_kernel_name = porosity_growth_kernel_name
         self.porosity_growth_kernel_params = porosity_growth_kernel_params or {}
-        self.compression_kernel_name = compression_kernel_name
-        self.compression_kernel_params = compression_kernel_params or {}
         self.liquid_dist_kernel_name = liquid_dist_kernel_name
         self.liquid_dist_kernel_params = liquid_dist_kernel_params or {}
         # Agglomeration acceptance kernel config (NEW)
@@ -110,7 +132,6 @@ class KernelManager:
         self.agg_kernel = None
         self.break_kernel = None
         self.porosity_growth_kernel = None
-        self.compression_kernel = None  # Legacy
         self.liquid_dist_kernel = None
         self.agglomeration_acceptance_kernel = None
         # Continuous processes kernels (NEW)
@@ -136,14 +157,12 @@ class KernelManager:
             from wmcpbe.kernels.aggregation import get_aggregation_kernel
             from wmcpbe.kernels.breakage import get_breakage_kernel
             from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
-            from wmcpbe.kernels.compression import get_compression_kernel
             from wmcpbe.kernels.liquid_distribution import get_liquid_distribution_kernel
         except ImportError:
             # Fallback to relative imports (package context)
             from .kernels.aggregation import get_aggregation_kernel
             from .kernels.breakage import get_breakage_kernel
             from .kernels.porosity_growth import get_porosity_growth_kernel
-            from .kernels.compression import get_compression_kernel
             from .kernels.liquid_distribution import get_liquid_distribution_kernel
         
         # ==========================================
@@ -211,17 +230,26 @@ class KernelManager:
             self.porosity_growth_kernel = None
         
         # ==========================================
-        # Compression Kernel
+        # Compression Kernel (REMOVED)
         # ==========================================
-        if self.compression_kernel_name is not None:
-            # Explicit kernel selection
-            self.compression_kernel = get_compression_kernel(
-                self.compression_kernel_name,
-                **self.compression_kernel_params
+        # Legacy compression_kernel_name parameter is deprecated.
+        # Use continuous_processes kernels instead.
+        if hasattr(self, 'compression_kernel_name') and self.compression_kernel_name is not None:
+            import warnings
+            warnings.warn(
+                "The 'compression_kernel_name' parameter and kernels/compression/ module are REMOVED. "
+                "Use ContinuousProcessesHandler with porosity_compression kernel instead.\n"
+                "\nMigration guide:\n"
+                "  OLD: solver = MCPBESolver(compression_kernel_name='exponential_decay', ...)\n"
+                "  NEW: solver.create_continuous_processes_handler(\n"
+                "           enabled=True,\n"
+                "           compression_rate=0.02,\n"
+                "           min_porosity=0.3,\n"
+                "       )\n"
+                "\nSee docs: wmcpbe.kernels.continuous_processes",
+                DeprecationWarning,
+                stacklevel=2
             )
-        else:
-            # Optional kernel - set to None if not specified
-            self.compression_kernel = None
         
         # ==========================================
         # Liquid Distribution Kernel
@@ -259,6 +287,7 @@ class KernelManager:
         # These replace the legacy compression kernel with a more flexible framework
         
         # Porosity Compression Kernel
+        # Note: Legacy compression_kernel_name is deprecated - use continuous_processes instead
         if hasattr(self, 'porosity_compression_kernel_name') and self.porosity_compression_kernel_name is not None:
             try:
                 from wmcpbe.kernels.continuous_processes import get_continuous_kernel
@@ -267,16 +296,6 @@ class KernelManager:
             self.porosity_compression_kernel = get_continuous_kernel(
                 'porosity_compression',
                 **self.porosity_compression_kernel_params
-            )
-        elif self.compression_kernel_name is not None:
-            # Fallback to legacy compression kernel
-            try:
-                from wmcpbe.kernels.compression import get_compression_kernel
-            except ImportError:
-                from .kernels.compression import get_compression_kernel
-            self.porosity_compression_kernel = get_compression_kernel(
-                self.compression_kernel_name,
-                **self.compression_kernel_params
             )
         else:
             self.porosity_compression_kernel = None
@@ -367,26 +386,6 @@ class KernelManager:
             v_liq1=v_liq1, v_liq2=v_liq2,
             sat1=sat1, sat2=sat2,
             collision_energy=collision_energy,
-            solver=solver
-        )
-    
-    def compute_porosity_compression(
-        self,
-        porosity: float,
-        dt: float,
-        v_particle: Optional[float] = None,
-        local_stress: Optional[float] = None,
-        saturation: Optional[float] = None,
-        solver = None
-    ) -> float:
-        """Delegate porosity compression to continuous process kernel."""
-        if self.porosity_compression_kernel is None:
-            raise RuntimeError("Porosity compression kernel not initialized")
-        return self.porosity_compression_kernel.compute(
-            porosity, dt,
-            v_particle=v_particle,
-            local_stress=local_stress,
-            saturation=saturation,
             solver=solver
         )
     

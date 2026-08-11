@@ -12,10 +12,10 @@ Physical Models:
        dl_intern/dt = k × l_ex × (v_pore - l_intern)
        
        where:
-           - l_intern: Internal liquid volume [m³]
-           - l_ex: External liquid volume [m³]
-           - v_pore: Pore volume [m³]
-           - k: Rate constant [1/(m³·s)]
+           - l_intern: Internal liquid volume [m^3]
+           - l_ex: External liquid volume [m^3]
+           - v_pore: Pore volume [m^3]
+           - k: Rate constant [1/(m^3·s)]
     
     2. Porosity Compression:
        dε/dt = -rate × (ε - ε_min)
@@ -56,14 +56,14 @@ class ContinuousProcessesConfig:
     
     Attributes:
         enabled: Whether continuous processes are active
-        k_int: Internalization rate constant [1/(m³·s)]
+        k_int: Internalization rate constant [1/(m^3·s)]
                Typical: 1e10 - 1e14 depending on material
         compression_enabled: Whether porosity compression is active
         compression_rate: Rate constant [1/s]. Typical: 0.01-0.1
         min_porosity: Minimum asymptotic porosity [0, 1). Typical: 0.25-0.4
     """
     enabled: bool = False
-    k_int: float = 1e12  # 1/(m³·s)
+    k_int: float = 1e12  # 1/(m^3·s)
     compression_enabled: bool = True
     compression_rate: float = 0.02  # 1/s
     min_porosity: float = 0.3
@@ -310,10 +310,27 @@ class ContinuousProcessesHandler:
         v_dry_view = solver.V_flat[-1, :a_tot]
         sat_view = solver.saturation[:a_tot]
         poro_old = poro_view.copy()
-
+        
         # Vollkoerper (NaN) cannot be compressed, and neither can particles that
         # already sit at or below the asymptotic minimum porosity.
         active = ~np.isnan(poro_old) & (poro_old > min_poro)
+
+        # === DEBUG COMP: VOR KOMPRESSION ===
+        if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_comp', True):
+            v_dry = solver.V_flat[-1, :solver.a_tot]
+            poro = solver.porosity[:solver.a_tot]
+            w = solver.W[:solver.a_tot]
+            valid = ~np.isnan(poro)
+            v_solid = np.zeros_like(v_dry)
+            v_solid[valid] = v_dry[valid] * (1.0 - poro[valid])
+            v_solid[~valid] = v_dry[~valid]
+            
+            solid_before = np.sum(v_solid * w)
+            print(f"\n[DEBUG COMP] t={getattr(solver, '_elapsed', 0.0):.4f}s, dt={dt:.4f}s")
+            print(f"  Active particles: {np.sum(active)}")
+            print(f"  poro_range=[{np.nanmin(poro):.4f}, {np.nanmax(poro):.4f}]")
+            print(f"  BEFORE: V_solid_total={solid_before:.6e} (MUSST KONSTANT BLEIBEN!)")
+# ================================
         if not np.any(active):
             return
 
@@ -369,6 +386,24 @@ class ContinuousProcessesHandler:
                 np.divide(V_liq_int_old, V_pore_new, out=new_sat, where=sat_mask)
                 np.minimum(new_sat, 1.0, out=new_sat)
                 sat_view[sat_mask] = new_sat[sat_mask]
+
+        # === DEBUG COMP: NACH KOMPRESSION ===
+        if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_comp', True):
+            v_dry_after = solver.V_flat[-1, :solver.a_tot]
+            poro_after = solver.porosity[:solver.a_tot]
+            w_after = solver.W[:solver.a_tot]
+            valid_after = ~np.isnan(poro_after)
+            v_solid_after = np.zeros_like(v_dry_after)
+            v_solid_after[valid_after] = v_dry_after[valid_after] * (1.0 - poro_after[valid_after])
+            v_solid_after[~valid_after] = v_dry_after[~valid_after]
+            
+            solid_after = np.sum(v_solid_after * w_after)
+            liq_after = np.sum(solver.liquid_volume[:solver.a_tot] * w_after)
+            
+            print(f"  AFTER:  V_solid_total={solid_after:.6e}, V_liq_total={liq_after:.6e}")
+            print(f"  ΔV_solid={solid_after - solid_before:.6e} (SOLLTE = 0 sein!)")
+            print(f"  poro_range=[{np.nanmin(poro_after):.4f}, {np.nanmax(poro_after):.4f}]")
+# ================================
 
         self._particles_compressed_total += int(np.count_nonzero(reached))
     

@@ -5,7 +5,7 @@ Breakage rate model incorporating particle strength σ as function of
 porosity and saturation, based on Rumpf's theory for granule strength.
 
 Formula:
-    S(V) = P1 × (1/σ) × G^P2 × V^alpha
+    S(V,poro,saturation) = P1 × (1/σ) × G^P2 × V^alpha
 
 Where:
     - P1, P2: Empirical parameters

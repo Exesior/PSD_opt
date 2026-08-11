@@ -3,8 +3,7 @@ Breakage Kernels for WMCPBE Solver.
 
 Available kernels:
     - power_law: Power-law breakage rate (BREAKRVAL=1,2,4,5)
-    - stress_based: Stress-based Weibull model
-    - powerlaw_rumpf: Rumpf theory with porosity/saturation strength (NEW)
+    - powerlaw_rumpf: Rumpf theory with porosity/saturation strength
 
 Usage:
     >>> from wmcpbe.kernels.breakage import get_breakage_kernel
@@ -17,13 +16,11 @@ from ..base import BreakageKernel
 
 # Import all kernel implementations
 from .power_law import PowerLawBreakageKernel
-from .stress_based import StressBasedBreakageKernel
 from .powerlaw_rumpf import PowerLawRumpfBreakageKernel
 
 # Registry of available kernels
 BREAK_KERNELS: dict[str, Type[BreakageKernel]] = {
     'power_law': PowerLawBreakageKernel,
-    'stress_based': StressBasedBreakageKernel,
     'powerlaw_rumpf': PowerLawRumpfBreakageKernel,
 }
 
@@ -60,6 +57,5 @@ __all__ = [
     'get_breakage_kernel',
     'list_breakage_kernels',
     'PowerLawBreakageKernel',
-    'StressBasedBreakageKernel',
     'PowerLawRumpfBreakageKernel',
 ]

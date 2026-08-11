@@ -103,13 +103,13 @@ class ConeModelKernel(PorosityGrowthKernel):
                Physical interpretation: Fraction of geometric ΔV that 
                becomes accessible pore space.
                
-        k_break: Shape correction factor for breakage (default: 0.1)
+        k_break: Shape correction factor for breakage (default: 1.0)
                  Scales ΔV subtracted from pore volume during fragmentation.
                  Physical interpretation: Accounts for (n-1) cones in series
                  and pore collapse at fresh fracture surfaces.
     
     Example:
-        >>> kernel = ConeModelKernel(k_agg=0.5, k_break=0.1)
+        >>> kernel = ConeModelKernel(k_agg=1.0, k_break=1.0)
         
         # Equal-sized agglomeration
         >>> V_dry, poro = kernel.compute_merged_porosity(
@@ -133,7 +133,7 @@ class ConeModelKernel(PorosityGrowthKernel):
     
     def get_default_params(self) -> dict:
         return {
-            'k_agg': 1.0,       # Shape correction for agglomeration
+            'k_agg': 1.0,       # Shape correction for agglomeration 
             'k_break': 1.0,     # Shape correction for breakage (smaller due to n-1 cones)
         }
     
@@ -264,9 +264,9 @@ class ConeModelKernel(PorosityGrowthKernel):
         
         Args:
             v_dry1: Dry volume of particle 1 [m³] (= V_solid + V_pore)
-            poro1: Porosity of particle 1 (NaN for Vollkörper)
+            poro1: Porosity of particle 1 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_dry2: Dry volume of particle 2 [m³]
-            poro2: Porosity of particle 2 (NaN for Vollkörper)
+            poro2: Porosity of particle 2 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_liq1, v_liq2: Liquid volumes (not used in this model)
             sat1, sat2: Saturations (not used in this model)
             collision_energy: Not used in this model
@@ -280,43 +280,51 @@ class ConeModelKernel(PorosityGrowthKernel):
         Note:
             - V_solid is ALWAYS conserved (mass conservation!)
             - All volumes are per PHYSICAL particle (intensive)
-            - Returns NaN porosity if both parents are Vollkörper
+            - Poreless particles (poro=0.0) gain porosity through ΔV on first contact!
+            - Legacy Vollkörper (NaN) remain NaN for backward compatibility
         """
         # ==========================================
-        # Step 1: Handle Vollkörper (NaN porosity)
+        # Step 1: Validate inputs
         # ==========================================
-        both_solid = np.isnan(poro1) and np.isnan(poro2)
-        one_solid = np.isnan(poro1) or np.isnan(poro2)
+        # GUARD: Check for inf/nan in volumes - this indicates a bug upstream!
+        if np.isinf(v_dry1) or np.isnan(v_dry1):
+            raise RuntimeError(
+                f"Invalid v_dry1={v_dry1:.6e} passed to compute_merged_porosity! "
+                f"This indicates V_flat[-1] was corrupted in a previous step."
+            )
+        if np.isinf(v_dry2) or np.isnan(v_dry2):
+            raise RuntimeError(
+                f"Invalid v_dry2={v_dry2:.6e} passed to compute_merged_porosity! "
+                f"This indicates V_flat[-1] was corrupted in a previous step."
+            )
         
-        if both_solid:
-            # Both Vollkörper → child is also Vollkörper
-            # But still calculate geometric ΔV for consistency
-            ri = self._radius_from_volume(v_dry1)
-            rj = self._radius_from_volume(v_dry2)
-            V_pill = self._cone_pill_volume(ri, rj)
-            return V_pill, np.nan
+        # Clamp porosity to valid range [0, 1]
+        poro1 = max(0.0, min(1.0, poro1))
+        poro2 = max(0.0, min(1.0, poro2))
+        
+        # GUARD: Check for inf/nan after decomposition
+        V_solid_1 = v_dry1 * (1.0 - poro1)
+        V_pore_1 = v_dry1 * poro1
+        V_solid_2 = v_dry2 * (1.0 - poro2)
+        V_pore_2 = v_dry2 * poro2
+        
+        if np.isinf(V_solid_1) or np.isnan(V_solid_1):
+            raise RuntimeError(
+                f"V_solid_1={V_solid_1:.6e} invalid! v_dry1={v_dry1:.6e}, poro1={poro1:.4f}"
+            )
+        if np.isinf(V_solid_2) or np.isnan(V_solid_2):
+            raise RuntimeError(
+                f"V_solid_2={V_solid_2:.6e} invalid! v_dry2={v_dry2:.6e}, poro2={poro2:.4f}"
+            )
         
         # ==========================================
         # Step 2: Decompose into V_solid and V_pore
         # ==========================================
         # IMPORTANT: ε = V_pore / V_dry  →  V_pore = ε × V_dry
-        #            V_solid = V_dry - V_pore = V_dry × (1 - ε)
-        
-        if np.isnan(poro1):
-            # Particle 1 is Vollkörper
-            V_solid_1 = v_dry1
-            V_pore_1 = 0.0
-        else:
-            V_solid_1 = v_dry1 * (1.0 - poro1)
-            V_pore_1 = v_dry1 * poro1
-        
-        if np.isnan(poro2):
-            # Particle 2 is Vollkörper
-            V_solid_2 = v_dry2
-            V_pore_2 = 0.0
-        else:
-            V_solid_2 = v_dry2 * (1.0 - poro2)
-            V_pore_2 = v_dry2 * poro2
+        #            V_solid = V_dry × (1 - ε)
+        # 
+        # This works for BOTH poro=0.0 (non-porous) AND poro>0.0 (porous)!
+        # For poro=0.0: V_solid = V_dry × 1.0 = V_dry ✓, V_pore = 0.0 ✓
         
         # ==========================================
         # Step 3: Merge with MASS CONSERVATION
@@ -327,17 +335,51 @@ class ConeModelKernel(PorosityGrowthKernel):
         # Old pore volume (additive from parents)
         V_pore_old = V_pore_1 + V_pore_2
         
+        # GUARD: Check intermediate values
+        if np.isinf(V_solid_new) or np.isnan(V_solid_new):
+            raise RuntimeError(
+                f"V_solid_new={V_solid_new:.6e} invalid! "
+                f"V_solid_1={V_solid_1:.6e}, V_solid_2={V_solid_2:.6e}"
+            )
+        if np.isinf(V_pore_old) or np.isnan(V_pore_old):
+            raise RuntimeError(
+                f"V_pore_old={V_pore_old:.6e} invalid! "
+                f"V_pore_1={V_pore_1:.6e}, V_pore_2={V_pore_2:.6e}"
+            )
+        
         # ==========================================
         # Step 4: Calculate geometric ΔV
         # ==========================================
         # Use V_dry for radius calculation (represents outer geometry)
         ΔV = self._delta_volume_pair(v_dry1, v_dry2)
         
+        # GUARD: Check ΔV
+        if np.isinf(ΔV) or np.isnan(ΔV):
+            raise RuntimeError(
+                f"ΔV={ΔV:.6e} invalid! v_dry1={v_dry1:.6e}, v_dry2={v_dry2:.6e}"
+            )
+        
         # ==========================================
         # Step 5: Add new pores from contact geometry
         # ==========================================
         # V_pore_new = V_pore_old + k_agg × ΔV
-        V_pore_new = V_pore_old + self.k_agg * ΔV
+        # Note: k_agg=0.5 (default) dampens pore growth to prevent runaway
+        delta_pore = self.k_agg * ΔV
+        
+        # GUARD: Prevent excessive pore addition
+        if np.isinf(delta_pore) or np.isnan(delta_pore):
+            raise RuntimeError(
+                f"k_agg*ΔV={delta_pore:.6e} invalid! k_agg={self.k_agg}, ΔV={ΔV:.6e}"
+            )
+        
+        V_pore_new = V_pore_old + delta_pore
+        
+        # GUARD: Check V_pore_new before clamping
+        if np.isinf(V_pore_new) or np.isnan(V_pore_new):
+            raise RuntimeError(
+                f"V_pore_new={V_pore_new:.6e} invalid! "
+                f"V_pore_old={V_pore_old:.6e}, k_agg*ΔV={delta_pore:.6e}"
+            )
         
         # Ensure non-negative (numerical safety)
         V_pore_new = max(0.0, V_pore_new)
@@ -356,6 +398,13 @@ class ConeModelKernel(PorosityGrowthKernel):
             poro_new = V_pore_new / V_dry_new
         else:
             poro_new = 0.0
+        
+        # GUARD: NaN check - if NaN occurs here, it's a bug!
+        if np.isnan(poro_new):
+            raise RuntimeError(
+                f"NaN porosity generated in compute_merged_porosity! "
+                f"V_pore_new={V_pore_new:.6e}, V_dry_new={V_dry_new:.6e}"
+            )
         
         # Clamp to valid range [0, 1)
         poro_new = max(0.0, min(0.9999, poro_new))
@@ -471,12 +520,17 @@ class ConeModelKernel(PorosityGrowthKernel):
             return [0.0] * n
         
         # ==========================================
-        # Step 1: Handle Vollkörper parent
+        # Step 1: Validate and clamp parent porosity
         # ==========================================
+        # Clamp to valid range [0, 1]
+        parent_porosity = max(0.0, min(1.0, parent_porosity))
+        
+        # GUARD: NaN check - if NaN passed, it's a bug!
         if np.isnan(parent_porosity):
-            # Parent is Vollkörper → fragments inherit this
-            # (no pores to lose)
-            return [np.nan] * n
+            raise RuntimeError(
+                f"NaN parent_porosity passed to compute_fragment_porosity! "
+                f"parent_volume={parent_volume:.6e}, n_fragments={n}"
+            )
         
         # ==========================================
         # Step 2: Decompose parent into V_solid and V_pore
@@ -484,6 +538,9 @@ class ConeModelKernel(PorosityGrowthKernel):
         # IMPORTANT: ε = V_pore / V_dry  →  V_pore = ε × V_dry
         #            V_solid = V_dry × (1 - ε)
         # NOTE: parent_volume is V_dry of parent
+        # 
+        # For poro=0.0: V_solid = parent_volume × 1.0 = parent_volume ✓
+        #               V_pore = 0.0 ✓
         V_solid_parent = parent_volume * (1.0 - parent_porosity)
         V_pore_parent = parent_volume * parent_porosity
         
@@ -560,6 +617,10 @@ class ConeModelKernel(PorosityGrowthKernel):
             else:
                 poro_frag = 0.0
             
+            # GUARD: NaN check
+            if np.isnan(poro_frag):
+                poro_frag = 0.0
+            
             # Clamp to valid range [0, 1)
             poro_frag = max(0.0, min(0.9999, poro_frag))
             poro_list.append(poro_frag)
@@ -579,36 +640,42 @@ class ConeModelKernel(PorosityGrowthKernel):
         """
         Compute porosity for newly nucleated particle.
         
-        For cone_model, nucleation starts with Vollkörper (poro=NaN).
+        For cone_model, nucleation starts with ZERO porosity (poro=0.0).
         Porosity is CREATED during agglomeration via ΔV from contact geometry.
         
         IMPORTANT: Unlike volume_mixing, this kernel does NOT hardcode porosity!
-        It starts with Vollkörper and porosity grows naturally through agglomeration
+        It starts with poro=0.0 and porosity grows naturally through agglomeration
         (ΔV > 0 adds pore volume at contact points).
+        
+        CHANGE (vs. legacy): Returns poro=0.0 instead of NaN.
+        - Legacy: Vollkörper marked with NaN (undefined porosity)
+        - Modern: Poreless particle marked with 0.0 (defined, no pores)
+        - Benefit: Unified handling, no special NaN checks needed
         
         Args:
             v_solid: Solid volume of nucleus [m³]
             v_liquid: Liquid volume associated with nucleus [m³]
             nucleation_params: Can override initial_porosity (optional)
-                               - 'default_porosity': Initial porosity (default: 0.0=Vollkörper)
+                               - 'default_porosity': Initial porosity (default: 0.0)
             solver: Not used
         
         Returns:
             Tuple of (v_dry, porosity)
-            - Returns (v_solid, NaN) for Vollkörper when default_porosity <= 0
+            - Returns (v_solid, 0.0) for poreless when default_porosity <= 0
             - Returns (v_dry, porosity) for porous particles when default_porosity > 0
         """
-        # Priority: 1) nucleation_params, 2) self.params (config), 3) 0.0 (Vollkörper!)
-        default_porosity = 0.0  # DEFAULT: Start with Vollkörper
+        # Priority: 1) nucleation_params, 2) self.params (config), 3) 0.0 (poreless!)
+        default_porosity = 0.0  # DEFAULT: Start poreless (no pores)
         
         if nucleation_params and 'default_porosity' in nucleation_params:
             default_porosity = float(nucleation_params['default_porosity'])
         elif 'default_porosity' in self.params:
             default_porosity = float(self.params['default_porosity'])
         
-        # If explicitly set to 0 or negative → Vollkörper
+        # If explicitly set to 0 or negative → poreless (poro=0.0)
+        # MODERN: Use 0.0 instead of NaN for better compatibility!
         if default_porosity <= 0:
-            return float(v_solid), np.nan  # Vollkörper ✅
+            return float(v_solid), 0.0  # Poreless ✅ (was: np.nan)
         
         # Clamp to valid range
         porosity = max(0.0, min(0.999, default_porosity))

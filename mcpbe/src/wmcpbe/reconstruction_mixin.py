@@ -708,6 +708,10 @@ class ReconstructionMixin:
 
         # rebuild propensities & samplers
         self._initialize_samplers()
+        
+        # rebuild particle merger hash index (if enabled)
+        if hasattr(self, '_particle_merger') and self._particle_merger is not None:
+            self._particle_merger.rebuild_hash_index()
 # %% RS
     def _reconstruct_rs(
         self,

@@ -99,18 +99,25 @@ class PorosityCompressionKernel(CompressionKernel):
             porosity_new: Reduced porosity (≥ min_porosity)
             
         Note:
-            Returns input porosity unchanged if it's NaN (Vollkörper).
+            Returns input porosity unchanged if:
+            - It's NaN (Vollkörper)
+            - It's <= eps_min (no compression needed/wanted)
+              This includes poro=0.0 (poreless) and poro < 0.0 (invalid).
         """
         # Vollkörper cannot be compressed
         if np.isnan(porosity):
             return porosity
         
-        # Clamp input to valid range
+        # Clamp input to valid range [0, 1]
         porosity = max(0.0, min(1.0, porosity))
         
-        # If already at or below minimum, no further compression
+        # No compression if at or below minimum porosity.
+        # Since eps_min >= 0.0, this automatically covers:
+        # - poro = 0.0 (poreless particle, nothing to compress)
+        # - poro < eps_min (already below minimum, don't artificially increase!)
+        # Compression is REDUCTIVE ONLY - never increases porosity!
         if porosity <= self.eps_min:
-            return self.eps_min
+            return porosity
         
         # ==========================================
         # Exponential decay formula
@@ -133,8 +140,8 @@ class PorosityCompressionKernel(CompressionKernel):
         applied elementwise.
 
         Args:
-            porosity: Current porosities; NaN entries ("Vollkoerper") pass
-                      through unchanged.
+            porosity: Current porosities; NaN entries ("Vollkoerper") and
+                      values <= 0.0 (poreless) pass through unchanged.
             dt:       Time step [s]
 
         Returns:
@@ -143,14 +150,28 @@ class PorosityCompressionKernel(CompressionKernel):
         poro = np.asarray(porosity, dtype=float)
         out = poro.copy()
 
+        # Identify particles eligible for compression:
+        # - Not NaN (Vollkörper)
+        # - Greater than 0.0 (has pores)
+        # - Greater than eps_min (above minimum)
         finite = ~np.isnan(poro)
         if not np.any(finite):
             return out
 
+        # Clamp to valid range first
         clipped = np.clip(poro[finite], 0.0, 1.0)
-        decay = np.exp(-self.k * dt)
-        updated = self.eps_min + (clipped - self.eps_min) * decay
-        updated = np.maximum(self.eps_min, updated)
-        # At or below the floor there is nothing left to compress.
-        out[finite] = np.where(clipped <= self.eps_min, self.eps_min, updated)
+        
+        # Only compress particles with porosity > max(0.0, eps_min)
+        # This prevents porenlose Partikel (poro=0.0) from being compressed
+        can_compress = clipped > self.eps_min
+        
+        if np.any(can_compress):
+            decay = np.exp(-self.k * dt)
+            compressible_poro = clipped[can_compress]
+            updated = self.eps_min + (compressible_poro - self.eps_min) * decay
+            updated = np.maximum(self.eps_min, updated)
+            out[finite][can_compress] = updated
+        
+        # Particles with poro <= eps_min remain unchanged (already at minimum)
+        # This includes poro=0.0 which should never be increased artificially!
         return out

@@ -1,496 +1,822 @@
 # WMCPBE Kernel Framework
 
-## Übersicht
-
-Das Kernel-Framework ermöglicht eine flexible, erweiterbare Architektur für physikalische Modelle im WMCPBE-Solver. Jeder physikalische Prozess (Agglomeration, Bruch, Porositätswachstum, Kompression, Flüssigkeitsverteilung) wird durch austauschbare Kernel implementiert.
-
-## Motivation
-
-**Bisherige Architektur:**
-- Kernel-Auswahl über Integer-Flags (`COLEVAL`, `BREAKRVAL`, etc.)
-- Feste Implementierung in JIT-Dateien (`jit_kernel_agg.py`, `jit_kernel_break.py`)
-- Schwer erweiterbar: Neue Kernel erfordern Änderungen an Core-Dateien
-- Porositätslogik fest in `_do_one_agg()` codiert
-
-**Neue Architektur:**
-- Kernel-Auswahl über String-Namen und Parameter-Dicts
-- Jede Kernel-Implementierung in separater Klasse
-- Einfache Erweiterung: Neue Klasse + Factory-Eintrag
-- **PorosityGrowthKernel mit 3 konsistenten Methoden für Agg/Break/Nuc**
-
-## Struktur
-
-```
-kernels/
-├── base.py                          # Abstrakte Basisklassen
-│   ├── KernelBase
-│   ├── AggregationKernel
-│   ├── BreakageKernel
-│   ├── PorosityGrowthKernel         # 3 Methoden: Agg/Break/Nuc
-│   ├── CompressionKernel
-│   └── LiquidDistributionKernel
-│
-├── aggregation/                     # Agglomerationskerne
-│   ├── shear_chin1998.py            # Shear-induziert (Chin 1998)
-│   ├── brownian_tsouris1995.py      # Brown'sche Diffusion
-│   ├── constant.py                  # Konstanter Kernel
-│   ├── sum_kernel.py                # Summenkernel
-│   └── liquid_bridge.py             # Mit Flüssigkeitsbrücken (NEU)
-│
-├── breakage/                        # Bruchkerne
-│   ├── power_law.py                 # Power-Law (bestehend)
-│   └── stress_based.py              # Stress-basiert (NEU)
-│
-├── porosity_growth/                 # Porositätswachstum (Ereignis-basiert)
-│   ├── volume_mixing.py             # Volumenaddition (Standard)
-│   └── incomplete_mixing.py         # Eingeschlossene Poren (Erweitert)
-│
-├── compression/                     # Kompression (Zeit-basiert)
-│   ├── exponential_decay.py         # Exponentieller Zerfall (bestehend)
-│   └── stress_compaction.py         # Stress-abhängig (NEU)
-│
-└── liquid_distribution/             # Flüssigkeitsverteilung
-    ├── uniform_weighted.py          # Gleichverteilt (bestehend)
-    ├── surface_weighted.py          # Oberflächen-gewichtet (NEU)
-    └── saturation_preferential.py   # Sättigungs-präferentiell (NEU)
-```
+Modulare Physik-Kernel für den gewichteten DSMC Monte Carlo PBE Solver.
 
 ---
 
-### PorosityGrowthKernel mit einheitlicher Physik
+## 📌 INHALT
 
-### Design-Prinzip: EIN Kernel = DREI Operationen
-
-Jeder `PorosityGrowthKernel` implementiert **drei konsistente Methoden**, die alle auf demselben physikalischen Modell basieren:
-
-```python
-class PorosityGrowthKernel(KernelBase):
-    
-    def compute_merged_porosity(self, ...) -> tuple[float, float]:
-        """
-        AGGLOMERATION: Zwei Partikel mergen
-        
-        Physikalische Annahme: 
-        - volume_mixing: Volumina additiv
-        - incomplete_mixing: +Trapped Pores durch unvollständige Koaleszenz
-        """
-        pass
-    
-    def compute_fragment_porosity(self, ...) -> float:
-        """
-        BREAKAGE: Fragment-Porosität aus Parent
-        
-        Physikalische Annahme:
-        - volume_mixing: Fragmente erben Parent-Porosität (gleichmäßige Aufteilung)
-        - incomplete_mixing: Porenkollaps durch mechanischen Stress
-        """
-        pass
-    
-    def compute_nucleation_porosity(self, ...) -> tuple[float, float]:
-        """
-        NUCLEATION: Porosität neu gebildeter Partikel
-        
-        Wichtig: Default-Porosität (0.4) ermöglicht Porositätsentstehung für Standartfall.
-        Ohne Default würde volume_mixing nie Porosität aus Vollkörpern erzeugen.
-        """
-        pass
-```
-
-### Warum drei Methoden?
-
-| Grund 			| Erklärung 								|
-|-------------------------------|-----------------------------------------------------------------------|
-| **Konsistenz** 		| Alle Operationen basieren auf DEMSELBEN physikalischen Modell 	|
-| **Wartbarkeit** 		| Änderungen am Modell nur an einer Stelle 				|
-| **Erweiterbarkeit** 		| Neue Modelle (z.B. `stress_dependent_mixing`) einfach implementierbar |
-| **Physikalische Korrektheit** | Agglomeration erzeugt Poren → Breakage reduziert sie (spiegelbildlich)|
+1. [Übersicht](#übersicht)
+2. [Kernel-Architektur](#kernel-architektur)
+3. [Verfügbare Kernel](#verfügbare-kernel)
+4. [Kernel erstellen](#kernel-erstellen)
+5. [Konfigurationsbeispiele](#konfigurationsbeispiele)
+6. [Physik-Hintergrund](#physik-hintergrund)
 
 ---
 
-## Verwendung
+## ÜBERSICHT
 
-### Beispiel 1: PorosityGrowthKernel verwenden
+Das Kernel-Framework ermöglicht modulare Physik-Modelle für:
+
+| Prozesstyp | Beschreibung | Kernel-Klassen |
+|------------|--------------|----------------|
+| **Aggregation** | Partikelkollision & Koaleszenz | `AggregationKernel` |
+| **Breakage** | Partikelzerfall durch Scherung/Stress | `BreakageKernel` |
+| **Porosity Growth** | Porositätsbildung bei Benetzung | `PorosityGrowthKernel` |
+| **Compression** | Porositätsreduktion durch Kompression | `CompressionKernel` |
+| **Liquid Distribution** | Tropfenverteilung auf Partikel | `LiquidDistributionKernel` |
+| **Liquid Internalization** | Kapillare Flüssigkeitsaufnahme | `LiquidInternalizationKernel` |
+| **Agg. Acceptance** | Kollisionsakzeptanz (Stokes) | `AggAcceptanceKernel` |
+
+---
+
+## KERNEL-ARCHITEKTUR
+
+### Basisklassen
 
 ```python
-from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
+from wmcpbe.kernels.base import AggregationKernel, BreakageKernel
 
-# VolumeMixingKernel (Standard, additive Poren)
-kernel = get_porosity_growth_kernel('volume_mixing')
+class MyCustomKernel(AggregationKernel):
+    """Benutzerdefinierter Agglomerations-Kernel."""
+    
+    name = "my_custom"  # Eindeutiger Name
+    
+    def __init__(self, params: dict):
+        super().__init__(params)
+        self.my_param = params.get('my_param', 1.0)
+    
+    def compute_rate(self, i: int, j: int, solver) -> float:
+        """Berechne Kollisionsrate β(i,j)."""
+        # Implementierung hier
+        return beta_ij
+```
 
-# Agglomeration
-v_dry_merged, poro_merged = kernel.compute_merged_porosity(
-    v_dry1=1e-18, poro1=0.4,
-    v_dry2=2e-18, poro2=0.5
+### Kernel-Registrierung
+
+Kernel werden automatisch registriert via `get_*_kernel()` Funktionen:
+
+```python
+from wmcpbe.kernels.aggregation import get_aggregation_kernel
+
+# Kernel erstellen
+kernel = get_aggregation_kernel(
+    'shear_chin1998',
+    params={'corr_beta': 1e-3, 'g': 1000}
 )
-
-# Breakage
-poro_frag = kernel.compute_fragment_porosity(
-    parent_porosity=0.4,
-    fragment_volume=5e-19,
-    parent_volume=1e-18
-)
-
-# Nucleation
-v_dry_nuc, poro_nuc = kernel.compute_nucleation_porosity(
-    v_solid=1e-18,
-    v_liquid=1e-19
-)
-print(f"Nucleation: poro={poro_nuc:.2f} (Default: 0.4)")
 ```
 
-### Beispiel 2: IncompleteMixingKernel (erweitertes Modell)
+### Verwendung im Solver
 
 ```python
-from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
-
-kernel = get_porosity_growth_kernel('incomplete_mixing',
-    trapped_pore_fraction=0.1,   # 10% zusätzliche Poren bei Agg
-    collapse_factor=0.1          # 10% Porenkollaps bei Break
-)
-
-# Agglomeration: Mehr Poren durch eingeschlossene Volumina
-v_dry, poro = kernel.compute_merged_porosity(...)
-# → poro höher als bei volume_mixing
-
-# Breakage: Fragmente dichter (Porenkollaps)
-poro_frag = kernel.compute_fragment_porosity(...)
-# → poro_frag < parent_porosity
-```
-
----
-
-## PorosityGrowthKernel im Detail
-
-### 1. `volume_mixing` (Standard)
-
-**Physikalische Annahme:** Poren und Feststoff sind ideal mischbar, keine eingeschlossenen Volumina.
-
-| Operation 	    | Logik 		| Code 				   |
-|-------------------|-------------------|----------------------------------|
-| **Agglomeration** | Volumina additiv 	| `V_pore_new = V_pore₁ + V_pore₂` |
-| **Breakage** 	    | Vererbung 	| `poro_frag = poro_parent` 	   |
-| **Nucleation**    | Default 0.4 	| `poro_new = 0.4` 		   |
-
-**Warum 0.4 in `volume_mixing`?**
-- Mit volume_mixing ist Porosität NUR additiv (`V_pore_new = V_pore₁ + V_pore₂`)
-- Bei Vollkörpern (poro=NaN) würde **nie** Porosität entstehen!
-- **Hardcodierter Default 0.4** in `VolumeMixingKernel.compute_nucleation_porosity()` ermöglicht Porositätsbildung
-- Andere Kernel (z.B. `incomplete_mixing`) können eigene Defaults haben
-
-```python
-# AGG:
-V_solid_merged = V_solid_1 + V_solid_2
-V_pore_merged  = V_pore_1 + V_pore_2
-poro_merged    = V_pore_merged / (V_solid_merged + V_pore_merged)
-
-# BREAK:
-poro_frag = poro_parent  # Einfach vererben
-
-# NUC:
-poro_new = 0.4  # Ermöglicht Porositätsbildung!
-v_dry = v_solid / (1.0 - 0.4)
-```
-
-### 2. `incomplete_mixing` (Erweitert)
-
-**Physikalische Annahme:** Beim Zusammenkleben entstehen eingeschlossene Poren durch unvollständige Koaleszenz.
-
-| Operation | Logik | Code |
-|-----------|-------|------|
-| **Agglomeration** | +Trapped Pores | `V_pore_new = V_pore₁ + V_pore₂ + ΔV_pore` |
-| **Breakage** | Porenkollaps | `poro_frag = poro_parent × (1 - collapse_factor)` |
-| **Nucleation** | Default 0.4 | `poro_new = 0.4` |
-
-**Physikalische Mechanismen:**
-1. **Contact porosity**: Poren an Partikel-Partikel-Grenzfläche
-2. **Surface roughness**: Mikro-Voids durch nicht-glatte Oberflächen
-3. **Viscous limitation**: Unzureichende Zeit für vollständige Restrukturierung
-
-```python
-# AGG:
-V_pore_trapped = f_trap × min(V_dry_1, V_dry_2)
-V_pore_merged  = V_pore_1 + V_pore_2 + V_pore_trapped
-poro_merged    = V_pore_merged / (V_solid_merged + V_pore_merged)
-
-# BREAK:
-collapse_factor = 0.1  # 10% Porenreduktion
-poro_frag = poro_parent * (1.0 - collapse_factor)
-
-# NUC:
-poro_new = 0.4  # Konsistent mit volume_mixing
-```
-
----
-
-## Kernel-Kategorien
-
-### 1. Aggregation (`aggregation/`)
-
-Berechnet Kollisionsfrequenz β(i,j) zwischen zwei Partikeln.
-
-**Schnittstelle:**
-```python
-beta = kernel.compute_beta(r1, r2, particle1_idx, particle2_idx, solver)
-```
-
-**Verfügbare Kernel:**
-| Name 			| Beschreibung 			     | Parameter 				|
-|-----------------------|------------------------------------|------------------------------------------|
-| `shear_chin1998` 	| Shear-induziert (Chin et al. 1998) | `corr_beta`, `g` 			|
-| `brownian_tsouris1995`| Brown'sche Diffusion 		     | `corr_beta`, `temperature`, `viscosity` 	|
-| `constant` 		| Konstante Frequenz 		     | `corr_beta` 				|
-| `sum` 		| Proportional zu V₁+V₂ 	     | `corr_beta` 				|
-| `liquid_bridge` 	| Mit Flüssigkeitsbrücken 	     | `corr_beta`, `g`, `optimal_saturation`,`liquid_enhancement` |
-
-### 2. Breakage (`breakage/`)
-
-Berechnet Bruchrate S(V) für ein Partikel.
-
-**Schnittstelle:**
-```python
-rate = kernel.compute_rate(v_particle, particle_idx, solver)
-```
-
-**Verfügbare Kernel:**
-| Name 		| Beschreibung 		   | Parameter 							|
-|---------------|--------------------------|------------------------------------------------------------|
-| `power_law` 	| Power-Law Rate 	   | `p1`, `p2`, `g`, `breakrval` 				|
-| `stress_based`| Stress-basiert (Weibull) | `critical_stress`, `weibull_modulus`, `porosity_weakening` |
-
-### 3. Porosity Growth (`porosity_growth/`) 
-
-Berechnet Porosität bei diskreten Ereignissen (Agg/Break/Nuc).
-
-**Schnittstelle:**
-```python
-# Agglomeration
-v_dry, poro = kernel.compute_merged_porosity(v_dry1, poro1, v_dry2, poro2, ...)
-
-# Breakage
-poro_frag = kernel.compute_fragment_porosity(parent_porosity, fragment_volume, parent_volume, ...)
-
-# Nucleation
-v_dry, poro = kernel.compute_nucleation_porosity(v_solid, v_liquid, nucleation_params, ...)
-```
-
-**Verfügbare Kernel:**
-| Name 		     | Agg 		| Break 	| Nuc 	     | Parameter |
-|--------------------|------------------|---------------|------------|-----------|
-| `volume_mixing`    | Additiv 		| Vererbung 	| 0.4 Default| - |
-| `incomplete_mixing`| +Trapped Pores 	| Porenverlust  | siehe Agg  | `trapped_pore_fraction` `revealed_factor` |
-
-### 4. Compression (`compression/`)
-
-Berechnet Porositätsreduktion über Zeit dt (Zeit-basiert).
-
-**Schnittstelle:**
-```python
-poro_new = kernel.compute_porosity_decay(porosity, dt, v_particle, local_stress, saturation, solver)
-```
-
-**Verfügbare Kernel:**
-| Name | Beschreibung | Parameter |
-|------|--------------|-----------|
-| `exponential_decay` | Exponentieller Zerfall | `rate`, `min_porosity` |
-| `stress_compaction` | Stress-abhängig | `compaction_rate`, `yield_stress`, `g` |
-
-### 5. Liquid Distribution (`liquid_distribution/`)
-
-Selektiert Partikel für Flüssigkeitszugabe während Nucleation.
-
-**Schnittstelle:**
-```python
-idx = kernel.select_target_particle(solver, v_droplet, current_time)
-```
-
-**Verfügbare Kernel:**
-| Name | Beschreibung | Parameter |
-|------|--------------|-----------|
-| `uniform_weighted` | Gewichts-proportional | - |
-| `surface_weighted` | Oberflächen-gewichtet | - |
-| `saturation_preferential` | Bevorzugt ungesättigte Partikel | `saturation_bias` |
-
----
-
-## Eigene Kernel implementieren
-
-### Schritt 1: Basisklasse erweitern
-
-```python
-from wmcpbe.kernels.base import PorosityGrowthKernel
-
-class MyCustomPorosityKernel(PorosityGrowthKernel):
-    
-    @property
-    def name(self) -> str:
-        return 'my_custom_porosity'
-    
-    def get_default_params(self) -> dict:
-        return {
-            'param1': 0.1,
-            'param2': 0.5,
-        }
-    
-    def __init__(self, **params):
-        defaults = self.get_default_params()
-        defaults.update(params)
-        self.params = self.validate_params(defaults)
-    
-    def validate_params(self, params: dict) -> dict:
-        if not (0 <= params['param1'] <= 1):
-            raise ValueError("param1 must be in [0, 1]")
-        return params
-    
-    # AGGLOMERATION
-    def compute_merged_porosity(self, v_dry1, poro1, v_dry2, poro2, ...):
-        V_solid_1 = v_dry1 * (1.0 - poro1) if not np.isnan(poro1) else v_dry1
-        V_solid_2 = v_dry2 * (1.0 - poro2) if not np.isnan(poro2) else v_dry2
-        V_solid_merged = V_solid_1 + V_solid_2
-        
-        # Eigene Porenlogik hier
-        V_pore_merged = ... 
-        
-        v_dry_merged = V_solid_merged + V_pore_merged
-        poro_merged = V_pore_merged / v_dry_merged if v_dry_merged > 0 else np.nan
-        
-        return v_dry_merged, poro_merged
-    
-    # BREAKAGE
-    def compute_fragment_porosity(self, parent_porosity, fragment_volume, parent_volume, ...):
-        # Eigene Breakage-Logik hier
-        return parent_porosity  # Oder modifizieren
-    
-    # NUCLEATION
-    def compute_nucleation_porosity(self, v_solid, v_liquid, nucleation_params, ...):
-        # Eigene Nucleation-Logik hier
-        default_porosity = nucleation_params.get('default_porosity', 0.4)
-        v_dry = v_solid / (1.0 - default_porosity)
-        return v_dry, default_porosity
-```
-
-### Schritt 2: Factory registrieren
-
-In `kernels/porosity_growth/__init__.py`:
-
-```python
-from .my_custom_porosity import MyCustomPorosityKernel
-
-POROSITY_GROWTH_KERNELS['my_custom_porosity'] = MyCustomPorosityKernel
-```
-
-Fertig! Der Kernel ist jetzt verfügbar via:
-
-```python
-kernel = get_porosity_growth_kernel('my_custom_porosity', param1=0.2)
-```
-
----
-
-## Testing
-
-Test-Skript ausführen:
-
-```bash
-cd C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe
-python Trials/test_kernel_framework.py
-```
-
-Das Test-Skript überprüft:
-1. Alle Module können importiert werden
-2. Factory-Funktionen erstellen korrekte Instanzen
-3. Berechnungsmethoden liefern plausible Ergebnisse
-4. Parameter-Validierung funktioniert
-
----
-
-## Migration von bestehendem Code
-
-### Alte COLEVAL-Werte → neue Kernel
-
-| COLEVAL | Alter Code | Neuer Kernel |
-|---------|------------|--------------|
-| 1 | Shear (Chin) | `shear_chin1998` |
-| 2 | Brownian | `brownian_tsouris1995` |
-| 3 | Constant | `constant` |
-| 4 | Sum | `sum` |
-
-### Alte BREAKRVAL-Werte → neue Kernel
-
-| BREAKRVAL | Alter Code | Neuer Kernel |
-|-----------|------------|--------------|
-| 1,2,4,5 | Power-Law Varianten | `power_law` |
-
-### Porositätslogik migrieren
-
-**Alt (inline in `_do_one_agg()`):**
-```python
-# Hardcoded logic
-if np.isnan(poro_i):
-    V_solid_i = Vi_dry
-else:
-    V_solid_i = Vi_dry * (1.0 - poro_i)
-# ...
-```
-
-**Neu (über Kernel):**
-```python
-kernel = self.kernel_manager.porosity_growth_kernel
-v_dry_merged, poro_merged = kernel.compute_merged_porosity(
-    v_dry1=Vi_dry, poro1=poro_i,
-    v_dry2=Vj_dry, poro2=poro_j,
-    collision_energy=E_coll,
-    solver=self
+solver = MCPBESolver(
+    agg_kernel_name='shear_chin1998',
+    agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+    break_kernel_name='power_law',
+    break_kernel_params={'p1': 0.01, 'pl_v': 2.0},
 )
 ```
 
 ---
 
-## Nächste Schritte
+## VERFÜGBARE KERNEL
 
-1. **Integration in MCPBESolver**: Kernel-Bindung in `__init__()` und `_initialize_kernels()`
-2. **Bestehende Logik migrieren**: `_do_one_agg()`, `_break_apply_and_maintain()`, `_create_nucleated_particle_copy()` auf Kernel delegieren
-3. **Validation**: Bestehende Test-Cases mit neuer Architektur ausführen (Regressionstests)
-4. **Alte Logik entfernen**: Nach erfolgreicher Validierung inline-Porositätslogik löschen
+### 1. AGGREGATION KERNELS
+
+#### shear_chin1998
+
+**Beschreibung:** Shear-induzierte Agglomeration nach Chin et al. (1998).
+
+**Formel:**
+```
+β(i,j) = corr_beta × G × (r_i + r_j)³
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `corr_beta` | - | Korrekturfaktor (Kalibrierung) | 1e-4 bis 1e-2 |
+| `g` | 1/s | Scherrate | 100 bis 5000 |
+
+**Beispiel:**
+```python
+agg_kernel_name='shear_chin1998',
+agg_kernel_params={
+    'corr_beta': 1e-3,
+    'g': 1000,
+}
+```
+
+**Referenz:** Chin, W.C., et al. (1998). "Agglomeration in high-shear mixers."
 
 ---
 
-## Literatur / Referenzen
+#### brownian_tsouris1995
 
-Für die Implementierung der Kernel wurden folgende Quellen verwendet:
+**Beschreibung:** Brownsche Bewegung nach Tsouris & Tavlarides (1995).
 
-- **Shear-induced agglomeration**: Chin et al., "Shear-induced flocculation in stirred tanks", 1998
-- **Brownian diffusion**: Tsouris et al., "Brownian diffusion as controlling mechanism", 1995
-- **Liquid bridge models**: Iveson et al., "Non-inertial droplet-particle collisions", 2001
-- **Weibull breakage**: Tardos et al., "Stress-induced compaction", 1997
-- **Porosity consolidation**: 10.1103/PhysRevLett.64.2727
-- **Incomplete mixing**: Liu et al., "Wet granulation: mechanism and modeling", 2009
+**Formel:**
+```
+β(i,j) = (2k_BT/3μ) × (1/V_i + 1/V_j) × (V_i^(1/3) + V_j^(1/3))
+```
+
+**Parameter:** Keine (nur temperaturabhängig)
+
+**Beispiel:**
+```python
+agg_kernel_name='brownian_tsouris1995',
+agg_kernel_params={}
+```
+
+**Anwendung:** Feine Partikel (<10µm) in ruhenden Systemen.
 
 ---
 
-## Autor & Kontakt
+#### constant
 
-- Implementierung: WMCPBE Development Team
-- Framework-Design: Basierend auf Kernel Registry Pattern
-- PorosityGrowthKernel erweitert: Juli 2026 (einheitliche Physik für Agg/Break/Nuc)
+**Beschreibung:** Konstanter Kernel (einfachster Fall).
+
+**Formel:**
+```
+β(i,j) = coeff
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `coeff` | m³/s | Konstante Rate | 1e-12 bis 1e-8 |
+
+**Beispiel:**
+```python
+agg_kernel_name='constant',
+agg_kernel_params={'coeff': 1e-9}
+```
+
+**Anwendung:** Testfälle, theoretische Studien.
 
 ---
 
-## Changelog
+#### sum_kernel
 
-### Juli 2026: PorosityGrowthKernel Refactoring
+**Beschreibung:** Additiver Kernel (Volumen-summiert).
 
-**Änderungen:**
-- ✅ Basisklasse um `compute_fragment_porosity()` erweitert
-- ✅ `VolumeMixingKernel`: compute_nucleation_porosity() gibt Default 0.4 zurück
-- ✅ `IncompleteMixingKernel`: compute_fragment_porosity() mit Porenkollaps
-- ✅ Dokumentation aktualisiert (KERNEL_UEBERSICHT.md, README.md)
+**Formel:**
+```
+β(i,j) = coeff × (V_i + V_j)
+```
 
-**Motivation:**
-- Einheitliche Physik über Agglomeration, Breakage, Nucleation
-- Weniger Code-Duplikation
-- Einfachere Erweiterung um neue Porositätsmodelle
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `coeff` | 1/s | Ratenkonstante | 0.01 bis 1.0 |
 
-**Migration:**
-- Keine Breaking Changes (rückwärtskompatibel)
-- Default-Kernel bleibt `volume_mixing`
-- Bestehende Simulationen laufen unverändert
+**Beispiel:**
+```python
+agg_kernel_name='sum_kernel',
+agg_kernel_params={'coeff': 0.1}
+```
+
+---
+
+#### liquid_bridge
+
+**Beschreibung:** Flüssigkeitsbrücken-induzierte Agglomeration.
+
+**Formel:** Berücksichtigt optimale Sättigung für maximale Brückenkraft.
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `corr_beta` | - | Korrekturfaktor | 1e-4 bis 1e-2 |
+| `g` | 1/s | Scherrate | 100 bis 5000 |
+| `optimal_saturation` | - | Optimale Sättigung | 0.3 bis 0.7 |
+
+**Beispiel:**
+```python
+agg_kernel_name='liquid_bridge',
+agg_kernel_params={
+    'corr_beta': 1e-3,
+    'g': 1000,
+    'optimal_saturation': 0.5,
+}
+```
+
+**Anwendung:** Feuchtgranulation mit bindemittelhaltigen Tropfen.
+
+---
+
+### 2. BREAKAGE KERNELS
+
+#### power_law
+
+**Beschreibung:** Power-Law Breakage (volumenbasiert).
+
+**Formel:**
+```
+Γ(V) = p1 × V^pl_v × G^p2
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `p1` | 1/s·m⁻³ᵅ | Pre-factor | 1e-4 bis 1e-1 |
+| `p2` | - | Shear-Exponent | 1.0 bis 3.0 |
+| `g` | 1/s | Scherrate | 100 bis 5000 |
+| `pl_v` | - | Volumen-Exponent | 0.0 bis 2.0 |
+
+**Beispiel:**
+```python
+break_kernel_name='power_law',
+break_kernel_params={
+    'p1': 0.01,
+    'pl_v': 2.0,
+    'g': 1000,
+}
+```
+
+---
+
+#### stress_based
+
+**Beschreibung:** Stress-basiertes Breakage (energiegetrieben).
+
+**Formel:**
+```
+Γ(V) = f(σ_mech / σ_strength)
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `stress_coeff` | - | Spannungs-Koeffizient | 0.1 bis 10 |
+| `g` | 1/s | Scherrate | 100 bis 5000 |
+
+**Beispiel:**
+```python
+break_kernel_name='stress_based',
+break_kernel_params={
+    'stress_coeff': 1.0,
+    'g': 1000,
+}
+```
+
+---
+
+#### powerlaw_rumpf
+
+**Beschreibung:** PowerLaw-Rumpf mit porositäts-/sättigungsabhängiger Festigkeit.
+
+**Formel:**
+```
+Γ(V) = p1 × V^pl_v × G^p2 × f_strength(poro, sat)
+
+f_strength = k × (1 - α × sat)^γ / (1 + δ × poro)
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `p1` | 1/s·Pa·m⁻³ᵅ | Pre-factor | 0.1 bis 10 |
+| `p2` | - | Shear-Exponent | 0.5 bis 2.0 |
+| `g` | 1/s | Scherrate | 100 bis 5000 |
+| `breakrval` | - | Modellvariante (1-5) | 4 (empfohlen) |
+| `pl_v` | - | Volumen-Exponent | 1.0 bis 3.0 |
+| `k` | - | Rumpf k (trocken) | 2.2 bis 2.8 |
+| `alpha` | - | Rumpf α (nass) | 1.0 bis 1.33 |
+| `gamma` | N/m | Oberflächenspannung | 0.03 bis 0.07 |
+| `delta` | rad | Kontaktwinkel | 0.0 bis 0.5 |
+| `x_s` | m | Referenzgröße | None (auto) |
+
+**Beispiel:**
+```python
+break_kernel_name='powerlaw_rumpf',
+break_kernel_params={
+    'p1': 0.5,
+    'p2': 1.0,
+    'g': 1000,
+    'breakrval': 4,
+    'pl_v': 2.0,
+    'k': 2.5,
+    'alpha': 1.0,
+    'gamma': 0.036,
+    'delta': 0.0,
+}
+```
+
+**Anwendung:** Feuchtgranulation mit porösen Partikeln.
+
+**Referenz:** Rumpf, K.E. (1990). "Granulation processes."
+
+---
+
+### 3. POROSITY GROWTH KERNELS
+
+#### volume_mixing
+
+**Beschreibung:** Volumen-Mischung bei Erstbenetzung.
+
+**Logik:**
+- Erster Tropfen → poro = 0.4 (empirisch)
+- Weitere Tropfen → Porosität aus Volumenbilanz
+
+**Parameter:** Keine
+
+**Beispiel:**
+```python
+porosity_growth_kernel_name='volume_mixing',
+porosity_growth_kernel_params={}
+```
+
+**Anwendung:** Erste Benetzung trockener Pulver.
+
+---
+
+#### incomplete_mixing
+
+**Beschreibung:** Unvollständige Mischung (eingeschlossene Poren).
+
+**Logik:**
+- Ein Teil der Poren wird bei Agglomeration eingeschlossen
+- Restporosität aus Trapped-Pore-Fraktion
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `trapped_pore_fraction` | - | Eingeschlossene Poren | 0.1 bis 0.3 |
+
+**Beispiel:**
+```python
+porosity_growth_kernel_name='incomplete_mixing',
+porosity_growth_kernel_params={'trapped_pore_fraction': 0.15}
+```
+
+---
+
+#### cone_model
+
+**Beschreibung:** Kegelmodell für Porenwachstum.
+
+**Logik:**
+- Porosität wächst mit ΔV bei Agglomeration
+- Geometrisches Kegelmodell
+
+**Parameter:** Keine (Default-Werte intern)
+
+**Beispiel:**
+```python
+porosity_growth_kernel_name='cone_model',
+porosity_growth_kernel_params={}
+```
+
+**Anwendung:** Kontinuierliches Porositätswachstum.
+
+---
+
+### 4. COMPRESSION KERNELS
+
+#### exponential_decay
+
+**Beschreibung:** Exponentielle Porositätsabnahme über Zeit.
+
+**Formel:**
+```
+poro(t) = poro_min + (poro_0 - poro_min) × exp(-rate × t)
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `rate` | 1/s | Zerfallsrate | 0.01 bis 0.1 |
+| `min_porosity` | - | Minimalporosität | 0.1 bis 0.3 |
+
+**Beispiel:**
+```python
+compression_kernel_name='exponential_decay',
+compression_kernel_params={
+    'rate': 0.02,
+    'min_porosity': 0.15,
+}
+```
+
+---
+
+#### stress_compaction
+
+**Beschreibung:** Spannungsgetriebene Kompaktion.
+
+**Formel:**
+```
+dp/dt = f(σ_applied, material_props)
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `compaction_coeff` | 1/Pa·s | Kompaktionskoeffizient | 1e-6 bis 1e-4 |
+
+**Beispiel:**
+```python
+compression_kernel_name='stress_compaction',
+compression_kernel_params={'compaction_coeff': 1e-5}
+```
+
+---
+
+### 5. LIQUID DISTRIBUTION KERNELS
+
+#### uniform_weighted
+
+**Beschreibung:** Uniforme Verteilung gewichtet nach W.
+
+**Logik:** Alle Partikel haben gleiche Kollisionswahrscheinlichkeit.
+
+**Parameter:** Keine
+
+**Beispiel:**
+```python
+liquid_dist_kernel_name='uniform_weighted',
+liquid_dist_kernel_params={}
+```
+
+**Default:** Wird automatisch verwendet wenn nicht spezifiziert.
+
+---
+
+#### surface_weighted
+
+**Beschreibung:** Oberflächen-gewichtete Verteilung.
+
+**Logik:** Größere Partikel erhalten mehr Tropfen (proportional zu Oberfläche).
+
+**Parameter:** Keine
+
+**Beispiel:**
+```python
+liquid_dist_kernel_name='surface_weighted',
+liquid_dist_kernel_params={}
+```
+
+**Anwendung:** Wenn Tropfen bevorzugt große Partikel treffen.
+
+---
+
+#### saturation_preferential
+
+**Beschreibung:** Bevorzugte Verteilung auf trockene Partikel.
+
+**Logik:** Partikel mit niedriger Sättigung werden bevorzugt.
+
+**Parameter:** Keine
+
+**Beispiel:**
+```python
+liquid_dist_kernel_name='saturation_preferential',
+liquid_dist_kernel_params={}
+```
+
+**Anwendung:** Homogenisierung der Flüssigkeitsverteilung.
+
+---
+
+### 6. LIQUID INTERNALIZATION KERNELS
+
+#### liquid_internalization
+
+**Beschreibung:** Kapillar-getriebene interne Flüssigkeitsaufnahme.
+
+**Formel:**
+```
+dV_int/dt = k_intern × (V_pore - V_int)
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `k_intern` | 1/(m³·s) | Internalisierungsrate | 1e6 bis 1e10 |
+
+**Beispiel:**
+```python
+liquid_internalization_kernel_name='liquid_internalization',
+liquid_internalization_kernel_params={'k_intern': 1e8}
+```
+
+**Anwendung:** Langsame Porenfüllung während Simulation.
+
+---
+
+### 7. AGGLOMERATION ACCEPTANCE KERNELS
+
+#### stokes_krit
+
+**Beschreibung:** Stokes-Kriterium für Kollisionsakzeptanz (Braumann et al. 2007).
+
+**Formel:**
+```
+St = (4/3) × ρ_part × U_coll × r / (9 × μ_binder)
+E_coag = 1 wenn St < St_crit, sonst 0
+```
+
+**Parameter:**
+| Parameter | Einheit | Beschreibung | Typisch |
+|-----------|---------|--------------|---------|
+| `U_coll` | m/s | Kollisionsgeschwindigkeit | 0.1 bis 2.0 |
+| `binder_viscosity` | Pa·s | Binder-Viskosität | 0.01 bis 10 |
+| `rho_solid` | kg/m³ | Feststoffdichte | 1000 bis 5000 |
+| `rho_liquid` | kg/m³ | Flüssigkeitsdichte | 800 bis 1500 |
+| `h_a` | m | Minimale Filmdicke | 1e-9 bis 1e-6 |
+
+**Beispiel:**
+```python
+agg_acceptance_kernel_name='stokes_krit',
+agg_acceptance_kernel_params={
+    'U_coll': 0.5,
+    'binder_viscosity': 0.1,
+    'rho_solid': 2500,
+    'rho_liquid': 1000,
+    'h_a': 1e-7,
+}
+```
+
+**Anwendung:** Nassgranulation mit viskosem Bindemittel.
+
+**Referenz:** Braumann, A.P., et al. (2007). "Population balance modelling of granulation."
+
+---
+
+### 8. LIQ. INTERNALIZATION DURING AGGLOMERATION
+
+#### braumann_2007
+
+**Beschreibung:** Poren-Einschluss bei Agglomeration (Braumann et al. 2007).
+
+**Logik:**
+- Bei Kontakt zweier Partikel wird externe Flüssigkeit eingeschlossen
+- Interne Flüssigkeit = min(V_liq_ext, V_pore_available)
+
+**Parameter:** Keine
+
+**Beispiel:**
+```python
+liq_internalisation_agglomeration_kernel_name='braumann_2007',
+liq_internalisation_agglomeration_kernel_params={}
+```
+
+**Anwendung:** Realistische Porenfüllung bei Agglomeration.
+
+---
+
+## KONFIGURATIONSPRAXIS
+
+### Beispiel 1: Trockene Agglomeration
+
+```python
+solver = MCPBESolver(
+    dim=1,
+    t_total=60.0,
+    seed=42,
+    load_attr=False,
+    
+    # Nur Agglomeration (Shear)
+    agg_kernel_name='shear_chin1998',
+    agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+    
+    maybe_double_control_volume=False,
+    recon_enable=False,
+)
+```
+
+---
+
+### Beispiel 2: Feuchtgranulation (Vollsuite)
+
+```python
+solver = MCPBESolver(
+    dim=1,
+    t_total=300.0,
+    seed=42,
+    load_attr=False,
+    
+    # Agglomeration mit Flüssigkeitsbrücken
+    agg_kernel_name='liquid_bridge',
+    agg_kernel_params={
+        'corr_beta': 1e-3,
+        'g': 1000,
+        'optimal_saturation': 0.5,
+    },
+    
+    # Stokes-Akzeptanzkriterium
+    agg_acceptance_kernel_name='stokes_krit',
+    agg_acceptance_kernel_params={
+        'U_coll': 0.5,
+        'binder_viscosity': 0.1,
+        'rho_solid': 2500,
+        'rho_liquid': 1000,
+        'h_a': 1e-7,
+    },
+    
+    # Breakage mit Rumpf-Stärke
+    break_kernel_name='powerlaw_rumpf',
+    break_kernel_params={
+        'p1': 0.5,
+        'p2': 1.0,
+        'g': 1000,
+        'breakrval': 4,
+        'pl_v': 2.0,
+        'k': 2.5,
+        'alpha': 1.0,
+        'gamma': 0.036,
+        'delta': 0.0,
+    },
+    
+    # Porositätswachstum
+    porosity_growth_kernel_name='cone_model',
+    porosity_growth_kernel_params={},
+    
+    # Kompression
+    compression_kernel_name='exponential_decay',
+    compression_kernel_params={
+        'rate': 0.02,
+        'min_porosity': 0.15,
+    },
+    
+    # Kontinuierliche Internalisierung
+    liquid_internalization_kernel_name='liquid_internalization',
+    liquid_internalization_kernel_params={'k_intern': 1e8},
+    
+    # Event-basierte Internalisierung
+    liq_internalisation_agglomeration_kernel_name='braumann_2007',
+    liq_internalisation_agglomeration_kernel_params={},
+    
+    maybe_double_control_volume=False,
+    recon_enable=False,
+)
+
+# Nukleation hinzufügen
+solver.create_nucleation_handler(
+    enabled=True,
+    volumetric_flow_rate=1e-9,
+    droplet_diameter=100e-6,
+    liquid_addition_duration=180.0,
+    batch_size=25.0,
+)
+```
+
+---
+
+### Beispiel 3: Eigener Kernel
+
+```python
+# Datei: wmcpbe/kernels/aggregation/my_custom.py
+
+from wmcpbe.kernels.base import AggregationKernel
+
+class MyCustomKernel(AggregationKernel):
+    """Benutzerdefinierter Kernel für spezielle Physik."""
+    
+    name = "my_custom"
+    
+    def __init__(self, params: dict):
+        super().__init__(params)
+        self.custom_param = params.get('custom_param', 1.0)
+    
+    def compute_rate(self, i: int, j: int, solver) -> float:
+        """Berechne β(i,j) basierend auf benutzerdefinierter Formel."""
+        r_i = solver.X[i] * 0.5
+        r_j = solver.X[j] * 0.5
+        
+        # Benutzerdefinierte Physik hier
+        beta = self.custom_param * (r_i + r_j) ** 2
+        
+        return float(beta)
+
+# Registrierung in wmcpbe/kernels/aggregation/__init__.py
+from .my_custom import MyCustomKernel
+
+AGG_KERNELS['my_custom'] = MyCustomKernel
+```
+
+---
+
+## PHYSIK-HINTERGRUND
+
+### Agglomeration
+
+**Mechanismen:**
+1. **Shear-induziert:** Partikel kollidieren durch Geschwindigkeitsgradienten
+2. **Brownsch:** Thermische Bewegung dominiert bei kleinen Partikeln
+3. **Flüssigkeitsbrücken:** Kapillarkräfte beschleunigen Koaleszenz
+
+**Kritische Parameter:**
+- Scherrate G [1/s]: Höhere Scherung → mehr Kollisionen
+- Korrekturfaktor corr_beta: Kalibrierung an Experimente
+- Optimale Sättigung: Max. Brückenkräfte bei S ≈ 0.3-0.7
+
+---
+
+### Breakage
+
+**Mechanismen:**
+1. **Attrition:** Oberflächenabrieb (geringe Energie)
+2. **Fragmentation:** Zerfall in mehrere Teile (hohe Energie)
+3. **Erosion:** Kontinuierlicher Materialverlust
+
+**Kritische Parameter:**
+- Mechanische Spannung σ_mech ∝ G²
+- Partikelfestigkeit σ_strength(poro, sat)
+- Kritische Partikelgröße V_crit wo Γ(V) maximal
+
+**PowerLaw-Rumpf Besonderheit:**
+- Stärke nimmt mit Sättigung ab (α > 1)
+- Stärke nimmt mit Porosität ab
+- Oberflächenspannung γ erhöht nasse Festigkeit
+
+---
+
+### Porositätswachstum
+
+**Mechanismen:**
+1. **Erstbenetzung:** Sofortige Porositätsbildung (volume_mixing)
+2. **Schichtwachstum:** Porosität wächst mit jeder Schicht (cone_model)
+3. **Poreneinschluss:** Bei Agglomeration eingeschlossene Poren
+
+**Kritische Parameter:**
+- Initiale Porosität ε_0: Typisch 0.0 (trocken) bis 0.4 (erste Benetzung)
+- Maximale Porosität ε_max: Theoretisch ~0.74 (FCC-Packung)
+- Trapped-Pore-Fraktion: 10-30% bei realen Granulaten
+
+---
+
+### Liquid Internalization
+
+**Mechanismen:**
+1. **Kapillar:** spontane Porenfüllung (Washburn-Gleichung)
+2. **Viskos:** verzögert durch hohe Viskosität
+3. **Agglomeration:** Einschluss bei Partikelkontakt
+
+**Zeitskalen:**
+- Schnell: k_intern > 1e9 (sofortige Füllung)
+- Mittel: k_intern ≈ 1e6-1e8 (Sekunden bis Minuten)
+- Langsam: k_intern < 1e4 (Stunden)
+
+---
+
+## FEHLERBEHANDLUNG
+
+### Validation bei Kernel-Erstellung
+
+```python
+from wmcpbe.kernels.aggregation import get_aggregation_kernel
+
+try:
+    kernel = get_aggregation_kernel('shear_chin1998', {'corr_beta': -1e-3})
+except ValueError as e:
+    print(f"Ungültiger Parameter: {e}")
+```
+
+### Typische Fehler
+
+| Fehler | Ursache | Lösung |
+|--------|---------|--------|
+| `Unknown kernel 'xyz'` | Tippfehler oder nicht registriert | Kernel-Name prüfen |
+| `Missing required param` | Parameter vergessen | docs/Parameter_Liste.md konsultieren |
+| `NaN in rate calculation` | Ungültige Werte (negativ, NaN) | Input-Validation vor compute_rate() |
+
+---
+
+## PERFORMANCE-TIPPS
+
+1. **JIT-Kernel bevorzugen:**
+   - `jit_kernels.py` enthält hochoptimierte Versionen
+   - Bis zu 100× schneller als Python-Loops
+
+2. **CDF-Caching bei Breakage:**
+   - Erstes Mal langsam (CDF wird aufgebaut)
+   - Folgeaufrufe nutzen Cache
+
+3. **Moment Mode für Agglomeration:**
+   ```python
+   solver.agg_propensity_mode = "moment"  # O(n) statt O(n²)
+   ```
+
+---
+
+## 📚 REFERENZEN
+
+### Wissenschaftliche Arbeiten
+
+1. **Chin et al. (1998):** "Agglomeration in high-shear mixers"
+2. **Tsouris & Tavlarides (1995):** "Breakage and coalescence models"
+3. **Braumann et al. (2007):** "Population balance modelling of granulation"
+4. **Rumpf (1990):** "Granulation processes"
+
+### Interne Dokumente
+
+- [Parameter_Liste.md](../../docs/Parameter_Liste.md) - Vollständige Parameter
+- [QUICKSTART.md](../../docs/QUICKSTART.md) - Erster Einstieg
+- [PERFORMANCE.md](../../docs/PERFORMANCE.md) - Benchmarks
+
+---
+
+**Letzte Aktualisierung:** 2024-01-XX  
+**Maintainer:** WMCPBE Development Team

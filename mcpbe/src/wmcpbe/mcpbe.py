@@ -5,7 +5,6 @@ from .mcpbe_agg import MCPBEAgg
 from .mcpbe_break import MCPBEBreak
 from .mcpbe_post import MCPBEPost
 from .mcpbe_nucleation import NucleationHandler, NucleationConfig
-from .mcpbe_compression import CompressionHandler, CompressionConfig
 from .mcpbe_continuous_processes import (
     ContinuousProcessesHandler,
     ContinuousProcessesConfig,
@@ -22,7 +21,9 @@ class MCPBESolver(MCPBEPost, MCPBEBreak, MCPBEAgg, MCPBEBase, ReconstructionMixi
         - Physics mixins: MCPBEAgg (agglomeration), MCPBEBreak (breakage)
         - Post-processing: MCPBEPost (moments, PSD, statistics)
         - Reconstruction: ReconstructionMixin (CAM, RS, 2PM, QMX methods)
-        - Handlers (composition): NucleationHandler, CompressionHandler
+        - Handlers (composition): 
+            * NucleationHandler (liquid addition)
+            * ContinuousProcessesHandler (compression + liquid internalization)
     
     Why handlers? Nucleation and compression operate on separate time scales
     and don't intercept the main Monte Carlo event loop directly.
@@ -136,54 +137,6 @@ class MCPBESolver(MCPBEPost, MCPBEBreak, MCPBEAgg, MCPBEBase, ReconstructionMixi
         self.nucleation = NucleationHandler(self, NucleationConfig(**kwargs))
         
         return self.nucleation
-    
-    def create_compression_handler(self, **kwargs) -> CompressionHandler:
-        """
-        Create and attach a compression handler to this solver.
-        
-        Convenience method that creates a CompressionHandler for modeling
-        porosity reduction due to shear forces in high-shear mixers.
-        
-        Args:
-            **kwargs: Arguments passed to CompressionConfig
-                     (enabled, rate, min_porosity)
-        
-        Returns:
-            Created CompressionHandler instance
-        
-        Example:
-            solver.create_compression_handler(
-                enabled=True,
-                rate=0.02,  # 1/s
-                min_porosity=0.3,
-            )
-        
-        Reference:
-            Exponential porosity decay model based on:
-            10.1103/PhysRevLett.64.2727
-        
-        Note:
-            Calling this method multiple times will replace the existing handler.
-            A warning is issued if a handler already exists.
-            
-            For validation against analytical solutions, use process_type="compression"
-            instead of (or in addition to) the handler. The handler applies compression
-            after each MC event, while process_type="compression" uses fixed time steps.
-        """
-        import warnings
-        
-        # Guard: Warn if handler already exists
-        if hasattr(self, 'compression') and self.compression is not None:
-            warnings.warn(
-                "CompressionHandler already exists and will be replaced. "
-                "This may lead to loss of statistics. Consider checking "
-                "if compression is already configured before calling this method.",
-                UserWarning,
-                stacklevel=2
-            )
-        
-        self.compression = CompressionHandler(self, CompressionConfig(**kwargs))
-        return self.compression
     
     def create_continuous_processes_handler(self, **kwargs) -> ContinuousProcessesHandler:
         """

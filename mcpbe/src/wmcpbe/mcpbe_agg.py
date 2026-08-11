@@ -33,6 +33,7 @@ import numpy as np
 from numba import njit
 
 from .fenwick_new import rebuild_sampler
+from .particle_merger import ParticleMerger
 from .kernels.aggregation.jit_kernels import (
     MOMENT_KERNELS,
     PARALLEL_MIN_N,
@@ -176,7 +177,44 @@ def pick_partner_constant_jit(
 
 
 class MCPBEAgg:
-    """Agglomeration physics and event execution."""
+    """
+    Agglomerations-Physik und Event-Durchfuehrung.
+    
+    Diese Mixin-Klasse implementiert den Agglomerationsprozess fuer den gewichteten
+    DSMC-PBE-Solver. Sie behandelt:
+    
+    * Berechnung der Kollisionsrate β(i,j) ueber modulare Kernel
+    * Partnerauswahl via FenwickSampler (O(log n))
+    * Groessenabhaengige Akzeptanz (SIZEEVAL-Kriterium)
+    * Durchfuehrung von Agglomerationsereignissen mit Massenerhaltung
+    
+    Die Propensity-Berechnung (r_i = Σ_j W_j·β(i,j)) kann im paarweisen O(n²)-Modus
+    oder im optimierten O(n)-Momentenmodus erfolgen (siehe agg_propensity_mode).
+    
+    Attributes
+    ----------
+    agg_propensity_mode : str
+        Berechnungsmodus: 'pairwise' (O(n²), bitgenau) oder 'moment' (O(n), ~1e-15 Abweichung)
+    kernel_manager : KernelManager
+        Verwaltet alle Physik-Kernel (aggregation, acceptance, porosity_growth)
+    
+    Notes
+    -----
+    Volumina-Semantik:
+    - V_flat[:dim]: Feststoffvolumen pro Komponente (erhalten bei Agglomeration)
+    - V_flat[-1]: Trockenvolumen (V_solid + V_pore, aendert sich mit Porositaet)
+    - liquid_volume, porosity, saturation: intensive Groessen (pro physical particle)
+    
+    Massenerhaltung:
+    Bei Agglomeration gilt: V_solid_merged = V_solid_i + V_solid_j
+    Das Kindpartikel erbt die Summe der Eltern-Feststoffvolumina.
+    
+    See Also
+    --------
+    kernels.aggregation.jit_kernels : JIT-kompilierte Kernel fuer Propensity-Rebuild
+    fenwick_new.FenwickSampler : Effizientes gewichtetes Sampling
+    MOMENT_MODE.md : Detaillierte Herleitung des O(n)-Momentenmodus
+    """
 
     #: How ``r_i = sum_j W_j beta(i,j)`` is evaluated.
     #:
@@ -190,7 +228,7 @@ class MCPBEAgg:
     #:     n = 500-2000 and the gap widens with n, at the cost of a different
     #:     floating-point summation order (agreement ~1e-15 relative). Kernels
     #:     without a closed form silently keep the pairwise path.
-    agg_propensity_mode: str = "pairwise"
+    agg_propensity_mode: str = "moment"
 
     # ------------------------------------------------------------------
     # Scratch buffers
@@ -352,12 +390,21 @@ class MCPBEAgg:
             beta_ij = self.kernel_manager.compute_beta(
                 float(R[i]), float(R[j]), particle1_idx=i, particle2_idx=j, solver=self
             )
-        except Exception as exc:  # pragma: no cover - defensive, mirrors legacy
-            self._warn_once(
-                "agg_beta_failed",
-                f"Aggregation kernel raised {type(exc).__name__}: {exc}. "
-                "Treating the collision as rejected.",
-            )
+        except Exception as exc:
+            # Use specific KernelEvaluationError if available, otherwise generic warning
+            from .kernel_integration import KernelEvaluationError
+            if isinstance(exc, KernelEvaluationError):
+                self._warn_once(
+                    "agg_beta_failed",
+                    f"Aggregation kernel '{exc.kernel_name}' failed: {exc.message}. "
+                    f"Collision rejected.",
+                )
+            else:
+                self._warn_once(
+                    "agg_beta_failed",
+                    f"Aggregation kernel raised {type(exc).__name__}: {exc}. "
+                    f"Treating the collision as rejected.",
+                )
             beta_ij = 0.0
 
         if not np.isfinite(beta_ij) or beta_ij <= 0.0:
@@ -433,11 +480,74 @@ class MCPBEAgg:
     # Propensity rebuild
     # ------------------------------------------------------------------
     def _rebuild_all_propensities(self) -> None:
-        """Recompute ``self._r_agg[:a_tot]``, the per-particle event propensity.
+        """
+        Recompute per-particle agglomeration propensities after an event.
 
-        The raw kernel sum ``sum_j W_j beta(i,j)`` is divided by the packet size
-        ``delta_i = min(agg_dW_max, W_i)`` so that the sampler draws packets, not
-        single physical collisions.
+        Calculates r_i = sum_j(W_j * beta(i,j)) for all active particles,
+        where beta(i,j) is the aggregation kernel rate. The propensity is
+        normalized by packet size delta_i for weighted DSMC sampling.
+
+        This method dominates solver runtime (>90% typically). Uses JIT-compiled
+        batch kernels when available (O(n) moment mode or O(n²) pairwise).
+
+        Returns
+        -------
+        None
+            Updates self._r_agg[:a_tot] and self._delta_agg[:a_tot] in-place.
+
+        Raises
+        ------
+        RuntimeError
+            If aggregation kernel not initialized in kernel_manager.
+
+        Warns
+        -----
+        RuntimeWarning
+            Once if falling back to generic O(n²) Python loop for custom kernels.
+
+        See Also
+        --------
+        _compute_raw_propensities : Kernel-specific propensity computation
+        _raw_propensities_generic : Fallback for unoptimized kernels
+        wmcpbe.kernels.aggregation.jit_kernels : Optimized batch implementations
+
+        Notes
+        -----
+        **Algorithm:**
+
+        1. Get active particle count a = a_tot
+        2. Compute radii R from diameters X
+        3. Set packet sizes: delta_i = min(dW_const, W_i)
+        4. Compute raw propensities r_i = sum_j(W_j * beta(i,j))
+           - Use moment mode O(n) if available and enabled
+           - Otherwise use pairwise O(n²) JIT or Python fallback
+        5. Normalize: r_i /= delta_i (for packet-based sampling)
+        6. Zero out inactive entries (a_tot:_cap)
+
+        **Performance Modes:**
+
+        - **Moment mode** (agg_propensity_mode="moment", default):
+          O(n) scaling, uses analytical moments for separable kernels.
+          Available for: shear_chin1998, brownian_tsouris1995, sum, constant.
+          Speedup: up to 275× at n=4000 particles.
+
+        - **Pairwise mode** (agg_propensity_mode="pairwise"):
+          O(n²) explicit summation over all pairs.
+          Required for: liquid_bridge and custom kernels without moment form.
+          Slower but exact for non-separable kernels.
+
+        **Packet Size Normalization:**
+
+        The propensity r_i is divided by delta_i = min(dW_max, W_i) because:
+        - Fenwick sampler draws events proportional to r_i
+        - Each event consumes a packet of size dW (not single collision)
+        - Normalization ensures correct physical event rates
+
+        **Memory Layout:**
+
+        Buffers (_r_agg, _delta_agg) pre-allocated to capacity (_cap).
+        Only first a_tot entries are valid; remainder zeroed for safety.
+        Recycled across events to avoid allocation overhead.
         """
         a = self.a_tot
         cap = int(getattr(self, "_cap", max(8, a)))
@@ -615,11 +725,79 @@ class MCPBEAgg:
     # Single agglomeration event
     # ------------------------------------------------------------------
     def _do_one_agg(self) -> None:
-        """Attempt one agglomeration event.
+        """
+        Execute a single agglomeration event (if accepted).
 
-        Consumes exactly two random numbers per attempt (one for the first
-        partner via the Fenwick sampler, one for partner selection /
-        acceptance), plus whatever the optional acceptance kernel draws.
+        Core Monte Carlo step for agglomeration: selects a particle pair,
+        computes packet size dW, merges volumes/porosity/liquid, updates weights,
+        and refreshes samplers. Uses weighted DSMC algorithm.
+
+        Returns
+        -------
+        None
+            Modifies solver state in-place:
+            - Creates new merged particle (child)
+            - Reduces parent weights by dW
+            - Updates propensity samplers
+            - Increments real_agg_events counter
+
+        Raises
+        ------
+        None
+            Errors handled gracefully (rejected collisions return early)
+
+        See Also
+        --------
+        _select_pair : Draw collision pair (i, j)
+        _merge_pair : Create merged child particle
+        _consume_parent_weight : Reduce parent weights
+        _compute_agg_dW : Calculate packet size
+
+        Notes
+        -----
+        **Event Sequence:**
+
+        1. **Select pair**: Draw particle i proportional to propensity r_i,
+           then draw j proportional to weight W_j. Apply SIZEEVAL filter
+           and optional acceptance kernel (e.g., Stokes criterion).
+
+        2. **Compute packet size**: dW = min(dW_max, W_i, W_j, delta_i, delta_j)
+           where delta_i = min(dW_const, W_i). Ensures weight conservation.
+
+        3. **Merge particles**: 
+           - V_solid_child = V_solid_i + V_solid_j (conserved!)
+           - V_dry_child from porosity growth kernel
+           - Liquid redistributed (internal vs external)
+           - Porosity recomputed from cone model or volume mixing
+
+        4. **Update weights**: 
+           - W_i -= dW, W_j -= dW (or W_i -= 2*dW for self-collision)
+           - W_child = dW
+           - Parents removed if W <= 0
+
+        5. **Refresh samplers**: Rebuild propensity arrays for next event
+
+        **Random Numbers:**
+
+        Exactly 2 RNG calls per attempt:
+        - u1: Fenwick sampler for particle i (proportional to r_i)
+        - u2: Partner selection for j (proportional to W_j) + SIZEEVAL
+        Plus additional calls if acceptance kernel requires them.
+
+        **Rejection Criteria:**
+
+        Event rejected (returns early) if:
+        - a_tot < 2 (not enough particles)
+        - Pair selection fails (j < 0 or pick_w <= 0)
+        - Acceptance kernel rejects (Stokes criterion not met)
+        - Packet size dW <= 0 (insufficient weight)
+
+        **Mass Conservation:**
+
+        Solid mass strictly conserved:
+        sum(W × V_solid)_before = sum(W × V_solid)_after
+
+        Verified in tests via validate_mass_conservation().
         """
         a = self.a_tot
         self._last_agg_dW = 0.0
@@ -695,6 +873,14 @@ class MCPBEAgg:
                 particle2_idx=j,
                 solver=self,
             )
+            # Track acceptance/rejection statistics
+            if not hasattr(self, '_agg_accepted_count'):
+                self._agg_accepted_count = 0
+                self._agg_rejected_count = 0
+            if accepted:
+                self._agg_accepted_count += 1
+            else:
+                self._agg_rejected_count += 1
             if not accepted:
                 return None
 
@@ -707,7 +893,32 @@ class MCPBEAgg:
         volume follows from the porosity growth kernel, and the liquid is
         redistributed between the internal (pore) and external (surface)
         reservoirs.
+        
+        Uses ParticleMerger to find existing similar particles and merge weights
+        instead of creating new particles (reduces n_comp).
         """
+        # === DEBUG AGG: VOR MERGE ===
+        if getattr(self, 'mcpbe_debug_mass', False):
+            max_events = getattr(self, '_debug_max_events', 20)
+            if not hasattr(self, '_debug_agg_count'):
+                self._debug_agg_count = 0
+            if self._debug_agg_count < max_events:
+                self._debug_agg_count += 1
+                print(f"\n[DEBUG AGG] Event #{self.real_agg_events+1:.0f}")
+                print(f"  Parents: i={i}, j={j}")
+                print(f"  W[i]={self.W[i]:.2f}, W[j]={self.W[j]:.2f}")
+                print(f"  V_dry[i]={self.V_flat[-1,i]:.6e}, V_dry[j]={self.V_flat[-1,j]:.6e}")
+                print(f"  poro[i]={self.porosity[i]:.4f}, poro[j]={self.porosity[j]:.4f}")
+                
+                # Berechne V_solid der Parents
+                v_solid_i = self.V_flat[-1,i] * (1.0 - self.porosity[i]) if not np.isnan(self.porosity[i]) else self.V_flat[-1,i]
+                v_solid_j = self.V_flat[-1,j] * (1.0 - self.porosity[j]) if not np.isnan(self.porosity[j]) else self.V_flat[-1,j]
+                print(f"  V_solid[i]={v_solid_i:.6e}, V_solid[j]={v_solid_j:.6e}")
+                print(f"  V_solid_SUM={v_solid_i + v_solid_j:.6e} (SOLLTE = Child V_solid sein)")
+                print(f"  liq[i]={self.liquid_volume[i]:.6e}, liq[j]={self.liquid_volume[j]:.6e}")
+                print(f"  liq_SUM={self.liquid_volume[i] + self.liquid_volume[j]:.6e}")
+# ================================
+
         dim = self.dim
         Vi_comp = self.V_flat[:dim, i].copy()
         Vj_comp = self.V_flat[:dim, j].copy()
@@ -717,43 +928,139 @@ class MCPBEAgg:
         poro_i = self.porosity[i]
         poro_j = self.porosity[j]
 
-        # V_solid = V_dry for Vollkoerper (NaN porosity), else V_dry * (1 - poro).
-        V_solid_i = Vi_dry if np.isnan(poro_i) else Vi_dry * (1.0 - poro_i)
-        V_solid_j = Vj_dry if np.isnan(poro_j) else Vj_dry * (1.0 - poro_j)
+        # Universal formula: V_solid = V_dry * (1 - poro)
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
+        V_solid_i = Vi_dry * (1.0 - poro_i)
+        V_solid_j = Vj_dry * (1.0 - poro_j)
         V_solid_merged = V_solid_i + V_solid_j
-
-        self._append_particle_column(Vi_comp + Vj_comp)
-        new_idx = self.a_tot - 1
-        self.W[new_idx] = dW
-
+        
+        # Compute component distribution for merged particle
+        comp = Vi_comp + Vj_comp
+        comp_total = float(np.sum(comp))
+        if comp_total > 0.0:
+            V_flat_dim = comp * (V_solid_merged / comp_total)
+        else:
+            V_flat_dim = np.full(dim, V_solid_merged / dim, dtype=float)
+        
+        # Compute merged porosity and V_dry BEFORE trying to find match
         V_dry_merged, poro_merged = self._merged_porosity(i, j, Vi_dry, Vj_dry, poro_i, poro_j)
+        
+        # Compute merged liquid (needed for matching)
+        sat_i = self.saturation[i] if not np.isnan(poro_i) else 0.0
+        sat_j = self.saturation[j] if not np.isnan(poro_j) else 0.0
+        
+        V_pore_i = Vi_dry * poro_i if not np.isnan(poro_i) else 0.0
+        V_pore_j = Vj_dry * poro_j if not np.isnan(poro_j) else 0.0
+        
+        V_liq_int_i = V_pore_i * sat_i if V_pore_i > 0 else 0.0
+        V_liq_int_j = V_pore_j * sat_j if V_pore_j > 0 else 0.0
+        
+        liq_i = float(self.liquid_volume[i])
+        liq_j = float(self.liquid_volume[j])
+        V_liq_ext_i = liq_i - V_liq_int_i
+        V_liq_ext_j = liq_j - V_liq_int_j
+        
+        l_e_to_i = self.kernel_manager.compute_liquid_internalization_agglomeration(
+            v_dry1=float(Vi_dry),
+            v_dry2=float(Vj_dry),
+            v_liq_ext1=float(V_liq_ext_i),
+            v_liq_ext2=float(V_liq_ext_j),
+            particle1_idx=i,
+            particle2_idx=j,
+            solver=self,
+        ) if self.kernel_manager is not None else 0.0
+        
+        if i == j:
+            V_liq_int_contrib = 2.0 * V_liq_int_i
+            V_liq_ext_contrib = 2.0 * V_liq_ext_i
+        else:
+            V_liq_int_contrib = V_liq_int_i + V_liq_int_j
+            V_liq_ext_contrib = V_liq_ext_i + V_liq_ext_j
+        
+        V_liq_int_merged = V_liq_int_contrib + l_e_to_i
+        V_liq_ext_merged = V_liq_ext_contrib - l_e_to_i
+        
+        if V_liq_ext_merged < 0.0:
+            V_liq_int_merged = V_liq_int_contrib + V_liq_ext_contrib
+            V_liq_ext_merged = 0.0
+        
+        V_pore_merged = V_dry_merged * poro_merged if not np.isnan(poro_merged) else 0.0
+        sat_merged = V_liq_int_merged / V_pore_merged if V_pore_merged > 0 else 0.0
+        
+        if sat_merged > 1.0:
+            V_liq_ext_merged += V_pore_merged * (sat_merged - 1.0)
+            V_liq_int_merged = V_pore_merged
+            sat_merged = 1.0
+        
+        liquid_merged = V_liq_int_merged + V_liq_ext_merged
+        
+        # Try to find existing particle with matching properties using ParticleMerger
+        if hasattr(self, '_particle_merger') and self._particle_merger is not None:
+            new_idx, was_merged = self._particle_merger.find_or_create(
+                V_solid_target=V_flat_dim,
+                V_dry_target=V_dry_merged,
+                liquid_target=liquid_merged,
+                poro_target=poro_merged,
+                sat_target=sat_merged,
+                weight_to_add=dW,
+                component_sum=V_flat_dim
+            )
+            
+            if was_merged:
+                # Existing particle found: only W was updated
+                # Update saturation and liquid_volume to ensure consistency
+                # (should already match within tolerance, but be safe)
+                self.saturation[new_idx] = sat_merged
+                self.liquid_volume[new_idx] = liquid_merged
+                return new_idx
+            # else: new particle created, continue with initialization below
+        else:
+            # Fallback: always create new particle (original behavior)
+            self._append_particle_column(V_flat_dim)
+            new_idx = self.a_tot - 1
+            self.W[new_idx] = dW
+        
+        # Initialize properties for newly created particle
         self.porosity[new_idx] = poro_merged
-
-        # V_flat[:dim] must hold V_solid, V_flat[-1] must hold V_dry.
+        
+        # V_flat[:dim] holds V_solid
         if dim == 1:
             self.V_flat[0, new_idx] = V_solid_merged
         else:
-            # Distribute the merged solid volume over the components in the
-            # parents' proportion. Writing the scalar total into every
-            # component (the pre-refactor behaviour) multiplied the solid
-            # volume by `dim` and destroyed the composition.
-            comp = Vi_comp + Vj_comp
-            comp_total = float(np.sum(comp))
-            if comp_total > 0.0:
-                self.V_flat[:dim, new_idx] = comp * (V_solid_merged / comp_total)
-            else:
-                self.V_flat[:dim, new_idx] = V_solid_merged / dim
+            self.V_flat[:dim, new_idx] = V_flat_dim
+        
+        # V_flat[-1] holds V_dry
         self.V_flat[-1, new_idx] = V_dry_merged
-
-        self._merge_liquid(i, j, new_idx, Vi_dry, Vj_dry, poro_i, poro_j, V_dry_merged)
+        
+        # Set liquid and saturation
+        self.saturation[new_idx] = sat_merged
+        self.liquid_volume[new_idx] = liquid_merged
+        
+        # === DEBUG AGG: NACH MERGE ===
+        if getattr(self, 'mcpbe_debug_mass', False):
+            max_events = getattr(self, '_debug_max_events', 20)
+            if hasattr(self, '_debug_agg_count') and self._debug_agg_count <= max_events:
+                print(f"  Child: idx={new_idx}, W={self.W[new_idx]:.2f}")
+                print(f"  V_dry[child]={self.V_flat[-1,new_idx]:.6e}")
+                print(f"  poro[child]={self.porosity[new_idx]:.4f}")
+                
+                v_solid_child = self.V_flat[-1,new_idx] * (1.0 - self.porosity[new_idx]) if not np.isnan(self.porosity[new_idx]) else self.V_flat[-1,new_idx]
+                print(f"  V_solid[child]={v_solid_child:.6e}")
+                print(f"  ΔV_solid={v_solid_child - V_solid_merged:.6e} (SOLLTE ≈ 0 sein)")
+                
+                print(f"  liq[child]={self.liquid_volume[new_idx]:.6e}")
+                print(f"  Δliq={self.liquid_volume[new_idx] - liquid_merged:.6e}")
+                print(f"  sat[child]={self.saturation[new_idx]:.4f}")
+# ==============================
+        
         return new_idx
 
     def _merged_porosity(self, i, j, Vi_dry, Vj_dry, poro_i, poro_j) -> tuple[float, float]:
         """Delegate porosity mixing to the porosity growth kernel."""
         lv_i = float(self.liquid_volume[i])
         lv_j = float(self.liquid_volume[j])
-        sat_i = self.saturation[i] if not np.isnan(poro_i) else 0.0
-        sat_j = self.saturation[j] if not np.isnan(poro_j) else 0.0
+        sat_i = self.saturation[i]
+        sat_j = self.saturation[j]
 
         # Simplified collision energy E ~ 0.5 m v^2 with v ~ G * d_eff.
         rho = 1000.0  # kg/m^3, assumed granule density
@@ -865,19 +1172,46 @@ class MCPBEAgg:
                 if w_rem > 0.0:
                     self.W[i] = w_rem
                 else:
+                    # Remove from hash index first (if merger enabled)
+                    if hasattr(self, '_particle_merger') and self._particle_merger is not None:
+                        self._particle_merger.remove_from_hash_index(i)
                     self._remove_particle_column(i)
-            return
+        else:
+            # Descending order so that swap-with-last removal cannot invalidate the
+            # index we have not processed yet.
+            for idx in sorted({int(i), int(j)}, reverse=True):
+                if idx >= self.a_tot:
+                    continue
+                w_rem = float(self.W[idx]) - dW
+                if w_rem > 0.0:
+                    self.W[idx] = w_rem
+                else:
+                    # Remove from hash index first (if merger enabled)
+                    if hasattr(self, '_particle_merger') and self._particle_merger is not None:
+                        self._particle_merger.remove_from_hash_index(idx)
+                    self._remove_particle_column(idx)
 
-        # Descending order so that swap-with-last removal cannot invalidate the
-        # index we have not processed yet.
-        for idx in sorted({int(i), int(j)}, reverse=True):
-            if idx >= self.a_tot:
-                continue
-            w_rem = float(self.W[idx]) - dW
-            if w_rem > 0.0:
-                self.W[idx] = w_rem
-            else:
-                self._remove_particle_column(idx)
+        # === DEBUG AGG: NACH CONSUME ===
+        if getattr(self, 'mcpbe_debug_mass', False):
+            max_events = getattr(self, '_debug_max_events', 20)
+            if hasattr(self, '_debug_agg_count') and self._debug_agg_count <= max_events:
+                print(f"  After consume: a_tot={self.a_tot}")
+
+                # Globale Massenbilanz
+                v_dry = self.V_flat[-1, :self.a_tot]
+                poro = self.porosity[:self.a_tot]
+                w = self.W[:self.a_tot]
+                valid = ~np.isnan(poro)
+                v_solid = np.zeros_like(v_dry)
+                v_solid[valid] = v_dry[valid] * (1.0 - poro[valid])
+                v_solid[~valid] = v_dry[~valid]
+
+                solid_total = np.sum(v_solid * w)
+                liq_total = np.sum(self.liquid_volume[:self.a_tot] * w)
+                n_phys = np.sum(w) / self.Vc
+
+                print(f"  GLOBAL: V_solid_total={solid_total:.6e}, V_liq_total={liq_total:.6e}, n_phys={n_phys:.3e}")
+# =================================
 
     def _refresh_samplers_after_agg(self) -> None:
         """Rebuild the agglomeration (and, in mix mode, breakage) samplers."""

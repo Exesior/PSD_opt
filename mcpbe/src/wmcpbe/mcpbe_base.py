@@ -14,6 +14,7 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -52,15 +53,21 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         init: bool = True,
         rng: Optional[np.random.Generator] = None,
         seed: Optional[int] = None,
-        # Kernel framework parameters (new, optional)
+        # Logging configuration (NEW)
+        log_level: str = "WARNING",
+        log_file_path: Optional[str] = None,
+        log_file_level: str = "DEBUG",
+        # Control volume management
+        maybe_double_control_volume: bool = False,
+        # Reconstruction settings
+        recon_enable: bool = False,
+        # Kernel framework parameters
         agg_kernel_name: Optional[str] = None,
         agg_kernel_params: Optional[dict] = None,
         break_kernel_name: Optional[str] = None,
         break_kernel_params: Optional[dict] = None,
         porosity_growth_kernel_name: Optional[str] = None,
         porosity_growth_kernel_params: Optional[dict] = None,
-        compression_kernel_name: Optional[str] = None,
-        compression_kernel_params: Optional[dict] = None,
         liquid_dist_kernel_name: Optional[str] = None,
         liquid_dist_kernel_params: Optional[dict] = None,
         # Agglomeration acceptance kernel parameters (NEW)
@@ -75,6 +82,134 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         liq_internalisation_agglomeration_kernel_name: Optional[str] = None,
         liq_internalisation_agglomeration_kernel_params: Optional[dict] = None,
     ):
+        """
+        Initialize MCPBE Solver.
+
+        Parameters
+        ----------
+        dim : int, default=2
+            Number of components/dimensions (e.g., solid + liquid).
+        t_total : int or float, default=601
+            Total simulation time [s] or number of time steps if integer.
+        t_write : int or float, default=10
+            Output interval [s] or step count.
+        t_vec : np.ndarray, optional
+            Explicit time vector for output. Overrides t_total/t_write if provided.
+        verbose : bool, default=False
+            Enable verbose console output during simulation.
+        load_attr : bool, default=True
+            Load configuration from external file. Set False for manual config.
+        config_path : str, optional
+            Path to configuration file. Default: config/MCPBE_config.py in work_dir.
+        init : bool, default=True
+            Run automatic initialization after construction.
+        rng : np.random.Generator, optional
+            Pre-configured random number generator. Mutually exclusive with seed.
+        seed : int, optional
+            Random seed for reproducibility. Creates new RNG if provided.
+        log_level : str, default="WARNING"
+            Console logging level: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL".
+        log_file_path : str, optional
+            Path to log file. If None, file logging disabled.
+        log_file_level : str, default="DEBUG"
+            File logging level (independent of console level).
+        maybe_double_control_volume : bool, default=False
+            Enable automatic control volume doubling when particle count grows.
+        recon_enable : bool, default=False
+            Enable reconstruction (particle reduction) to limit computational cost.
+        agg_kernel_name : str, optional
+            Aggregation kernel name (e.g., 'shear_chin1998', 'liquid_bridge').
+        agg_kernel_params : dict, optional
+            Parameters for aggregation kernel (kernel-specific).
+        break_kernel_name : str, optional
+            Breakage kernel name (e.g., 'power_law', 'powerlaw_rumpf').
+        break_kernel_params : dict, optional
+            Parameters for breakage kernel (kernel-specific).
+        porosity_growth_kernel_name : str, optional
+            Porosity growth kernel (e.g., 'cone_model', 'volume_mixing').
+        porosity_growth_kernel_params : dict, optional
+            Parameters for porosity growth kernel.
+        liquid_dist_kernel_name : str, optional
+            Liquid distribution kernel (e.g., 'uniform_weighted').
+        liquid_dist_kernel_params : dict, optional
+            Parameters for liquid distribution kernel.
+        
+        Note: Compression is now handled via ContinuousProcessesHandler with
+        porosity_compression_kernel_name and porosity_compression_kernel_params.
+        agg_acceptance_kernel_name : str, optional
+            Agglomeration acceptance kernel (e.g., 'stokes_krit').
+        agg_acceptance_kernel_params : dict, optional
+            Parameters for acceptance kernel.
+        porosity_compression_kernel_name : str, optional
+            Alternative name for compression kernel (legacy compatibility).
+        porosity_compression_kernel_params : dict, optional
+            Alternative parameters for compression kernel.
+        liquid_internalization_kernel_name : str, optional
+            Continuous liquid internalization kernel.
+        liquid_internalization_kernel_params : dict, optional
+            Parameters for continuous internalization.
+        liq_internalisation_agglomeration_kernel_name : str, optional
+            Event-based internalization during agglomeration.
+        liq_internalisation_agglomeration_kernel_params : dict, optional
+            Parameters for event-based internalization.
+
+        Raises
+        ------
+        ValueError
+            If invalid parameter combinations detected (via _validate_solver_parameters).
+        FileNotFoundError
+            If load_attr=True and config_path does not exist.
+
+        See Also
+        --------
+        _validate_solver_parameters : Early parameter validation
+        _initialize_kernels : Kernel framework setup
+        _setup_logging : Logging system configuration
+
+        Examples
+        --------
+        >>> # Minimal dry agglomeration setup
+        >>> solver = MCPBESolver(
+        ...     dim=1,
+        ...     t_total=60.0,
+        ...     load_attr=False,
+        ...     agg_kernel_name='shear_chin1998',
+        ...     agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
+        ...     seed=42,
+        ... )
+
+        >>> # Full wet granulation suite
+        >>> solver = MCPBESolver(
+        ...     dim=1,
+        ...     t_total=300.0,
+        ...     load_attr=False,
+        ...     agg_kernel_name='liquid_bridge',
+        ...     break_kernel_name='powerlaw_rumpf',
+        ...     porosity_growth_kernel_name='cone_model',
+        ...     compression_kernel_name='exponential_decay',
+        ...     recon_enable=True,
+        ...     recon_N_max=4000,
+        ... )
+
+        Notes
+        -----
+        **Initialization Sequence:**
+
+        1. Base parameters initialized (dim, t_total, etc.)
+        2. Config loaded from file (if load_attr=True)
+        3. Kernels created (if names provided)
+        4. RNG instantiated (from seed or fresh)
+        5. Logging configured
+        6. Parameter validation (_validate_solver_parameters)
+        7. Auto-init if init=True
+
+        **Important:**
+
+        - Use load_attr=False for programmatic configuration
+        - Always set seed for reproducible results
+        - Kernel names must match registered kernels (see kernels/README.md)
+        - Call _initialize_particles() and _initialize_samplers() before solve()
+        """
         # Base solver state
         self._init_base_parameters(dim, t_total, t_write, t_vec)
 
@@ -87,7 +222,8 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         self.VERBOSE = verbose
         self.exp_time_step = False
         self.sum_prop_pair = False
-        self.maybe_double_control_volume=False
+        self.maybe_double_control_volume = maybe_double_control_volume
+        self.recon_enable = recon_enable
 
         # Initial distributions flags
         self.PGV = np.full(dim, "mono")
@@ -112,8 +248,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             break_kernel_params=break_kernel_params,
             porosity_growth_kernel_name=porosity_growth_kernel_name,
             porosity_growth_kernel_params=porosity_growth_kernel_params,
-            compression_kernel_name=compression_kernel_name,
-            compression_kernel_params=compression_kernel_params,
             liquid_dist_kernel_name=liquid_dist_kernel_name,
             liquid_dist_kernel_params=liquid_dist_kernel_params,
             agg_acceptance_kernel_name=agg_acceptance_kernel_name,
@@ -132,6 +266,12 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             self._rng = np.random.default_rng(seed)
         else:
             self._rng = np.random.default_rng()
+
+        # Setup logging (Console + optional File)
+        self._setup_logging(log_level, log_file_path, log_file_level)
+
+        # Validate parameters early (before particle initialization)
+        self._validate_solver_parameters()
 
         # cache for breakage CDF tables (keyed by dim, N, BREAKFVAL, pl_v, pl_q)
         self._bf_cache = {}
@@ -179,8 +319,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             break_kernel_params: Parameters for breakage kernel
             porosity_growth_kernel_name: Name of porosity growth kernel
             porosity_growth_kernel_params: Parameters for porosity growth kernel
-            compression_kernel_name: Name of compression kernel (legacy)
-            compression_kernel_params: Parameters for compression kernel (legacy)
             liquid_dist_kernel_name: Name of liquid distribution kernel
             liquid_dist_kernel_params: Parameters for liquid distribution kernel
             porosity_compression_kernel_name: Name of porosity compression kernel
@@ -210,8 +348,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             "break_kernel_params": break_kernel_params,
             "porosity_growth_kernel_name": porosity_growth_kernel_name,
             "porosity_growth_kernel_params": porosity_growth_kernel_params,
-            "compression_kernel_name": compression_kernel_name,
-            "compression_kernel_params": compression_kernel_params,
             "liquid_dist_kernel_name": liquid_dist_kernel_name,
             "liquid_dist_kernel_params": liquid_dist_kernel_params,
             "agg_acceptance_kernel_name": agg_acceptance_kernel_name,
@@ -230,15 +366,103 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
 
         self.kernel_manager = KernelManager(**resolved)
         self.kernel_manager.initialize_kernels(self)
-                        
-    def _init_lmc(self):
+
+    def _setup_logging(
+        self,
+        console_level: str = "WARNING",
+        file_path: Optional[str] = None,
+        file_level: str = "DEBUG"
+    ) -> None:
         """
-        Initialize LMC adapters for fragment distribution and breakage rates.
+        Configure logging with console and optional file output.
         
-        Supports:
-            - Offline adapters: table, rank, copula, flow (precomputed)
-            - Online LMC: live fragment generator
-            - MLP model: breakage rate prediction
+        Args:
+            console_level: Log level for console output (DEBUG/INFO/WARNING/ERROR/CRITICAL)
+            file_path: Path to log file (None = no file logging)
+            file_level: Log level for file output (default: DEBUG for full detail)
+        
+        Usage:
+            >>> solver = MCPBESolver(log_level="INFO")  # Console only
+            >>> solver = MCPBESolver(
+            ...     log_level="WARNING",
+            ...     log_file_path="simulation.log",
+            ...     log_file_level="DEBUG"
+            ... )  # Console: WARNING+, File: DEBUG+
+        """
+        # Create module logger
+        self.logger = logging.getLogger("wmcpbe")
+        self.logger.setLevel(logging.DEBUG)  # Capture all logs, handlers filter
+        
+        # Clear existing handlers (avoid duplicates on multiple instantiations)
+        if self.logger.handlers:
+            self.logger.handlers.clear()
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, console_level.upper(), logging.WARNING))
+        console_formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S"
+        )
+        console_handler.setFormatter(console_formatter)
+        self.logger.addHandler(console_handler)
+        
+        # File handler (optional)
+        if file_path:
+            try:
+                file_handler = logging.FileHandler(file_path, mode='w', encoding='utf-8')
+                file_handler.setLevel(getattr(logging, file_level.upper(), logging.DEBUG))
+                file_formatter = logging.Formatter(
+                    "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S"
+                )
+                file_handler.setFormatter(file_formatter)
+                self.logger.addHandler(file_handler)
+                self.logger.info(f"Logging to file: {file_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to create log file '{file_path}': {e}")
+        
+        self.logger.debug(f"Logging initialized: console={console_level}, file={file_path or 'None'}")
+    
+    def _init_lmc(self) -> None:
+        """
+        Initialisiert LMC-Adapter fuer Fragmentverteilung und Breakage-Raten.
+        
+        Unterstuetzt vier Modi der Fragmentverteilung:
+        
+        * **Offline-Adapter** (precomputed): Tabelle, Rank, Copula, Flow
+        * **Online-LMC**: Live-Fragmentgenerator zur Laufzeit
+        * **MLP-Modell**: Neuronales Netz fuer Breakage-Ratenvorhersage
+        
+        Die Konfiguration erfolgt ueber Solver-Attribute (aus Config-Datei oder
+        __init__-Parameter). Bei `use_lmc_pre_model=True` werden die entsprechenden
+        Tabellendateien geladen und validiert.
+        
+        Attributes
+        ----------
+        use_lmc_pre_model : bool
+            Aktiviert precomputed LMC-Adapter
+        lmc_pre_model : str
+            Typ des Adapters: 'table', 'rank', 'copula', oder 'flow'
+        lmc_adapter : LMCTableAdapter | LMCRankAdapter | LMCCopulaAdapter | LMCFlowAdapter | None
+            Instanz des gewaehlten Fragmentverteilungs-Adapters
+        lmc_live : object | None
+            Online-LMC-Simulator (wenn use_lmc_live=True)
+        lmc_breakage_adapter : object | None
+            MLP-Adapter fuer Breakage-Raten (wenn lmc_use_breakage_model=True)
+        
+        Raises
+        ------
+        ValueError
+            Wenn required Pfade nicht gesetzt oder ungueltiger Adapter-Typ
+        FileNotFoundError
+            Wenn Modelldateien nicht gefunden werden
+        
+        See Also
+        --------
+        lmc_adapter.LMCTableAdapter : Marginaltabellen-basierter Adapter
+        lmc_adapter.LMCLiveAdapter : Echtzeit-Fragmentgenerierung
+        mlp_breakage_adapter.MLPBreakageAdapter : Neuronales Breakage-Modell
         """
         # Read LMC configuration
         self.use_lmc_pre_model = bool(getattr(self, "use_lmc_pre_model", False))
@@ -405,6 +629,129 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
     # ---------------------------------------------------------------------
     # Validation & helpers
     # ---------------------------------------------------------------------
+    def _validate_solver_parameters(self) -> None:
+        """
+        Validate solver parameters early (before simulation starts).
+        
+        Called at end of __init__() to catch configuration errors early.
+        Provides helpful error messages with suggestions for fixes.
+        
+        Raises
+        ------
+        ValueError
+            If critical parameters are missing or invalid
+        UserWarning
+            If suspicious (but not fatal) parameter combinations detected
+        """
+        # Check 1: Kernel without required params
+        if self.kernel_manager is not None:
+            km = self.kernel_manager
+            
+            # Aggregation kernel validation
+            if km.agg_kernel is not None:
+                if km.agg_kernel.name == 'shear_chin1998':
+                    if not hasattr(km.agg_kernel, 'g') or km.agg_kernel.g <= 0:
+                        raise ValueError(
+                            f"Shear kernel requires g > 0 (shear rate). "
+                            f"Current value: {getattr(km.agg_kernel, 'g', None)}.\n"
+                            f"Fix: agg_kernel_params={{'g': 1000}} (typical range: 100-5000 1/s)"
+                        )
+            
+            # Breakage kernel validation
+            if km.break_kernel is not None:
+                if km.break_kernel.name == 'power_law':
+                    p1 = getattr(km.break_kernel, 'p1', 0)
+                    if p1 <= 0:
+                        raise ValueError(
+                            f"Power-law breakage requires p1 > 0 (breakage rate pre-factor). "
+                            f"Current value: {p1}.\n"
+                            f"Fix: break_kernel_params={{'p1': 0.01}} (typical range: 1e-4 to 0.1)"
+                        )
+        
+        # Check 2: Nucleation enabled but handler not created yet
+        # (This is a warning, not error - handler might be created later)
+        
+        # Check 3: Suspicious parameter combinations (warnings only)
+        import warnings
+        
+        # Warn if recon_enable but no recon_N_max set
+        if self.recon_enable and not hasattr(self, 'recon_N_max'):
+            warnings.warn(
+                "recon_enable=True but recon_N_max not set. "
+                "Using default value (check reconstruction_mixin.py for defaults).",
+                UserWarning,
+                stacklevel=2
+            )
+    
+    def _validate_solve_readiness(self) -> None:
+        """
+        Validate solver is ready for solve() call.
+        
+        Checks for common configuration mistakes that would cause runtime errors.
+        Called at start of solve() to provide helpful error messages.
+        
+        Raises
+        ------
+        RuntimeError
+            If critical components are missing or misconfigured
+        
+        Notes
+        -----
+        Common issues detected:
+        1. Missing sampler initialization (most common!)
+        2. Invalid particle state (NaN, Inf)
+        3. Zero propensities (kernel configuration issue)
+        """
+        # Check 1: Samplers initialized?
+        if hasattr(self, 'process_type') and self.process_type in ('breakage', 'mix'):
+            if not hasattr(self, '_break_sampler') or self._break_sampler is None:
+                raise RuntimeError(
+                    "Breakage sampler not initialized but process_type='breakage' or 'mix'.\n"
+                    "You forgot to call solver._initialize_samplers() after _initialize_particles().\n"
+                    "\n"
+                    "Correct initialization sequence:\n"
+                    "  solver._initialize_particles(...)\n"
+                    "  solver._initialize_samplers()  # ← Don't forget this!\n"
+                    "  solver.solve()"
+                )
+        
+        if hasattr(self, 'process_type') and self.process_type in ('agglomeration', 'mix'):
+            if not hasattr(self, '_agg_sampler') or self._agg_sampler is None:
+                raise RuntimeError(
+                    "Aggregation sampler not initialized but process_type='agglomeration' or 'mix'.\n"
+                    "You forgot to call solver._initialize_samplers() after _initialize_particles().\n"
+                    "\n"
+                    "Correct initialization sequence:\n"
+                    "  solver._initialize_particles(...)\n"
+                    "  solver._initialize_samplers()  # ← Don't forget this!\n"
+                    "  solver.solve()"
+                )
+        
+        # Check 2: Valid particle state?
+        if hasattr(self, 'W') and self.a_tot > 0:
+            W_slice = self.W[:self.a_tot]
+            if np.any(~np.isfinite(W_slice)):
+                raise RuntimeError(
+                    f"Invalid weights detected: {np.sum(~np.isfinite(W_slice))} particles have NaN/Inf weights.\n"
+                    "This usually indicates a problem with kernel parameters or initial conditions.\n"
+                    "Check your kernel configuration and ensure all parameters are finite positive numbers."
+                )
+        
+        # Check 3: Non-zero total propensity? (warning only)
+        if hasattr(self, '_agg_sampler') and self._agg_sampler is not None:
+            total_prop = float(self._agg_sampler.total())
+            if total_prop <= 0 and self.a_tot > 0:
+                import warnings
+                warnings.warn(
+                    f"Total aggregation propensity is zero ({total_prop}) with {self.a_tot} active particles.\n"
+                    "This means no agglomeration events will occur. Possible causes:\n"
+                    "  - corr_beta too small (try 1e-4 to 1e-2)\n"
+                    "  - Shear rate g = 0 (should be > 0)\n"
+                    "  - All particles have zero weight (check W_init)\n",
+                    UserWarning,
+                    stacklevel=2
+                )
+    
     def _validate_input_arrays(self):
         dim = self.dim
 
@@ -419,7 +766,8 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             L = _len(name)
             if L != dim:
                 raise ValueError(
-                    f"`{name}` must be a 1D array (sequence) of length dim={dim}, got length {L}."
+                    f"`{name}` must be a 1D array (sequence) of length dim={dim}, got length {L}. "
+                    f"Check your initialization code."
                 )
 
     def _growth_factor(self) -> float:
@@ -477,8 +825,114 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         init_cdf: Optional[dict] = None,
     ):
         """
-        Initialize particle arrays (V_flat, X) and NEW: weight array W.
-        This version keeps the original DSMC logic, but adds weight tracking.
+        Initialize particle arrays (V_flat, X, W) for simulation.
+
+        Sets up the core particle state including volumes, weights, diameters,
+        and auxiliary properties (porosity, liquid volume, saturation).
+        Must be called before _initialize_samplers() and solve().
+
+        Parameters
+        ----------
+        init_Vc : bool, default=True
+            If True, compute Control Volume from c/x/PGV/SIG parameters.
+            If False, use externally provided V_flat (recommended for custom setups).
+        V_flat : np.ndarray, optional
+            Pre-computed particle volumes with shape (dim+1, n_particles).
+            Row structure:
+            - Rows 0..dim-1: Component volumes (for multi-component)
+            - Row -1: Total dry volume (V_dry)
+            For single-component (dim=1):
+            - Row 0: Solid volume (V_solid = V_dry × (1-porosity))
+            - Row 1: Total dry volume (V_dry)
+        W_init : np.ndarray, optional
+            Initial computational weights for each particle.
+            Must have same length as V_flat.shape[1].
+            Typical values: 10 to 100 (higher = fewer represented particles)
+        init_cdf : dict, optional
+            Experimental CDF data for direct initialization. Keys:
+            - x_grid: Diameter grid [m]
+            - cdf: Cumulative distribution (Q0 or Q3)
+            - basis: "number" (Q0) or "volume" (Q3)
+            - n_ref: Reference particle count (optional)
+            Mutually exclusive with V_flat.
+
+        Raises
+        ------
+        ValueError
+            If particle count <= 0 after filtering
+            If W_init size mismatch with V_flat
+            If total primary particle count n0 <= 0 (when init_Vc=True)
+            If unsupported PGV type specified
+
+        Warns
+        -----
+        UserWarning
+            If V_flat[0,:] > V_flat[-1,:] detected (inconsistent porosity)
+
+        See Also
+        --------
+        _initialize_samplers : Setup propensity samplers (call after this)
+        _build_init_from_cdf : Build particles from experimental CDF
+        setup_initial_particles : Helper function in helpers.py
+
+        Examples
+        --------
+        >>> # Method 1: From c/x parameters (init_Vc=True)
+        >>> solver.c = [0.1e-2]
+        >>> solver.x = [100e-6]
+        >>> solver.PGV = ['mono']
+        >>> solver._initialize_particles(init_Vc=True)
+
+        >>> # Method 2: Custom volumes (init_Vc=False)
+        >>> V_flat = np.zeros((2, 500), dtype=float)
+        >>> V_flat[-1, :] = np.pi/6 * (100e-6)**3  # V_dry
+        >>> W_init = np.full(500, 50.0, dtype=float)
+        >>> solver.Vc = 1e-6
+        >>> solver._initialize_particles(init_Vc=False, V_flat=V_flat, W_init=W_init)
+
+        >>> # Method 3: From experimental CDF
+        >>> init_cdf = {
+        ...     'x_grid': np.linspace(10e-6, 1000e-6, 100),
+        ...     'cdf': np.linspace(0, 1, 100),
+        ...     'basis': 'volume',
+        ... }
+        >>> solver._initialize_particles(init_cdf=init_cdf)
+
+        Notes
+        -----
+        **Initialization Steps:**
+
+        1. Validate input parameters (c/x/PGV/SIG or V_flat/W_init)
+        2. Generate particle volumes based on PGV type:
+           - mono: All particles same volume
+           - norm: Normal distribution (μ=v, σ=SIG×v)
+           - weibull: Weibull distribution (shape=2.0)
+        3. Filter invalid particles (V <= 0)
+        4. Optionally compress to V_eff_init particles (quantile-based)
+        5. Allocate capacity buffers (10% growth margin)
+        6. Initialize X (diameter) from V_flat[-1,:] (total volume)
+        7. Setup auxiliary arrays (W, porosity, liquid_volume, saturation)
+        8. Save initial state for mass conservation checks
+
+        **Weight Interpretation:**
+
+        Each computational particle represents W real particles:
+        - W=1: One-to-one mapping (expensive, accurate)
+        - W=50: Each particle represents 50 real particles (typical)
+        - W=100+: Coarse approximation (fast, less accurate)
+
+        **Porosity Handling:**
+
+        - Vollkoerper (no pores): porosity = NaN, V_solid = V_dry
+        - Porous particles: porosity ∈ [0, 1], V_solid = V_dry × (1-poro)
+        - Set porosity AFTER _initialize_particles if using custom values
+
+        **Capacity Management:**
+
+        Internal buffer (_cap) allocated with 10% growth margin:
+        - Prevents frequent reallocations during simulation
+        - Automatically expanded via reconstruction if recon_enable=True
+        - Active particle count tracked via a_tot
         """
         dim = int(self.dim)
         self._validate_input_arrays()
@@ -491,12 +945,21 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             self.n = np.round(self.c / self.v)
             self.n0 = float(np.sum(self.n))
             if self.n0 <= 0:
-                raise ValueError("Total primary particle count `n0` must be > 0 (check c and x).")
+                raise ValueError(
+                    f"Total primary particle count n0={self.n0} must be > 0.\n"
+                    f"This usually means c (concentration) is too low or x (diameter) is too large.\n"
+                    f"Current values: c={self.c}, x={self.x}\n"
+                    f"Fix: Increase c or decrease x. Typical values: c=0.1e-2, x=1e-6"
+                )
             self.Vc = self.a0 / self.n0
             self.a = np.round(self.n * self.Vc).astype(int)
             total_cols = int(np.sum(self.a))
             if total_cols <= 0:
-                raise ValueError("No particles to initialize (sum(a) == 0). Check c/x/PGV/SIG.")
+                raise ValueError(
+                    f"No particles to initialize (sum(a)={total_cols}).\n"
+                    f"Check your c/x/PGV/SIG parameters. The calculated particle count per component is a={self.a}.\n"
+                    f"Fix: Ensure c > 0 and x > 0 for all components."
+                )
     
         used_cdf_init = False
         if init_cdf is not None:
@@ -537,7 +1000,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             #   - V_flat[-1, :] = V_dry (total dry volume)
             #   - V_flat[0, :] should be V_solid (solid volume only)
             #   - For porous particles: V_flat[0,:] < V_flat[-1,:]
-            #   - For Vollkörper: V_flat[0,:] ≈ V_flat[-1,:] (porosity will be NaN)
+            #   - For Vollkoerper: V_flat[0,:] ≈ V_flat[-1,:] (porosity will be NaN)
             # ================================================================
             if dim == 1 and V_init.shape[0] >= 2:
                 v_dry = V_init[-1, :]
@@ -562,7 +1025,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             W_init = np.asarray(W_init, dtype=float).ravel()
             if W_init.size != V_init.shape[1]:
                 raise ValueError(
-                    "W_init must have the same number of entries as V_flat columns."
+                    f"W_init size ({W_init.size}) does not match V_flat columns ({V_init.shape[1]}).\n"
+                    f"This means your weight array and particle volume array have different lengths.\n"
+                    f"Fix: Ensure len(W_init) == n_particles (same as V_flat.shape[1])."
                 )
             keep_w = np.isfinite(W_init) & (W_init > 0.0)
             V_init = V_init[:, keep_w]
@@ -604,7 +1069,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         self.a_tot = a0_eff_new
         
         # X (diameter) is based on TOTAL volume (V_ges)
-        # For primary particles (Vollkörper, porosity=NaN): V_ges = V_solid
+        # For primary particles (Vollkoerper, porosity=NaN): V_ges = V_solid
         # So initialization remains the same, just different interpretation
         self.X = np.zeros(self._cap, dtype=float)
         self.X[:a0_eff_new] = self._vol2diam(self.V_flat[-1, :a0_eff_new])
@@ -618,16 +1083,18 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # -------------------------
         # Liquid volume, Porosity and Saturation per particle
         # -------------------------
-        # Note: porosity is initialized to NaN to distinguish between
-        # "no porosity assigned yet" (Vollkörper) and "porosity = 0"
-        # Only particles with valid porosity (> NaN check) are compressed
+        # IMPORTANT: porosity is initialized to 0.0 (non-porous primary particles).
+        # We do NOT use NaN anymore because:
+        #   1. NaN propagates silently and causes numerical instabilities
+        #   2. poro=0.0 is physically meaningful (no pores), NaN is not
+        #   3. All formulas work correctly with poro=0.0: V_solid = V_dry * (1 - 0.0) = V_dry
         #
         # Volume semantics (see get_V_solid() and get_V_total()):
-        # - V_flat currently stores V_solid (legacy, will change to V_ges in Phase 2)
-        # - For Vollkörper (NaN porosity): V_ges = V_solid
-        # - For porous particles: V_ges = V_solid / (1 - porosity)
+        # - V_flat[-1] stores V_dry (total dry volume = solid + pores)
+        # - For non-porous particles (poro=0.0): V_solid = V_dry
+        # - For porous particles (poro>0.0): V_solid = V_dry * (1 - porosity)
         self.liquid_volume = np.zeros(self._cap, dtype=float)
-        self.porosity = np.full(self._cap, np.nan, dtype=float)
+        self.porosity = np.zeros(self._cap, dtype=float)  # Changed from np.nan to 0.0
         self.saturation = np.zeros(self._cap, dtype=float)
         if self.t_vec is None:
             steps = max(1, int(self.t_total // max(1, self.t_write)))
@@ -643,6 +1110,29 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         self.liquid_volume0 = self.liquid_volume[:self.a_tot].copy()
         self.porosity0 = self.porosity[:self.a_tot].copy()
         self.saturation0 = self.saturation[:self.a_tot].copy()
+    
+        # === DEBUG MASSEERHALTUNG: INITIALISIERUNG ===
+        if getattr(self, 'mcpbe_debug_mass', False):
+            v_dry_init = self.V_flat[-1, :self.a_tot]
+            poro_init = self.porosity[:self.a_tot]
+            w_init = self.W[:self.a_tot]
+            
+            valid_poro = ~np.isnan(poro_init)
+            v_solid_init = np.zeros_like(v_dry_init)
+            v_solid_init[valid_poro] = v_dry_init[valid_poro] * (1.0 - poro_init[valid_poro])
+            v_solid_init[~valid_poro] = v_dry_init[~valid_poro]
+            
+            solid_vol_init = np.sum(v_solid_init * w_init)
+            liq_vol_init = np.sum(self.liquid_volume[:self.a_tot] * w_init)
+            n_phys_init = np.sum(w_init) / self.Vc
+            
+            print(f"\n[DEBUG INIT] t=0s")
+            print(f"  n_comp={self.a_tot}, n_phys={n_phys_init:.3e}, Vc={self.Vc:.3e}")
+            print(f"  V_solid_total={solid_vol_init:.6e} m^3 (SOLLTE KONSTANT BLEIBEN)")
+            print(f"  V_liquid_total={liq_vol_init:.6e} m^3")
+            print(f"  porosity_mean={np.nanmean(poro_init):.4f}, saturation_mean={np.nanmean(self.saturation[:self.a_tot]):.4f}")
+            print(f"  W_range=[{np.min(w_init):.2f}, {np.max(w_init):.2f}]")
+# ===============================================
     
         self.V0_save = [self.V0.copy()]
         self.W0_save = [self.W0.copy()]
@@ -879,18 +1369,47 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         ``porosity`` is padded with NaN rather than 0.0 so that fresh slots read
         as "no porosity assigned" (Vollkoerper).
         """
+        import time as time_module
+        
         need = self.a_tot + int(extra)
+        
         if self._cap >= need:
             return
 
         old_cap = self._cap
-        new_cap = int(max(math.ceil(old_cap * self._growth_factor()), need))
+        growth_factor = self._growth_factor()
+        new_cap = int(max(math.ceil(old_cap * growth_factor), need))
         a = self.a_tot
+        
+        _total_start = time_module.perf_counter()
+
+        # Step 1: Calculate new capacity
+        if self.mcpbe_debug:
+            print(
+                f"[MC-PBE CAPACITY] Step 1/5: CALCULATE NEW CAP - "
+                f"old_cap={old_cap}, growth_factor={growth_factor:.3f}, new_cap={new_cap}"
+            )
 
         V_new = np.zeros((self.dim + 1, new_cap), dtype=float)
         V_new[:, :a] = self.V_flat[:, :a]
         self.V_flat = V_new
 
+        # Step 2: Grow V_flat array
+        if self.mcpbe_debug:
+            _step_time = (time_module.perf_counter() - _total_start) * 1000
+            v_flat_size_mb = self.V_flat.nbytes / (1024 * 1024)
+            print(
+                f"[MC-PBE CAPACITY] Step 2/5: GROW V_flat - "
+                f"shape=({self.dim + 1}, {new_cap}), copied a={a} particles, "
+                f"V_flat size={v_flat_size_mb:.3f} MB, took {_step_time:.2f} ms"
+            )
+            _step_start = time_module.perf_counter()
+
+        # Step 3: Grow all particle arrays
+        if self.mcpbe_debug:
+            growing_arrays = []
+            total_arrays_bytes = 0
+        
         for name in self._PARTICLE_ARRAY_NAMES:
             arr = getattr(self, name, None)
             if arr is None:
@@ -899,15 +1418,57 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             grown = np.full(new_cap, fill, dtype=float)
             grown[:a] = arr[:a]
             setattr(self, name, grown)
+            
+            if self.mcpbe_debug:
+                growing_arrays.append(name)
+                total_arrays_bytes += grown.nbytes
+        
+        if self.mcpbe_debug:
+            _step_time = (time_module.perf_counter() - _step_start) * 1000
+            total_arrays_mb = total_arrays_bytes / (1024 * 1024)
+            arrays_str = ", ".join(growing_arrays) if growing_arrays else "none"
+            print(
+                f"[MC-PBE CAPACITY] Step 3/5: GROW PARTICLE ARRAYS - "
+                f"growing: [{arrays_str}], total arrays size={total_arrays_mb:.3f} MB, "
+                f"took {_step_time:.2f} ms"
+            )
+            _step_start = time_module.perf_counter()
 
+        # Step 4: Update metadata
         self._cap = new_cap
         self._invalidate_particle_array_cache()
+        
+        if self.mcpbe_debug:
+            _step_time = (time_module.perf_counter() - _step_start) * 1000
+            print(
+                f"[MC-PBE CAPACITY] Step 4/5: UPDATE METADATA - "
+                f"_cap={new_cap}, cache invalidated, took {_step_time:.2f} ms"
+            )
+            _step_start = time_module.perf_counter()
+
+        # Step 5: Finalize & Complete
+        grow_factor_actual = new_cap / max(old_cap, 1)
+        if self.mcpbe_debug:
+            _total_time = (time_module.perf_counter() - _total_start) * 1000
+            total_memory_mb = (self.V_flat.nbytes + total_arrays_bytes) / (1024 * 1024)
+            print(
+                f"[MC-PBE CAPACITY] Step 5/5: COMPLETE - "
+                f"capacity {old_cap} -> {new_cap} (factor {grow_factor_actual:.2f}), "
+                f"Total memory: V_flat={self.V_flat.nbytes/(1024*1024):.3f} MB, "
+                f"Arrays={total_arrays_mb:.3f} MB, Combined={total_memory_mb:.3f} MB, "
+                f"TOTAL TIME: {_total_time:.2f} ms"
+            )
 
         if self.VERBOSE:
+            # Calculate real time elapsed since last VERBOSE output
+            now = time_module.perf_counter()
+            elapsed_real = (now - self._last_verbose_time) * 1000  # in ms
+            self._last_verbose_time = now
+            
             print(
                 f"[MC-PBE] Capacity grown at t={self._elapsed:.6g} "
                 f"after {self._iter_count} events: cap {old_cap} -> {new_cap} "
-                f"(x{new_cap/max(old_cap,1):.2f})"
+                f"(x{grow_factor_actual:.2f}) [{elapsed_real:.2f} ms]"
             )
 
 
@@ -1031,6 +1592,43 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         if getattr(self, "process_type", "agglomeration") in ("breakage", "mix"):
             self._calc_break_rates_full()
             self._break_sampler = rebuild_sampler(self._break_sampler, self._break_rate[:self.a_tot])
+        # === DEBUG VC-DOUBLE ===
+        if getattr(self, 'mcpbe_debug_mass', False):
+            # BEFORE doubling
+            v_dry_before = self.V_flat[-1, :old_a]
+            poro_before = self.porosity[:old_a]
+            w_before = self.W[:old_a]
+            valid_before = ~np.isnan(poro_before)
+            v_solid_before = np.zeros_like(v_dry_before)
+            v_solid_before[valid_before] = v_dry_before[valid_before] * (1.0 - poro_before[valid_before])
+            v_solid_before[~valid_before] = v_dry_before[~valid_before]
+            
+            solid_before = np.sum(v_solid_before * w_before)
+            liq_before = np.sum(self.liquid_volume[:old_a] * w_before)
+            
+            # AFTER doubling
+            v_dry_after = self.V_flat[-1, :self.a_tot]
+            poro_after = self.porosity[:self.a_tot]
+            w_after = self.W[:self.a_tot]
+            valid_after = ~np.isnan(poro_after)
+            v_solid_after = np.zeros_like(v_dry_after)
+            v_solid_after[valid_after] = v_dry_after[valid_after] * (1.0 - poro_after[valid_after])
+            v_solid_after[~valid_after] = v_dry_after[~valid_after]
+            
+            solid_after = np.sum(v_solid_after * w_after)
+            liq_after = np.sum(self.liquid_volume[:self.a_tot] * w_after)
+            n_phys_new = np.sum(w_after) / self.Vc
+            
+            print(f"\n[DEBUG VC-DOUBLE] t={elapsed_time:.4f}s")
+            print(f"  Vc: {old_Vc:.3e} -> {self.Vc:.3e}")
+            print(f"  a_tot: {old_a} -> {self.a_tot}")
+            print(f"  n_phys: {old_a/old_Vc:.3e} -> {n_phys_new:.3e}")
+            print(f"  BEFORE: V_solid_total={solid_before:.6e}, V_liq_total={liq_before:.6e}")
+            print(f"  AFTER:  V_solid_total={solid_after:.6e}, V_liq_total={liq_after:.6e}")
+            print(f"  ΔV_solid={solid_after - solid_before:.6e} (MUSST = 0 sein!)")
+            print(f"  ΔV_liq={liq_after - liq_before:.6e}")
+# =========================
+
         if self.VERBOSE:    
             print(
                 f"[MC-PBE] Control volume doubled at t={elapsed_time:.6g} after {iter_count} events: "
@@ -1053,13 +1651,13 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         """
         Get solid volume: V_s = V_particle_dry * (1 - porosity).
         
-        For Vollkörper (NaN porosity): V_s = V_particle_dry.
+        For non-porous particles (poro=0.0): V_s = V_particle_dry.
         
         Args:
             idx: Particle index or slice (None for all active)
         
         Returns:
-            Solid volume in m³
+            Solid volume in m^3
         """
         V_particle_dry = self.V_flat[-1, :self.a_tot] if idx is None else self.V_flat[-1, idx]
         
@@ -1068,11 +1666,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         else:
             poro = self.porosity[idx] if isinstance(idx, slice) else self.porosity[idx]
         
-        # For particles with valid porosity: V_s = V_particle_dry * (1 - poro)
-        # For Vollkörper (NaN): V_s = V_particle_dry (no pores)
-        has_poro = ~np.isnan(poro)
-        V_solid = V_particle_dry.copy().astype(float)
-        V_solid[has_poro] = V_particle_dry[has_poro] * (1.0 - poro[has_poro])
+        # Universal formula: V_s = V_particle_dry * (1 - poro)
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
+        V_solid = V_particle_dry * (1.0 - poro)
         
         return V_solid
     
@@ -1086,7 +1682,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             idx: Particle index or slice (None for all active)
         
         Returns:
-            Dry particle volume in m³
+            Dry particle volume in m^3
         """
         if idx is None:
             return self.V_flat[-1, :self.a_tot].copy()
@@ -1102,7 +1698,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             idx: Particle index or slice (None for all active)
         
         Returns:
-            Hydrodynamic volume in m³
+            Hydrodynamic volume in m^3
         """
         V_particle_dry = self.get_V_particle_dry(idx)
         V_liq_ext = self.get_V_liquid_external(idx)
@@ -1134,13 +1730,13 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         """
         Get pore volume: V_pore = V_particle_dry * porosity.
         
-        For Vollkörper (NaN porosity): V_pore = 0.
+        For non-porous particles (poro=0.0): V_pore = 0.
         
         Args:
             idx: Particle index or slice (None for all active)
         
         Returns:
-            Pore volume in m³
+            Pore volume in m^3
         """
         V_particle_dry = self.V_flat[-1, :self.a_tot] if idx is None else self.V_flat[-1, idx]
         
@@ -1149,11 +1745,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         else:
             poro = self.porosity[idx] if isinstance(idx, slice) else self.porosity[idx]
         
-        # For particles with valid porosity: V_pore = V_particle_dry * poro
-        # For Vollkörper (NaN): V_pore = 0
-        has_poro = ~np.isnan(poro)
-        V_pore = np.zeros_like(V_particle_dry, dtype=float)
-        V_pore[has_poro] = V_particle_dry[has_poro] * poro[has_poro]
+        # Universal formula: V_pore = V_particle_dry * poro
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
+        V_pore = V_particle_dry * poro
         
         return V_pore
     
@@ -1161,13 +1755,13 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         """
         Get internal liquid: V_liq_int = V_pore × saturation.
         
-        For Vollkörper (NaN porosity): 0.
+        For non-porous particles (poro=0.0): V_liq_int = 0.
         
         Args:
             idx: Particle index or slice (None for all active)
         
         Returns:
-            Internal liquid volume in m³
+            Internal liquid volume in m^3
         """
         V_particle_dry = self.V_flat[-1, :self.a_tot] if idx is None else self.V_flat[-1, idx]
         
@@ -1178,17 +1772,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             poro = self.porosity[idx] if isinstance(idx, slice) else self.porosity[idx]
             sat = self.saturation[idx] if isinstance(idx, slice) else self.saturation[idx]
         
-        # V_liq_int = V_pore × S (saturation is a stored state variable)
-        has_poro = ~np.isnan(poro)
-        V_liq_int = np.zeros_like(V_particle_dry, dtype=float)
-        V_liq_int[has_poro] = V_particle_dry[has_poro] * poro[has_poro] * sat[has_poro]
-        
-        # Vollkörper have no pores, so no internal liquid
-        if not isinstance(idx, slice) and idx is not None:
-            if np.isnan(self.porosity[idx]):
-                return 0.0
-        else:
-            V_liq_int[np.isnan(poro)] = 0.0
+        # Universal formula: V_liq_int = V_particle_dry × poro × sat
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
+        V_liq_int = V_particle_dry * poro * sat
         
         return V_liq_int
     
@@ -1205,7 +1791,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             idx: Particle index or slice. If None, returns all active particles.
         
         Returns:
-            External liquid volume in m³
+            External liquid volume in m^3
         """
         # Get total liquid volume from storage
         if idx is None:
@@ -1229,11 +1815,11 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         """
         Get saturation of particle(s) (fraction of pore space filled with liquid).
         
-        Computes: saturation = V_liquid_internal / V_pore
-        For Vollkörper (NaN porosity): saturation = 0 (no pores)
+        Stored directly as state variable (not computed).
+        For non-porous particles (poro=0.0): saturation = 0 (no pores).
         
         Saturation affects:
-        - Compression rate (higher saturation → slower compression due to lubrication)
+        - Compression rate (higher saturation -> slower compression due to lubrication)
         - Agglomeration efficiency (optimal saturation for liquid bridge formation)
         - Particle density and breakage behavior
         
@@ -1251,20 +1837,8 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             Saturation value in [0, 1]
         """
         if idx is None:
-            poro = self.porosity[:self.a_tot]
-            sat = self.saturation[:self.a_tot]
-        else:
-            poro = self.porosity[idx] if isinstance(idx, slice) else self.porosity[idx]
-            sat = self.saturation[idx] if isinstance(idx, slice) else self.saturation[idx]
-        
-        # For Vollkörper (NaN porosity): saturation is undefined (return 0)
-        has_poro = ~np.isnan(poro)
-        result = np.zeros_like(poro, dtype=float)
-        result[has_poro] = sat[has_poro]
-        
-        if not isinstance(idx, slice) and idx is not None:
-            return float(result) if np.isscalar(result) else float(result[0])
-        return result
+            return self.saturation[:self.a_tot].copy()
+        return self.saturation[idx]
     
     def _vol2diam(self, V: np.ndarray) -> np.ndarray:
         """
@@ -1275,7 +1849,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         - For solid-equivalent diameter: use V_solid
         
         Args:
-            V: Volume array in m³
+            V: Volume array in m^3
         
         Returns:
             Diameter array in m
@@ -1289,13 +1863,109 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
     def solve(self, maxiter: int = int(1e12), max_particles: int = None):
         """
         Run MC-PBE simulation.
-        
-        Args:
-            maxiter: Maximum number of MC events
-            max_particles: Maximum particle count before early termination (default: no limit)
-                          Useful for breakage tests to avoid particle explosion
+
+        Executes the weighted DSMC Monte Carlo algorithm for population balance
+        modeling. Simulates agglomeration, breakage, nucleation, and other
+        granulation processes based on configured kernels.
+
+        Parameters
+        ----------
+        maxiter : int, default=1e12
+            Maximum number of Monte Carlo events. Prevents infinite loops.
+            Typical values: 1e6 to 1e9 depending on simulation length.
+        max_particles : int, optional
+            Early termination threshold for particle count. If exceeded,
+            simulation stops gracefully with _hit_particle_limit=True.
+            Useful for breakage-dominated simulations to prevent memory overflow.
+            Default: None (no limit).
+
+        Returns
+        -------
+        None
+            Results stored in solver attributes:
+            - V_save: Volume trajectories [time, dim+1, particles]
+            - W_save: Weight trajectories [time, particles]
+            - t_vec: Time points
+            - real_agg_events: Total agglomeration events
+            - real_break_events: Total breakage events
+
+        Raises
+        ------
+        RuntimeError
+            If solver not properly initialized:
+            - Missing _initialize_samplers() call
+            - Invalid particle state (NaN/Inf weights)
+            - Zero propensity with active particles
+
+        Warns
+        -----
+        UserWarning
+            If suspicious configurations detected:
+            - Zero total propensity (no events will occur)
+            - Missing recon_N_max with recon_enable=True
+
+        See Also
+        --------
+        _initialize_particles : Particle setup before solve
+        _initialize_samplers : Propensity sampler setup
+        _validate_solve_readiness : Pre-flight validation
+
+        Examples
+        --------
+        >>> # Standard simulation
+        >>> solver._initialize_particles(init_Vc=False, V_flat=V_flat, W_init=W)
+        >>> solver._initialize_samplers()
+        >>> solver.solve()
+
+        >>> # Breakage test with particle limit
+        >>> solver.process_type = 'breakage'
+        >>> solver.solve(maxiter=1e7, max_particles=10000)
+        >>> if solver._hit_particle_limit:
+        ...     print("Stopped due to particle explosion")
+
+        >>> # Long simulation with verbose output
+        >>> solver.verbose = True
+        >>> solver.solve(maxiter=1e9)
+
+        Notes
+        -----
+        **Algorithm Overview:**
+
+        The solver uses a weighted DSMC (Direct Simulation Monte Carlo) approach:
+
+        1. Compute total propensity (sum of all event rates)
+        2. Sample time to next event: dt ~ Exp(total_propensity)
+        3. Select event type (aggregation/breakage) proportionally
+        4. Execute event (update particles, weights, volumes)
+        5. Update propensities (moment mode O(n) or pairwise O(n²))
+        6. Save state at output time points
+        7. Repeat until t_total reached or maxiter exceeded
+
+        **Performance Considerations:**
+
+        - Use `agg_propensity_mode="moment"` for O(n) scaling (default)
+        - Enable `recon_enable=True` with `recon_N_max=4000` for large systems
+        - Breakage CDFs are cached after first computation
+        - Verbose mode adds ~5% overhead but useful for debugging
+
+        **Common Errors and Fixes:**
+
+        - "IndexError in _do_one_break": Call _initialize_samplers() before solve()
+        - "NaN in propensities": Check kernel parameters for invalid values
+        - "Particle count exploded": Enable recon_enable with recon_N_max
+        - "Zero propensity": Verify kernel parameters (g > 0, corr_beta > 0)
+
+        **Output Frequency:**
+
+        Controlled by t_vec (if provided) or t_total/t_write during construction.
+        More frequent output increases memory usage proportionally.
         """
-        t0 = time.time()
+        import time as time_module
+        
+        # Pre-flight checks (catch common configuration errors early)
+        self._validate_solve_readiness()
+        
+        t0 = time_module.time()
         count = 0
         current_time = 0.0
         self.real_agg_events = 0.0
@@ -1305,6 +1975,12 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         
         # Track if we hit the particle limit
         self._hit_particle_limit = False
+        
+        # Track wall-clock time for debug output (used by Nucleation debug)
+        self.MACHINE_TIME = 0.0
+        
+        # Track real time between VERBOSE outputs for accurate timing info
+        self._last_verbose_time = time_module.perf_counter()
 
         pt = getattr(self, "process_type", "agglomeration")
         agg_total_propensity = (
@@ -1454,6 +2130,8 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
 
             current_time = float(elapsed_time)
             self._elapsed = current_time
+            # Update wall-clock time for debug output (used by Nucleation debug)
+            self.MACHINE_TIME = time_module.time() - t0
 
             # Save snapshots at requested times (active slice only).
             # `will_save` above predicted this loop; if the prediction were ever
@@ -1495,11 +2173,65 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 self.real_agg_events_save.append(float(self.real_agg_events))
                 self.real_break_events_save.append(float(self.real_break_events))
 
+                # === DEBUG SAVE-POINT MASSENBILANZ ===
+                if getattr(self, 'mcpbe_debug_mass', False):
+                    v_dry = self.V_flat[:, :self.a_tot][-1, :]
+                    poro = self.porosity[:self.a_tot]
+                    w = self.W[:self.a_tot]
+                    valid = ~np.isnan(poro)
+                    v_solid = np.zeros_like(v_dry)
+                    v_solid[valid] = v_dry[valid] * (1.0 - poro[valid])
+                    v_solid[~valid] = v_dry[~valid]
+                    
+                    solid_total = np.sum(v_solid * w)
+                    liq_total = np.sum(self.liquid_volume[:self.a_tot] * w)
+                    n_phys = np.sum(w) / self.Vc
+                    
+                    # Vergleich mit Initialisierung - KORREKTE BERECHNUNG!
+                    if hasattr(self, 'V0') and hasattr(self, 'W0'):
+                        # V0 kann 2D sein (dim x n) oder 1D (n,) - korrekt extrahieren!
+                        if self.V0.ndim == 2:
+                            v_dry_0 = self.V0[-1, :]  # Letzte Zeile = V_dry
+                        else:
+                            v_dry_0 = self.V0  # Already 1D
+                        
+                        # V_solid_0 berechnen mit korrekter Porositaet
+                        if hasattr(self, 'porosity0'):
+                            poro_0 = self.porosity0
+                            valid_0 = ~np.isnan(poro_0)
+                            v_solid_0 = np.zeros_like(v_dry_0)
+                            v_solid_0[valid_0] = v_dry_0[valid_0] * (1.0 - poro_0[valid_0])
+                            v_solid_0[~valid_0] = v_dry_0[~valid_0]
+                        else:
+                            # Keine Porositaet: Annahme Vollkoerper (poro=0)
+                            v_solid_0 = v_dry_0
+                        
+                        solid_0 = np.sum(v_solid_0 * self.W0)
+                        error_solid = (solid_total - solid_0) / solid_0 * 100 if solid_0 > 0 else 0.0
+                    else:
+                        error_solid = 0.0
+                    
+                    print(f"\n[DEBUG SAVE] t={elapsed_time:.4f}s (save #{next_save_idx})")
+                    print(f"  n_comp={self.a_tot}, n_phys={n_phys:.3e}")
+                    print(f"  V_solid={solid_total:.6e}, Δ={error_solid:+.6f}% (SOLLTE = 0%)")
+                    print(f"  V_liq={liq_total:.6e}")
+# ================================
+
                 next_save_idx += 1
                 if self.VERBOSE:
+                    # Calculate n_comp and n_phys for output
+                    n_comp = self.a_tot
+                    n_phys = float(np.sum(self.W[:self.a_tot])) / self.Vc
+                    
+                    # Calculate real time elapsed since last VERBOSE output
+                    now = time_module.perf_counter()
+                    elapsed_real = (now - self._last_verbose_time) * 1000  # in ms
+                    self._last_verbose_time = now
+                    
                     print(
                         f"[MC-PBE] Calculate t={elapsed_time:.6g} after {self._iter_count} events "
-                        f"(real agg={self.real_agg_events:.6g}, real break={self.real_break_events:.6g})"
+                        f"(real agg={self.real_agg_events:.6g}, real break={self.real_break_events:.6g}) "
+                        f"[n_comp={n_comp:.0f}, n_phys={n_phys:.3e}] [{elapsed_real:.2f} ms]"
                     )
             
             # Continuous / scheduled processes run AFTER the MC event, via
@@ -1518,14 +2250,15 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             if nucleation is not None:
                 self._last_dt = dt_event  # exposed for diagnostics
 
-                # Track that an MC event happened inside the addition window.
-                nucleation.mark_mc_event_in_window()
+                # Track event time for statistics and finalize
+                nucleation.mark_event_for_statistics(float(current_time))
 
-                # The first event may already lie past the window.
+                # Case C: First event may already lie past the window.
                 if count == 0:
                     nucleation.check_first_event(float(current_time))
 
-                nucleation.step(current_time, float(dt_event))
+                # Step: calculates overlap and distributes liquid
+                nucleation.step(float(current_time), float(dt_event))
 
             # Agglomeration-dominated safety: duplicate the control volume once
             # the population has halved (DSMC).
@@ -1547,10 +2280,15 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             self.lmc_live._sim.agg_pool.close_pool_cache()
         self.MACHINE_TIME = time.time() - t0
         if self.VERBOSE:
+            # Calculate real time elapsed since last VERBOSE output
+            now = time_module.perf_counter()
+            elapsed_real = (now - self._last_verbose_time) * 1000  # in ms
+            
             print(
                 f"[MC-PBE] The calculation took {getattr(self,'MACHINE_TIME',0.0):.4g}s "
                 f"after {count} events "
-                f"(real agg={self.real_agg_events:.6g}, real break={self.real_break_events:.6g})"
+                f"(real agg={self.real_agg_events:.6g}, real break={self.real_break_events:.6g}) "
+                f"[{elapsed_real:.2f} ms since last output]"
             )
         return self
 
@@ -2012,7 +2750,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # ----- parallel path -----
         base_state = copy.deepcopy(self.__dict__)
 
-        # åŽ»æŽ‰ä¸€äº›è¿è¡Œæ—¶å¯¹è±¡ï¼Œé¿å… pickling/æ–‡ä»¶å¥æŸ„/ç¼“å­˜å¯¼è‡´å·®å¼‚
+        # åŽ»æŽ‰ae¸€aeº›è¿è¡Œæ—¶å¯¹è±¡ï¼Œe¿å… pickling/æ–‡ae»¶å¥æŸ„/ç¼“å­˜å¯¼è‡´å·®å¼‚
         base_state.pop("cancel_flag", None)
         for k_rm in ("lmc_adapter", "lmc_live", "lmc_breakage_adapter"):
             if k_rm in base_state:
@@ -2328,6 +3066,15 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         arrays = self._particle_arrays()
 
         if j != last:
+            # Re-key the ParticleMerger's hash index BEFORE moving the data:
+            # the particle currently at `last` will live at `j` afterwards,
+            # and a stale index entry could later cause find_or_create() to
+            # merge weight into whatever unrelated particle ends up reusing
+            # the freed `last` slot (see particle_merger.py::notify_index_swap).
+            merger = getattr(self, "_particle_merger", None)
+            if merger is not None:
+                merger.notify_index_swap(last, j)
+
             tmp = self.V_flat[:, j].copy()
             self.V_flat[:, j] = self.V_flat[:, last]
             self.V_flat[:, last] = tmp

@@ -256,13 +256,9 @@ class StokesKritKernel(AggAcceptanceKernel):
         """
         # Check if solver provides necessary data
         if solver is None:
-            if self.debug:
-                print("  [STOKES DEBUG] REJECT: No solver access")
             return False  # Can't compute without solver
         
         if particle1_idx is None or particle2_idx is None:
-            if self.debug:
-                print("  [STOKES DEBUG] REJECT: No particle indices")
             return False  # Need indices to access solver arrays
         
         # STEP 1: Compute masses and solid fractions
@@ -270,8 +266,6 @@ class StokesKritKernel(AggAcceptanceKernel):
         m2, m_solid2 = self._compute_particle_mass(v_dry2, particle2_idx, solver)
         
         if m1 <= 0 or m2 <= 0:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Invalid masses (m1={m1:.3e}, m2={m2:.3e})")
             return False  # Invalid masses
         
         # STEP 2: Compute effective restitution coefficients
@@ -280,8 +274,6 @@ class StokesKritKernel(AggAcceptanceKernel):
         e2 = m_solid2 / m2
         
         if e1 <= 0 or e2 <= 0:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: No solid content (e1={e1:.3f}, e2={e2:.3f})")
             return False  # No solid content
         
         # Geometric mean for pair
@@ -291,20 +283,12 @@ class StokesKritKernel(AggAcceptanceKernel):
         v_liq_ext1 = self._compute_external_liquid(v_dry1, particle1_idx, solver)
         v_liq_ext2 = self._compute_external_liquid(v_dry2, particle2_idx, solver)
         
-        if self.debug:
-            print(f"    [DEBUG LIQUID] p1: V_dry={v_dry1:.3e}, V_liq_ext={v_liq_ext1:.3e}")
-            print(f"    [DEBUG LIQUID] p2: V_dry={v_dry2:.3e}, V_liq_ext={v_liq_ext2:.3e}")
-            print(f"    [DEBUG LIQUID] solver has get_V_liquid_external: {hasattr(solver, 'get_V_liquid_external')}")
-            print(f"    [DEBUG LIQUID] solver has liquid_volume: {hasattr(solver, 'liquid_volume')}")
-        
         h1 = self._compute_film_thickness(v_dry1, v_liq_ext1)
         h2 = self._compute_film_thickness(v_dry2, v_liq_ext2)
         
         # Check if at least one particle has liquid (asymmetric case allowed)
         # Only reject if BOTH particles are dry
         if h1 + h2 <= 0:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Both particles dry (h1={h1:.3e}, h2={h2:.3e})")
             return False  # No liquid bridge possible
         
         # Compute effective film thickness for liquid bridge
@@ -314,8 +298,6 @@ class StokesKritKernel(AggAcceptanceKernel):
         
         # Early exit: film too thin
         if h_harm <= self.h_a:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Film too thin (h_harm={h_harm:.3e} <= h_a={self.h_a:.3e})")
             return False  # ln(h/h_a) <= 0 → St_crit <= 0
         
         # STEP 4: Compute Stokes number (Gl. 8)
@@ -324,16 +306,12 @@ class StokesKritKernel(AggAcceptanceKernel):
         R_harm = 2.0 * r1 * r2 / (r1 + r2)
         
         if R_harm <= 0:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Invalid radius (R_harm={R_harm:.3e})")
             return False
         
         # St = (m_harm * U) / (3 * π * η * R_harm²)
         St = (m_harm * self.U_coll) / (self.THREE_PI * self.binder_viscosity * R_harm ** 2)
         
         if not np.isfinite(St) or St <= 0:
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Invalid St (St={St:.3e})")
             return False
         
         # STEP 5: Compute critical Stokes number (Gl. 10)
@@ -341,22 +319,7 @@ class StokesKritKernel(AggAcceptanceKernel):
         St_crit = (1.0 + 1.0 / e_coag) * np.log(h_harm / self.h_a)
         
         if not np.isfinite(St_crit):
-            if self.debug:
-                print(f"  [STOKES DEBUG] REJECT: Invalid St_crit (St_crit={St_crit:.3e})")
             return False
         
         # STEP 6: Acceptance decision
-        accepted = St < St_crit
-        
-        if self.debug:
-            result = "ACCEPT" if accepted else "REJECT"
-            reason = "St < St_crit" if accepted else f"St > St_crit ({St:.3f} > {St_crit:.3f})"
-            print(f"  [STOKES DEBUG] {result}: {reason}")
-            print(f"    Particles: r1={r1*1e6:.1f}µm, r2={r2*1e6:.1f}µm")
-            print(f"    Masses: m1={m1:.3e}kg, m2={m2:.3e}kg, m_harm={m_harm:.3e}kg")
-            print(f"    Solid frac: e1={e1:.3f}, e2={e2:.3f}, e_coag={e_coag:.3f}")
-            print(f"    Liquid: V_liq_ext1={v_liq_ext1:.3e}m³, V_liq_ext2={v_liq_ext2:.3e}m³")
-            print(f"    Film: h1={h1*1e9:.1f}nm, h2={h2*1e9:.1f}nm, h_harm={h_harm*1e9:.1f}nm")
-            print(f"    Stokes: St={St:.3f}, St_crit={St_crit:.3f}")
-        
-        return accepted
+        return St < St_crit

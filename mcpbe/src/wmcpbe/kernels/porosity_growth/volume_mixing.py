@@ -75,9 +75,9 @@ class VolumeMixingKernel(PorosityGrowthKernel):
         
         Args:
             v_dry1: Dry volume of particle 1 [m³]
-            poro1: Porosity of particle 1 (NaN for Vollkörper)
+            poro1: Porosity of particle 1 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_dry2: Dry volume of particle 2 [m³]
-            poro2: Porosity of particle 2 (NaN for Vollkörper)
+            poro2: Porosity of particle 2 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_liq1, v_liq2: Liquid volumes (not used in this model)
             sat1, sat2: Saturations (not used in this model)
             collision_energy: Collision energy (not used in this model)
@@ -86,28 +86,26 @@ class VolumeMixingKernel(PorosityGrowthKernel):
         Returns:
             Tuple of (v_dry_merged, poro_merged)
             - v_dry_merged: Sum of dry volumes
-            - poro_merged: Merged porosity (NaN if both parents Vollkörper)
+            - poro_merged: Merged porosity (0.0 if both parents poreless/Vollkörper)
+            
+        Note:
+            Modern behavior: Returns 0.0 instead of NaN for poreless particles.
+            Legacy NaN is normalized to 0.0 for consistent handling.
         """
         # ==========================================
         # Decompose into solid and pore volumes
         # ==========================================
+        # Normalize NaN to 0.0 (treat legacy Vollkörper as poreless)
+        # Formula works for BOTH poro=0.0 AND poro>0.0!
+        poro1_norm = 0.0 if np.isnan(poro1) else poro1
+        poro2_norm = 0.0 if np.isnan(poro2) else poro2
         
-        # Particle 1
-        if np.isnan(poro1):
-            # Vollkörper: all dry volume is solid
-            v_solid1 = v_dry1
-            v_pore1 = 0.0
-        else:
-            v_solid1 = v_dry1 * (1.0 - poro1)
-            v_pore1 = v_dry1 * poro1
+        # For poro=0.0: V_solid = V_dry × 1.0 = V_dry ✓, V_pore = 0.0 ✓
+        v_solid1 = v_dry1 * (1.0 - poro1_norm)
+        v_pore1 = v_dry1 * poro1_norm
         
-        # Particle 2
-        if np.isnan(poro2):
-            v_solid2 = v_dry2
-            v_pore2 = 0.0
-        else:
-            v_solid2 = v_dry2 * (1.0 - poro2)
-            v_pore2 = v_dry2 * poro2
+        v_solid2 = v_dry2 * (1.0 - poro2_norm)
+        v_pore2 = v_dry2 * poro2_norm
         
         # ==========================================
         # Mass-conservative addition
@@ -120,11 +118,12 @@ class VolumeMixingKernel(PorosityGrowthKernel):
         # Compute merged porosity
         # ==========================================
         if v_dry_merged <= 0:
-            return 0.0, np.nan
+            return 0.0, 0.0
         
+        # MODERN: Return 0.0 instead of NaN for poreless particles
+        # Both parents poreless (or legacy Vollkörper) → child is poreless (poro=0.0)
         if v_pore_merged <= 0:
-            # Both parents were Vollkörper → child is Vollkörper
-            return v_dry_merged, np.nan
+            return v_dry_merged, 0.0  # Was: np.nan
         
         poro_merged = v_pore_merged / v_dry_merged
         
@@ -191,10 +190,12 @@ class VolumeMixingKernel(PorosityGrowthKernel):
         Physical assumption: Fragments inherit parent porosity.
         Breakage splits both solid and pore volumes proportionally.
         
-        Special case: If parent is Vollkörper (NaN), fragment is also Vollkörper.
+        Special case: If parent is poreless (poro=0.0) or legacy Vollkörper (NaN),
+        fragment inherits this (no pores to distribute).
         
         Args:
-            parent_porosity: Parent particle porosity (NaN for Vollkörper)
+            parent_porosity: Parent particle porosity (NaN for legacy Vollkörper,
+                            0.0 for poreless, >0.0 for porous)
             fragment_volume: Fragment solid volume [m³] (not used, kept for API consistency)
             parent_volume: Parent solid volume [m³] (not used, kept for API consistency)
             breakage_energy: Not used in this model
