@@ -99,6 +99,7 @@ class ParticleMerger:
                  use_hash_index: bool = True,
                  tol_rel: float = 1e-6,
                  tol_abs_liquid: float = 1e-30,
+                 tol_abs_frac: float = 1e-6,
                  bin_digits_volume: int = 8,
                  bin_digits_poro: int = 4):
         """
@@ -115,6 +116,12 @@ class ParticleMerger:
             Relative tolerance for matching intensive properties (default: 1e-6)
         tol_abs_liquid : float, optional
             Absolute tolerance for liquid volume comparisons (default: 1e-30)
+        tol_abs_frac : float, optional
+            ABSOLUTE tolerance for porosity and saturation (default: 1e-6).
+            Both are dimensionless fractions in [0, 1], so a relative tolerance
+            is the wrong norm for them: it is undefined at 0 (which is where
+            poreless particles sit) and would call 0.0001 vs 0.0002 a 100 %
+            mismatch while treating 0.80 vs 0.799992 as identical.
         bin_digits_volume : int, optional
             Precision for volume binning in hash keys (default: 8 digits)
         bin_digits_poro : int, optional
@@ -124,6 +131,7 @@ class ParticleMerger:
         self.use_hash_index = use_hash_index
         self.tol_rel = tol_rel
         self.tol_abs_liquid = tol_abs_liquid
+        self.tol_abs_frac = tol_abs_frac
         self.bin_digits_volume = bin_digits_volume
         self.bin_digits_poro = bin_digits_poro
         
@@ -136,6 +144,37 @@ class ParticleMerger:
         self._stats_creates = 0
         self._stats_lookups = 0
     
+    def _resolve_tolerances(self, liquid_target: float,
+                            tol_rel_override: Optional[float],
+                            liquid_scale_ref: Optional[float]) -> Tuple[float, float]:
+        """
+        Resolve the effective (relative, liquid-absolute) tolerances for a lookup.
+
+        The relative tolerance applies to V_dry and is the caller's rule
+        ``|ist - Kandidat| / ist <= tol``, i.e. normalised by the TARGET.
+
+        For liquid the same relative rule applies, optionally capped against a
+        reference scale (``liquid_scale_ref``, in practice the droplet volume).
+        Rationale: a purely target-relative liquid tolerance grows with how much
+        liquid a particle already carries, so late merges accept ever larger
+        absolute liquid differences while the statistics still book a whole
+        droplet. Capping at droplet scale bounds that; it can only tighten the
+        tolerance, never loosen it, at the price of a lower merge hit rate.
+
+        Returns
+        -------
+        (tol_rel_eff, liq_tol) : Tuple[float, float]
+        """
+        tol = self.tol_rel if tol_rel_override is None else float(tol_rel_override)
+
+        liq_tol = tol * abs(liquid_target)
+        if liquid_scale_ref is not None:
+            liq_tol = min(liq_tol, tol * abs(liquid_scale_ref))
+        # Floor so that dry particles (liquid == 0) still compare equal.
+        liq_tol = max(liq_tol, self.tol_abs_liquid)
+
+        return tol, liq_tol
+
     def find_or_create(self,
                        V_solid_target: np.ndarray,
                        V_dry_target: float,
@@ -143,7 +182,11 @@ class ParticleMerger:
                        poro_target: Optional[float],
                        sat_target: Optional[float],
                        weight_to_add: float,
-                       component_sum: Optional[np.ndarray] = None) -> Tuple[int, bool]:
+                       component_sum: Optional[np.ndarray] = None,
+                       tol_rel_override: Optional[float] = None,
+                       liquid_scale_ref: Optional[float] = None,
+                       exclude_idx: Optional[int] = None,
+                       force_linear_scan: bool = False) -> Tuple[int, bool]:
         """
         Find existing similar particle OR create new one.
         
@@ -168,7 +211,23 @@ class ParticleMerger:
         component_sum : np.ndarray, optional
             Pre-computed component sum for V_flat[:dim]. If None, computed from
             V_solid_target.
-        
+        tol_rel_override : float, optional
+            Use this relative tolerance instead of ``self.tol_rel``. Nucleation
+            passes ``NucleationConfig.similarity_tol``.
+        liquid_scale_ref : float, optional
+            Cap the liquid tolerance against this scale (droplet volume for
+            nucleation). See :meth:`_resolve_tolerances`.
+        exclude_idx : int, optional
+            Never match this index. Nucleation passes the source particle: a
+            self-match would do ``W[i] += dW`` followed by ``W[i] -= dW`` while
+            ``liquid_volume[i]`` is never updated, silently losing the droplet.
+        force_linear_scan : bool, optional
+            Skip the hash index for this lookup. The hash bins liquid on a log
+            scale, so a match that is within an absolute (droplet-capped)
+            tolerance can still fall into a neighbouring bin and be missed.
+            The linear scan also returns the lowest matching index, which keeps
+            results reproducible; the hash path iterates a set.
+
         Returns
         -------
         (index, was_merged) : Tuple[int, bool]
@@ -237,7 +296,11 @@ class ParticleMerger:
             V_dry_target=V_dry_target,
             liquid_target=liquid_target,
             poro_target=poro_target,
-            sat_target=sat_target
+            sat_target=sat_target,
+            tol_rel_override=tol_rel_override,
+            liquid_scale_ref=liquid_scale_ref,
+            exclude_idx=exclude_idx,
+            force_linear_scan=force_linear_scan
         )
         
         if match_idx >= 0:
@@ -275,7 +338,11 @@ class ParticleMerger:
                      V_dry_target: float,
                      liquid_target: float,
                      poro_target: Optional[float],
-                     sat_target: Optional[float]) -> int:
+                     sat_target: Optional[float],
+                     tol_rel_override: Optional[float] = None,
+                     liquid_scale_ref: Optional[float] = None,
+                     exclude_idx: Optional[int] = None,
+                     force_linear_scan: bool = False) -> int:
         """
         Find index of similar particle, or -1 if not found.
         
@@ -302,10 +369,14 @@ class ParticleMerger:
         
         Notes
         -----
-        Matching uses both relative and absolute tolerances:
-        - Relative: |a - b| <= tol_rel * |b| for volumes and porosity
-        - Absolute: |a - b| <= tol_abs_liquid for near-zero liquid volumes
-        
+        Matching rules (see :meth:`_resolve_tolerances`):
+        - ``V_dry``: relative to the target, ``|a - b| <= tol_rel * |b|``
+        - ``liquid``: relative to the target, optionally capped at
+          ``tol_rel * liquid_scale_ref``, floored at ``tol_abs_liquid`` so dry
+          particles still compare equal
+        - ``porosity`` / ``saturation``: ABSOLUTE, ``|a - b| <= tol_abs_frac``
+          (bounded fractions -- relative is undefined at 0)
+
         Uses hash index if enabled and populated, otherwise falls back to
         linear scan over all active particles.
         """
@@ -316,14 +387,21 @@ class ParticleMerger:
             candidates = self._hash_index.get(key, set()) if self.use_hash_index else []
             print(f"  find_similar: hash_enabled={self.use_hash_index}, candidates_in_bin={len(candidates)}")
 # ====================================
-        if self.use_hash_index and self._hash_index is not None:
-            return self._find_via_hash(V_dry_target, liquid_target, poro_target, sat_target)
+        tol, liq_tol = self._resolve_tolerances(
+            liquid_target, tol_rel_override, liquid_scale_ref
+        )
+
+        if self.use_hash_index and self._hash_index is not None and not force_linear_scan:
+            return self._find_via_hash(V_dry_target, liquid_target, poro_target, sat_target,
+                                       tol, liq_tol, exclude_idx)
         else:
             return self._find_linear_scan(V_solid_target, V_dry_target, liquid_target,
-                                          poro_target, sat_target)
-    
+                                          poro_target, sat_target, tol, liq_tol, exclude_idx)
+
     def _find_via_hash(self, V_dry: float, liquid: float,
-                       poro: Optional[float], sat: Optional[float]) -> int:
+                       poro: Optional[float], sat: Optional[float],
+                       tol: float, liq_tol: float,
+                       exclude_idx: Optional[int] = None) -> int:
         """
         O(1) average lookup via hash index.
         
@@ -348,18 +426,21 @@ class ParticleMerger:
         """
         key = self._compute_hash_key(V_dry, liquid, poro, sat)
         candidates = self._hash_index.get(key, set())
-        
+
         if not candidates:
             return -1
-        
+
         # Verify with exact tolerance check (hash collisions possible due to binning)
         for idx in candidates:
-            if self._matches_exact(idx, V_dry, liquid, poro, sat):
+            if exclude_idx is not None and idx == exclude_idx:
+                continue
+            if self._matches_exact(idx, V_dry, liquid, poro, sat, tol, liq_tol):
                 return idx
         return -1
     
     def _find_linear_scan(self, V_solid_target, V_dry_target, liquid_target,
-                          poro_target, sat_target) -> int:
+                          poro_target, sat_target, tol, liq_tol,
+                          exclude_idx: Optional[int] = None) -> int:
         """
         Fallback: O(n) linear scan over active particles.
         
@@ -389,38 +470,39 @@ class ParticleMerger:
         if n_active <= 0:
             return -1
         
-        tol = self.tol_rel
-        V_tol = tol * V_dry_target
-        liq_tol = max(tol * abs(liquid_target), self.tol_abs_liquid)
-        
+        V_tol = tol * abs(V_dry_target)
+        frac_tol = self.tol_abs_frac
+
         # Vectorized checks (NumPy boolean masking)
         mask = np.abs(solver.V_flat[-1, :n_active] - V_dry_target) <= V_tol
+        if exclude_idx is not None and 0 <= exclude_idx < n_active:
+            mask[exclude_idx] = False
         if not mask.any():
             return -1
-        
+
         mask &= np.abs(solver.liquid_volume[:n_active] - liquid_target) <= liq_tol
         if not mask.any():
             return -1
-        
+
         if poro_target is not None:
             poro = solver.porosity[:n_active]
             # Match if both are NaN, or both are finite and within tolerance
             poro_match = (np.isnan(poro) & np.isnan(poro_target)) | \
-                         (~np.isnan(poro) & ~np.isnan(poro_target) & 
-                          (np.abs(poro - poro_target) <= tol))
+                         (~np.isnan(poro) & ~np.isnan(poro_target) &
+                          (np.abs(poro - poro_target) <= frac_tol))
             mask &= poro_match
             if not mask.any():
                 return -1
-        
+
         if sat_target is not None:
             sat = solver.saturation[:n_active]
             sat_match = (np.isnan(sat) & np.isnan(sat_target)) | \
-                        (~np.isnan(sat) & ~np.isnan(sat_target) & 
-                         (np.abs(sat - sat_target) <= tol))
+                        (~np.isnan(sat) & ~np.isnan(sat_target) &
+                         (np.abs(sat - sat_target) <= frac_tol))
             mask &= sat_match
             if not mask.any():
                 return -1
-        
+
         # Return first match (lowest index for determinism)
         matches = np.where(mask)[0]
         return int(matches[0]) if len(matches) > 0 else -1
@@ -479,7 +561,9 @@ class ParticleMerger:
         return (V_bin, liq_bin, poro_bin, sat_bin)
     
     def _matches_exact(self, idx: int, V_dry: float, liquid: float,
-                       poro: Optional[float], sat: Optional[float]) -> bool:
+                       poro: Optional[float], sat: Optional[float],
+                       tol: Optional[float] = None,
+                       liq_tol: Optional[float] = None) -> bool:
         """
         Verify exact match within tolerances for a candidate index.
         
@@ -504,8 +588,12 @@ class ParticleMerger:
             True if all properties match within tolerances
         """
         solver = self.solver
-        tol = self.tol_rel
-        
+        if tol is None:
+            tol = self.tol_rel
+        if liq_tol is None:
+            liq_tol = max(tol * abs(liquid), self.tol_abs_liquid)
+        frac_tol = self.tol_abs_frac
+
         # === DEBUG MERGER: EXACT MATCH CHECK ===
         if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_merger', True):
             V_dry_idx = solver.V_flat[-1, idx]
@@ -516,23 +604,21 @@ class ParticleMerger:
             delta_V = abs(V_dry_idx - V_dry)
             delta_liq = abs(liq_idx - liquid)
             rel_tol_V = tol * abs(V_dry)
-            liq_tol_check = max(tol * abs(liquid), self.tol_abs_liquid)
-            
+
             match_V = delta_V <= rel_tol_V
-            match_liq = delta_liq <= liq_tol_check
-            print(f"  Candidate idx={idx}: V_diff={delta_V:.3e}/{rel_tol_V:.3e}({'OK' if match_V else 'FAIL'}), liq_diff={delta_liq:.3e}/{liq_tol_check:.3e}({'OK' if match_liq else 'FAIL'})")
+            match_liq = delta_liq <= liq_tol
+            print(f"  Candidate idx={idx}: V_diff={delta_V:.3e}/{rel_tol_V:.3e}({'OK' if match_V else 'FAIL'}), liq_diff={delta_liq:.3e}/{liq_tol:.3e}({'OK' if match_liq else 'FAIL'})")
 # ====================================
-        
-        # Check V_dry (relative tolerance)
+
+        # Check V_dry (relative to target)
         if abs(solver.V_flat[-1, idx] - V_dry) > tol * abs(V_dry):
             return False
-        
-        # Check liquid_volume (relative + absolute tolerance)
-        liq_tol = max(tol * abs(liquid), self.tol_abs_liquid)
+
+        # Check liquid_volume (relative to target, optionally capped, with floor)
         if abs(solver.liquid_volume[idx] - liquid) > liq_tol:
             return False
-        
-        # Check porosity if applicable
+
+        # Check porosity if applicable (ABSOLUTE tolerance - bounded fraction)
         if poro is not None:
             p = solver.porosity[idx]
             # Both NaN -> match; both finite -> check tolerance
@@ -540,17 +626,17 @@ class ParticleMerger:
                 pass  # Match
             elif np.isnan(p) or np.isnan(poro):
                 return False  # Mismatch: one NaN, one not
-            elif abs(p - poro) > tol:
+            elif abs(p - poro) > frac_tol:
                 return False
-        
-        # Check saturation if applicable
+
+        # Check saturation if applicable (ABSOLUTE tolerance - bounded fraction)
         if sat is not None:
             s = solver.saturation[idx]
             if np.isnan(s) and np.isnan(sat):
                 pass  # Match
             elif np.isnan(s) or np.isnan(sat):
                 return False
-            elif abs(s - sat) > tol:
+            elif abs(s - sat) > frac_tol:
                 return False
         
         # === DEBUG MERGER: MATCH RESULT ===
@@ -614,12 +700,8 @@ class ParticleMerger:
             solver.saturation[new_idx] = float(sat) if sat is not None else np.nan
         
         # Add to hash index
-        if self.use_hash_index and self._hash_index is not None:
-            key = self._compute_hash_key(V_dry, liquid, poro, sat)
-            if key not in self._hash_index:
-                self._hash_index[key] = set()
-            self._hash_index[key].add(new_idx)
-        
+        self.register_particle(new_idx)
+
         # === DEBUG MERGER: CREATE NEW ===
         if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_merger', True):
             poro_val = solver.porosity[new_idx]
@@ -652,6 +734,39 @@ class ParticleMerger:
         """
         pass  # No-op: hash key doesn't depend on W
     
+    def register_particle(self, idx: int) -> None:
+        """
+        Add an existing particle to the hash index, reading its current state.
+
+        Use this for particles created outside :meth:`find_or_create` -- e.g.
+        the child of a nucleation-driven manual agglomeration, which is appended
+        directly because the surrounding code has to track its index through
+        several parent removals. Without registration such a particle is
+        invisible to every later lookup, so agglomeration and breakage would
+        create duplicates instead of merging into it.
+
+        Parameters
+        ----------
+        idx : int
+            Index of the particle to register.
+        """
+        if not self.use_hash_index or self._hash_index is None:
+            return
+
+        solver = self.solver
+        if idx < 0 or idx >= solver.a_tot:
+            return
+
+        V_dry = solver.V_flat[-1, idx]
+        liquid = solver.liquid_volume[idx] if hasattr(solver, 'liquid_volume') else 0.0
+        poro = solver.porosity[idx] if hasattr(solver, 'porosity') else np.nan
+        sat = solver.saturation[idx] if hasattr(solver, 'saturation') else np.nan
+
+        key = self._compute_hash_key(V_dry, liquid, poro, sat)
+        if key not in self._hash_index:
+            self._hash_index[key] = set()
+        self._hash_index[key].add(idx)
+
     def remove_from_hash_index(self, idx: int):
         """
         Remove a particle from the hash index (called when particle is deleted).

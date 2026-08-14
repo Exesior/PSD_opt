@@ -154,7 +154,7 @@ class ReconstructionMixin:
             "  * run reconstruction only for dry cases (recon_enable=False here), or\n"
             "  * set solver.recon_allow_granulation_state=True to proceed anyway and "
             "accept that liquid/porosity/saturation are discarded.\n"
-            "See docs/REFACTORING_FINDINGS.md (F-02) for the required fix."
+            "See docs/old/REFACTORING_FINDINGS.md (F-02) for the required fix."
         )
 
     def reconstruct(self, method: str = "CAM", reason: str = "", iter_count: Optional[int] = None) -> None:
