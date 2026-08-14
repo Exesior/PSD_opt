@@ -579,6 +579,57 @@ class LiquidInternalizationAgglomerationKernel(KernelBase):
         """
         pass
 
+    @abstractmethod
+    def compute_externalization(
+        self,
+        v_pore_parent: float,
+        v_pore_fragments_total: float,
+        saturation_parent: float,
+        particle_idx: Optional[int] = None,
+        solver: Optional[Any] = None
+    ) -> float:
+        """
+        Compute amount of liquid externalized during a breakage event.
+
+        Reverse process of :meth:`compute_internalization`: when a particle
+        fragments, new fracture surfaces destroy part of the pore volume
+        (see e.g. the cone-model porosity kernel's ΔV term). The internal
+        liquid that occupied that lost pore volume can no longer be held
+        internally and becomes external liquid on the fragments' surfaces.
+
+        Formula:
+            ΔV_pore = v_pore_parent - v_pore_fragments_total
+            V_liq_int→ext = saturation_parent × ΔV_pore
+
+        Args:
+            v_pore_parent: Pore volume of the parent particle before
+                breakage [m³] (V_dry_parent × porosity_parent)
+            v_pore_fragments_total: Summed pore volume of all fragments
+                after breakage [m³] (as produced by the porosity growth
+                kernel for this breakage event)
+            saturation_parent: Saturation of the parent particle before
+                breakage (S = V_liq_int / V_pore, in [0, 1])
+            particle_idx: Index of the parent particle in solver arrays
+                (optional)
+            solver: Reference to solver for accessing additional state
+                (optional)
+
+        Returns:
+            V_liq_int_to_ext: Amount of liquid externalized [m³]
+                               (0.0 if no externalization occurs, e.g. when
+                               the porosity kernel does not reduce pore
+                               volume during breakage)
+
+        Note:
+            This method computes externalization PER BREAKAGE EVENT,
+            aggregated over all fragments. It is called during
+            _do_one_break() after fragment porosities have been computed.
+            The returned value is redistributed proportionally across
+            fragments: subtracted from internal liquid, added to external
+            liquid, conserving each fragment's total liquid volume.
+        """
+        pass
+
 
 # =============================================================================
 # Agglomeration Acceptance Kernels

@@ -254,20 +254,20 @@ def create_wet_granulation_solver(
     
     # Compression (optional)
     if enable_compression:
-        base_kwargs['compression_kernel_name'] = 'exponential_decay'
-        base_kwargs['compression_kernel_params'] = {
+        base_kwargs['porosity_compression_kernel_name'] = 'porosity_compression'
+        base_kwargs['porosity_compression_kernel_params'] = {
             'rate': 0.02,
             'min_porosity': 0.15,
         }
-    
+
     # Liquid Internalization (kontinuierlich)
     base_kwargs['liquid_internalization_kernel_name'] = 'liquid_internalization'
     base_kwargs['liquid_internalization_kernel_params'] = {
-        'k_intern': 1e8,
+        'k_int': 1e8,
     }
     
     # Event-basierte Internalisierung bei Agglomeration
-    base_kwargs['liq_internalisation_agglomeration_kernel_name'] = 'braumann_2007'
+    base_kwargs['liq_internalisation_agglomeration_kernel_name'] = 'liq_internalisation_agglomeration'
     base_kwargs['liq_internalisation_agglomeration_kernel_params'] = {}
     
     # Override with user-provided kwargs

@@ -186,7 +186,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         ...     agg_kernel_name='liquid_bridge',
         ...     break_kernel_name='powerlaw_rumpf',
         ...     porosity_growth_kernel_name='cone_model',
-        ...     compression_kernel_name='exponential_decay',
+        ...     porosity_compression_kernel_name='porosity_compression',
         ...     recon_enable=True,
         ...     recon_N_max=4000,
         ... )
@@ -229,6 +229,15 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         self.PGV = np.full(dim, "mono")
         self.SIG = np.full(dim, 0.1)
 
+        # Breakage FUNCTION parameters (how a parent splits into fragments) are
+        # deliberately NOT initialised here. They are opt-in: set
+        # `break_frag_v` / `break_frag_q` on the solver to control the fragment
+        # count and size distribution independently of the breakage RATE
+        # exponent, which lives in the breakage kernel under the same legacy
+        # name `pl_v`. Unset, both fall back to `pl_v` / `pl_q` (base defaults
+        # or whatever a config file provides), so existing setups are
+        # unaffected. See _compute_frag_num() and _prepare_break_config().
+
         # State containers
         self.V_flat: Optional[np.ndarray] = None
         self.V_eff_init = 0     # 0 -> no compression
@@ -257,6 +266,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             porosity_compression_kernel_params=porosity_compression_kernel_params,
             liquid_internalization_kernel_name=liquid_internalization_kernel_name,
             liquid_internalization_kernel_params=liquid_internalization_kernel_params,
+            # Liquid internalization/externalization kernel (event-based)
+            liq_internalisation_agglomeration_kernel_name=liq_internalisation_agglomeration_kernel_name,
+            liq_internalisation_agglomeration_kernel_params=liq_internalisation_agglomeration_kernel_params,
         )
 
         # RNG (single point of instantiation)
@@ -294,8 +306,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         break_kernel_params: Optional[dict] = None,
         porosity_growth_kernel_name: Optional[str] = None,
         porosity_growth_kernel_params: Optional[dict] = None,
-        compression_kernel_name: Optional[str] = None,
-        compression_kernel_params: Optional[dict] = None,
         liquid_dist_kernel_name: Optional[str] = None,
         liquid_dist_kernel_params: Optional[dict] = None,
         agg_acceptance_kernel_name: Optional[str] = None,
@@ -674,6 +684,28 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # Check 3: Suspicious parameter combinations (warnings only)
         import warnings
         
+        # Warn when the breakage RATE exponent and the breakage FUNCTION
+        # exponent disagree. They are independent by design (see
+        # _compute_frag_num), but they used to be the same value, so a setup
+        # carried over from before the split may expect the old coupling.
+        # Surfacing the difference beats letting it act silently.
+        if hasattr(self, 'kernel_manager') and self.kernel_manager is not None:
+            km = self.kernel_manager
+            rate_v = (km.break_kernel_params or {}).get('pl_v') if km.break_kernel is not None else None
+            if rate_v is not None:
+                frag_v = getattr(self, 'break_frag_v', None)
+                frag_v = float(frag_v) if frag_v is not None else float(getattr(self, 'pl_v', 2.0))
+                if abs(float(rate_v) - frag_v) > 1e-12:
+                    warnings.warn(
+                        f"Breakage rate exponent pl_v={float(rate_v)} differs from the "
+                        f"breakage function exponent break_frag_v={frag_v}. This is "
+                        f"allowed -- the rate exponent controls how OFTEN a particle "
+                        f"breaks, break_frag_v how MANY fragments it makes. Set "
+                        f"break_frag_v explicitly if you meant them to match.",
+                        UserWarning,
+                        stacklevel=2
+                    )
+
         # Warn if recon_enable but no recon_N_max set
         if self.recon_enable and not hasattr(self, 'recon_N_max'):
             warnings.warn(
@@ -779,8 +811,18 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         return float(min(2.0, max(1.1, f)))
 
     def _compute_frag_num(self):
-        """Expected number of fragments per break event from BREAKFVAL & v."""
-        v = float(getattr(self, "pl_v", 1.0))
+        """Expected number of fragments per break event from BREAKFVAL & v.
+
+        The exponent used here is ``break_frag_v`` -- a property of the breakage
+        *function* (how a parent splits), not of the breakage *rate*. It used to
+        be read from ``pl_v``, which the breakage rate kernel overwrote with its
+        own volume exponent (kernel_integration.py). Varying the rate exponent
+        then silently changed the fragment count as well. ``pl_v`` stays as a
+        fallback so solver scripts and config files that set it directly keep
+        working.
+        """
+        v = getattr(self, "break_frag_v", None)
+        v = float(v) if v is not None else float(getattr(self, "pl_v", 1.0))
         bf = int(getattr(self, "BREAKFVAL", 1))
         if self.dim == 1:
             if bf == 1:
@@ -2160,7 +2202,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # NOTE: liquid/porosity/saturation are recorded from the *current*
                 # (post-event) arrays, not from a pre-event copy. That is a known
                 # inconsistency inherited from the original implementation; it is
-                # documented in docs/REFACTORING_FINDINGS.md (F-07) and left
+                # documented in docs/old/REFACTORING_FINDINGS.md (F-07) and left
                 # unchanged here so recorded runs stay reproducible.
                 self.V_save_left.append(V_prev_active.copy())
                 self.W_save_left.append(W_prev_active.copy())

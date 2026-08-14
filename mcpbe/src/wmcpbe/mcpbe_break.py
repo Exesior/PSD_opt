@@ -37,8 +37,14 @@ class MCPBEBreak:
         self._break_pl_P2 = float(getattr(self, "pl_P2", 1.0))
         self._break_pl_P3 = float(getattr(self, "pl_P3", 1.0))
         self._break_pl_P4 = float(getattr(self, "pl_P4", 1.0))
-        self._break_pl_v = float(getattr(self, "pl_v", 2.0))
-        self._break_pl_q = float(getattr(self, "pl_q", 1.0))
+        # Breakage FUNCTION parameters. `break_frag_v` / `break_frag_q` are the
+        # canonical names; `pl_v` / `pl_q` remain the fallback for setups that
+        # configure them directly. These are NOT the breakage rate exponent --
+        # that one lives in the breakage kernel, also called `pl_v`.
+        _frag_v = getattr(self, "break_frag_v", None)
+        _frag_q = getattr(self, "break_frag_q", None)
+        self._break_pl_v = float(_frag_v) if _frag_v is not None else float(getattr(self, "pl_v", 2.0))
+        self._break_pl_q = float(_frag_q) if _frag_q is not None else float(getattr(self, "pl_q", 1.0))
 
         self._prepare_break_delta_config()
         self._break_dW_const = float(getattr(self, "_break_dW_const", 50.0))
@@ -274,7 +280,19 @@ class MCPBEBreak:
         >>> # Tables now ready for fragment sampling
         >>> frag = solver._produce_one_frag_from_remaining(V_parent)
         """
-        # BREAKFVAL=1 is the default (single breakage mode)
+        # BREAKFVAL is pinned to 1 here on purpose, and deliberately does NOT
+        # follow `solver.BREAKFVAL` (base default 3), which drives the fragment
+        # COUNT in mcpbe_base._compute_frag_num(). The two are allowed to
+        # disagree: BREAKFVAL is a legacy switch that still carries other
+        # meanings elsewhere, so aligning them would silently change the
+        # fragment size distribution of every existing breakage run.
+        #
+        # Consequence worth knowing: with bf=1, breakage_func_1d() returns the
+        # constant theta = 4.0 (see pbe-core/func/jit_kernel_break.py). The
+        # constant normalises away in the CDF, so the fragment size distribution
+        # is currently UNIFORM, and `_break_pl_v` / `_break_pl_q` do not enter
+        # the formula at all -- they only take part in the cache key below.
+        # Do not read them as active physics parameters.
         BREAKFVAL = 1
         key = (
             int(self.dim),
@@ -604,24 +622,51 @@ class MCPBEBreak:
         # Get parent liquid volume (PER PHYSICAL PARTICLE - intensive property)
         lv_parent = float(self.liquid_volume[k]) if hasattr(self, "liquid_volume") else 0.0
         V_parent_total = float(np.sum(Vrem_k)) if self.dim == 1 else float(Vrem_k[0] + Vrem_k[1])
-    
+
         new_indices: list[int] = []
-    
+
         # Calculate total fragment volume for proportional liquid distribution
         frag_volumes = [float(np.sum(f)) for f in frags]
         total_frag_vol = sum(frag_volumes)
-    
+
         # 1) Process ALL fragments: try to merge with existing particles or create new ones
         # IMPORTANT: liquid_volume is PER PHYSICAL PARTICLE (intensive).
         # When a particle breaks, its liquid is distributed among fragments.
         # Each fragment inherits a fraction of the parent's liquid proportional to its volume.
         # Total liquid is conserved: sum(fragment_liquid) = parent_liquid
-        
+
         # Pre-compute fragment properties for all fragments (needed for deferred porosity)
-        frag_props = []  # List of (V_solid, V_dry, liquid, poro, sat, component)
+        frag_props = []  # List of (V_solid, V_dry, V_intern_0, V_extern_0, poro, component, vol_fraction)
         parent_poro = self.porosity[k] if hasattr(self, "porosity") else np.nan
         parent_volume_total = float(np.sum(self.V_flat[:self.dim, k]))
-        
+
+        has_liquid_tracking = (hasattr(self, "liquid_volume") and hasattr(self, "porosity")
+                                and hasattr(self, "saturation"))
+
+        # Parent's pore volume and internal/external liquid split BEFORE breakage.
+        # Needed to (a) distribute liquid like V_solid/V_pore (proportional to
+        # fragment volume) and (b) compute how much internal liquid gets
+        # externalized when pore volume is lost to new fracture surfaces
+        # (see kernel_manager.compute_liquid_externalization_breakage below).
+        if has_liquid_tracking and not np.isnan(parent_poro):
+            V_dry_parent = float(self.V_flat[-1, k])
+            S_p = float(self.saturation[k])
+            if not np.isfinite(S_p):
+                S_p = 0.0
+            S_p = max(0.0, min(1.0, S_p))
+            V_pore_p = V_dry_parent * parent_poro
+            # Cap at the actually stored liquid: porosity/saturation/liquid_volume
+            # are independently-set intensive properties elsewhere in the code
+            # (e.g. nucleation, manual test setup) and are not guaranteed to be
+            # mutually consistent. V_pore_p * S_p is only a theoretical capacity;
+            # matches the same cap used by get_V_liquid_internal/external.
+            V_intern_p = min(V_pore_p * S_p, lv_parent)
+        else:
+            S_p = 0.0
+            V_pore_p = 0.0
+            V_intern_p = 0.0
+        V_extern_p = max(0.0, lv_parent - V_intern_p)
+
         # Get porosity kernel once for all fragments
         porosity_kernel = None
         if hasattr(self, "porosity"):
@@ -630,17 +675,16 @@ class MCPBEBreak:
             if porosity_kernel is None:
                 from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
                 porosity_kernel = get_porosity_growth_kernel('volume_mixing')
-        
+
         breakage_energy = None
-        use_deferred_poro = (hasattr(self, "porosity") and len(frags) > 1 and 
-                             porosity_kernel is not None and 
+        use_deferred_poro = (hasattr(self, "porosity") and len(frags) > 1 and
+                             porosity_kernel is not None and
                              hasattr(porosity_kernel, '_compute_fragment_porosity_multi'))
-        
+
         for idx_frag, f in enumerate(frags):
             V_solid_frag = float(np.sum(f))
             vol_fraction = frag_volumes[idx_frag] / total_frag_vol if total_frag_vol > 0.0 else 0.0
-            liq_frag = lv_parent * vol_fraction if hasattr(self, "liquid_volume") else 0.0
-            
+
             # Compute porosity (immediate or deferred)
             if hasattr(self, "porosity"):
                 if use_deferred_poro:
@@ -653,21 +697,29 @@ class MCPBEBreak:
                         breakage_energy=breakage_energy,
                         solver=self
                     ) if porosity_kernel is not None else parent_poro
-                
-                # Calculate V_dry from V_solid and porosity
-                if np.isnan(frag_poro):
-                    V_dry_frag = V_solid_frag  # Vollkoerper
-                else:
-                    V_dry_frag = V_solid_frag / (1.0 - frag_poro)
+
+                # Modern convention: poreless fragments get porosity=0.0, never
+                # NaN (NaN is only the legacy "Vollkoerper" sentinel some
+                # kernels still emit). Numerically identical for V_dry_frag,
+                # since dividing by (1 - 0.0) == dividing by (1 - NaN-branch).
+                if frag_poro is None or np.isnan(frag_poro):
+                    frag_poro = 0.0
+                V_dry_frag = V_solid_frag / (1.0 - frag_poro)
             else:
                 frag_poro = None
                 V_dry_frag = V_solid_frag
-            
-            sat_frag = None  # Saturation computed later if needed
-            frag_props.append((V_solid_frag, V_dry_frag, liq_frag, frag_poro, sat_frag, f.copy()))
-        
+
+            # Distribute parent's internal/external liquid like V_solid/V_pore:
+            # proportional to the fragment's volume fraction. The aggregate
+            # pore-volume loss (and resulting externalization) is applied in a
+            # second pass below, once all fragment pore volumes are known.
+            V_intern_frag_0 = V_intern_p * vol_fraction
+            V_extern_frag_0 = V_extern_p * vol_fraction
+
+            frag_props.append((V_solid_frag, V_dry_frag, V_intern_frag_0, V_extern_frag_0,
+                                frag_poro, f.copy(), vol_fraction))
+
         # Deferred porosity computation for multi-fragment kernels
-        frag_poros_final = [fp[3] for fp in frag_props]
         if use_deferred_poro:
             parent_volume_solid = float(np.sum(self.V_flat[:self.dim, k]))
             frag_solid_volumes = [fp[0] for fp in frag_props]
@@ -681,16 +733,58 @@ class MCPBEBreak:
             # Update frag_props with final porosities and recompute V_dry
             frag_props_updated = []
             for i, fp in enumerate(frag_props):
-                V_solid_frag, _, liq_frag, _, sat_frag, f_comp = fp
+                V_solid_frag, _, V_intern_frag_0, V_extern_frag_0, _, f_comp, vol_fraction = fp
                 frag_poro = poros_all[i]
-                if np.isnan(frag_poro):
-                    V_dry_frag = V_solid_frag
-                else:
-                    V_dry_frag = V_solid_frag / (1.0 - frag_poro)
-                frag_props_updated.append((V_solid_frag, V_dry_frag, liq_frag, frag_poro, sat_frag, f_comp))
+                if frag_poro is None or np.isnan(frag_poro):
+                    frag_poro = 0.0
+                V_dry_frag = V_solid_frag / (1.0 - frag_poro)
+                frag_props_updated.append((V_solid_frag, V_dry_frag, V_intern_frag_0, V_extern_frag_0,
+                                            frag_poro, f_comp, vol_fraction))
             frag_props = frag_props_updated
-            frag_poros_final = poros_all
-        
+
+        # 2) Liquid externalization (reverse Braumann): pore volume lost to new
+        # fracture surfaces pushes internal liquid out to the surface.
+        # ΔV_pore = V_pore_p - Σ(frag_poro_i * V_dry_frag_i); V_liq_i2e = S_p * ΔV_pore
+        V_liq_i2e = 0.0
+        if has_liquid_tracking and V_pore_p > 0.0:
+            V_pore_fragments_total = sum(
+                fp[1] * fp[4] for fp in frag_props if fp[4] is not None
+            )
+            kmgr = getattr(self, 'kernel_manager', None)
+            if kmgr is not None:
+                V_liq_i2e = kmgr.compute_liquid_externalization_breakage(
+                    v_pore_parent=V_pore_p,
+                    v_pore_fragments_total=V_pore_fragments_total,
+                    saturation_parent=S_p,
+                    particle_idx=k,
+                    solver=self
+                )
+                # Re-clamp against the ACTUAL (capped) internal liquid: the
+                # kernel's own clamp uses S_p * V_pore_p, which can exceed
+                # V_intern_p above when porosity/saturation/liquid_volume are
+                # mutually inconsistent (see cap comment above).
+                V_liq_i2e = max(0.0, min(V_liq_i2e, V_intern_p))
+
+        # Finalize per-fragment liquid volume + saturation: redistribute the
+        # externalized amount proportionally, same as everything else.
+        # sum(liq_frag) == lv_parent exactly (only int/ext buckets shift).
+        frag_props_final = []
+        for (V_solid_frag, V_dry_frag, V_intern_frag_0, V_extern_frag_0,
+             frag_poro, f_comp, vol_fraction) in frag_props:
+            V_intern_frag = max(0.0, V_intern_frag_0 - V_liq_i2e * vol_fraction)
+            V_extern_frag = V_extern_frag_0 + V_liq_i2e * vol_fraction
+            liq_frag = V_intern_frag + V_extern_frag
+
+            if frag_poro is not None:
+                V_pore_frag = V_dry_frag * frag_poro
+                sat_frag = (V_intern_frag / V_pore_frag) if V_pore_frag > 0.0 else 0.0
+                sat_frag = max(0.0, min(1.0, sat_frag))
+            else:
+                sat_frag = None
+
+            frag_props_final.append((V_solid_frag, V_dry_frag, liq_frag, frag_poro, sat_frag, f_comp))
+        frag_props = frag_props_final
+
         # Now process each fragment: try to merge or create new
         for idx_frag, (V_solid_frag, V_dry_frag, liq_frag, frag_poro, sat_frag, f_comp) in enumerate(frag_props):
             # DEBUG: Track merger calls
@@ -1057,6 +1151,14 @@ class MCPBEBreak:
         lv_frag_i = lv_parent × (V_frag_i / V_parent)
 
         Ensures total liquid conservation: sum(lv_frag) = lv_parent
+
+        Internally, the parent's internal/external liquid split (V_intern_p,
+        V_extern_p) is distributed the same way, then adjusted for pore
+        volume lost to new fracture surfaces (reverse Braumann, see
+        kernel_manager.compute_liquid_externalization_breakage): fragment
+        saturation is recomputed from its own (possibly reduced) pore volume,
+        never inherited or left unset. Only int/ext buckets shift -- the
+        per-fragment total lv_frag_i and its conservation are unaffected.
 
         **Porosity Computation:**
 

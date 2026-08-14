@@ -202,9 +202,15 @@ class KernelManager:
             # Set solver attributes for backward compatibility
             solver.pl_P1 = float(self.break_kernel_params.get('p1', 3e-2))
             solver.pl_P2 = float(self.break_kernel_params.get('p2', 1.0))
-            solver.pl_v = float(self.break_kernel_params.get('pl_v', 2.0))
-            solver.pl_q = float(self.break_kernel_params.get('pl_q', 1.0))
             solver.G = float(self.break_kernel_params.get('g', 1000))
+            # NOTE: `solver.pl_v` / `solver.pl_q` are deliberately NOT written
+            # from the kernel params any more. The kernel's `pl_v` is the
+            # breakage RATE exponent (alpha = pl_v/3); the solver's `pl_v` feeds
+            # _compute_frag_num() and the fragment size CDF, i.e. the breakage
+            # FUNCTION. Copying one onto the other meant that sweeping the rate
+            # exponent silently changed the fragment count too, which made any
+            # pl_v sensitivity study uninterpretable. To steer the breakage
+            # function, set `solver.break_frag_v` / `break_frag_q` explicitly.
         else:
             # No breakage kernel selected - disable breakage
             # IMPORTANT: Keep pl_v, pl_q at valid defaults for _compute_frag_num()!
@@ -439,7 +445,50 @@ class KernelManager:
             particle2_idx=particle2_idx,
             solver=solver
         )
-    
+
+    def compute_liquid_externalization_breakage(
+        self,
+        v_pore_parent: float,
+        v_pore_fragments_total: float,
+        saturation_parent: float,
+        particle_idx: Optional[int] = None,
+        solver = None
+    ) -> float:
+        """
+        Delegate liquid externalization during breakage to kernel.
+
+        Reverse process of compute_liquid_internalization_agglomeration,
+        served by the SAME kernel instance/slot (analogous to how
+        porosity_growth_kernel handles both merged and fragment porosity).
+
+        FALLBACK: If kernel is not configured, returns 0.0 (no
+        externalization). This ensures backward compatibility with
+        simulations that don't use this feature.
+
+        Args:
+            v_pore_parent: Pore volume of the parent particle before
+                breakage [m³]
+            v_pore_fragments_total: Summed pore volume of all fragments
+                after breakage [m³]
+            saturation_parent: Saturation of the parent particle before
+                breakage
+            particle_idx: Parent particle index (optional)
+            solver: Solver reference (optional)
+
+        Returns:
+            V_liq_int_to_ext: Externalized liquid volume [m³], or 0.0 if
+                               kernel not configured
+        """
+        # FALLBACK: No kernel configured → no externalization
+        if self.liq_internalisation_agglomeration_kernel is None:
+            return 0.0
+
+        return self.liq_internalisation_agglomeration_kernel.compute_externalization(
+            v_pore_parent, v_pore_fragments_total, saturation_parent,
+            particle_idx=particle_idx,
+            solver=solver
+        )
+
     def select_liquid_target(
         self,
         solver,

@@ -1,10 +1,14 @@
 """
-Liquid Internalization during Agglomeration Kernel.
+Liquid Internalization/Externalization Kernel (Agglomeration ↔ Breakage).
 
-Model for liquid trapping in contact pores when two wetted particles merge.
+Model for liquid moving between the internal (pore) and external (surface)
+state as particles merge or break, symmetric to how the cone_model
+porosity kernel handles pore-volume growth (agglomeration) and pore-volume
+loss (breakage) in a single kernel.
 
-Formula (Braumann et al. 2007, Eq. for l_{e→i}):
-    l_{e→i} = { l_{e,j} × l_{e,k} × 
+Internalization formula (Braumann et al. 2007, Eq. for l_{e→i}), applied
+PER AGGLOMERATION EVENT:
+    l_{e→i} = { l_{e,j} × l_{e,k} ×
                 [1 - √(1 - ((∛(v_j - l_{e,j})) / (∛v_j + ∛v_k))²)] ×
                 [1 - √(1 - ((∛(v_k - l_{e,k})) / (∛v_j + ∛v_k))²)]
               }^(1/2)
@@ -14,18 +18,27 @@ where:
     - v_k = v_dry,k + v_liq_ext,k
     - l_{e,j}, l_{e,k}: External liquid volumes of parents
 
-Physical Background:
-    When two particles with wetted surfaces contact during agglomeration,
-    a pore forms at the contact point. The external liquid that was on
-    the previously wetted surfaces becomes trapped in this newly formed
-    pore and is internalized.
+Externalization formula (reverse process), applied PER BREAKAGE EVENT:
+    ΔV_pore = v_pore_parent - v_pore_fragments_total
+    V_liq_int→ext = saturation_parent × ΔV_pore
 
-    The formula is derived from geometric considerations of two spheres
-    with liquid films contacting each other. The internalized amount
-    depends on:
+Physical Background:
+    Internalization: When two particles with wetted surfaces contact
+    during agglomeration, a pore forms at the contact point. The external
+    liquid that was on the previously wetted surfaces becomes trapped in
+    this newly formed pore and is internalized. The formula is derived
+    from geometric considerations of two spheres with liquid films
+    contacting each other. The internalized amount depends on:
     1. Available external liquid on both particles
     2. Relative particle sizes (hydrodynamic volumes)
     3. Contact geometry
+
+    Externalization: When a particle fragments, new fracture surfaces
+    destroy part of the pore volume (see the porosity growth kernel, e.g.
+    cone_model's ΔV term). The internal liquid that occupied that lost
+    pore volume can no longer be held internally and is pushed out to
+    become external liquid on the fragments' surfaces, proportional to the
+    parent's saturation at the moment of breakage.
 
 Usage:
     >>> kernel = LiquidInternalisationAgglomerationKernel()
@@ -34,10 +47,15 @@ Usage:
     ...     v_liq_ext1=1e-19, v_liq_ext2=2e-19
     ... )
     >>> print(f"Internalized liquid: {l_e_to_i:.3e} m³")
+    >>> l_i_to_e = kernel.compute_externalization(
+    ...     v_pore_parent=1e-18, v_pore_fragments_total=8e-19,
+    ...     saturation_parent=0.5
+    ... )
+    >>> print(f"Externalized liquid: {l_i_to_e:.3e} m³")
 
 References:
-    [1] Braumann et al., "Modelling and validation of granulation with 
-        heterogeneous binder dispersion and chemical reaction", 
+    [1] Braumann et al., "Modelling and validation of granulation with
+        heterogeneous binder dispersion and chemical reaction",
         Chemical Engineering Science, 2007.
 """
 
@@ -48,11 +66,14 @@ from ..base import LiquidInternalizationAgglomerationKernel
 
 class LiquidInternalisationAgglomerationKernel(LiquidInternalizationAgglomerationKernel):
     """
-    Braumann et al. 2007 liquid internalization model for agglomeration.
-    
+    Braumann et al. 2007 liquid internalization/externalization model.
+
     Computes the amount of external liquid that becomes trapped in
-    contact pores when two wetted particles merge.
-    
+    contact pores when two wetted particles merge (`compute_internalization`,
+    agglomeration), and the reverse process of internal liquid being pushed
+    out when a particle fragments and pore volume is lost to new fracture
+    surfaces (`compute_externalization`, breakage).
+
     Parameters:
         None (this kernel has no tunable parameters - pure physics model)
     
@@ -205,5 +226,79 @@ class LiquidInternalisationAgglomerationKernel(LiquidInternalizationAgglomeratio
         # Ensure non-negative and finite
         if not np.isfinite(l_e_to_i) or l_e_to_i < 0.0:
             return 0.0
-        
+
         return float(l_e_to_i)
+
+    def compute_externalization(
+        self,
+        v_pore_parent: float,
+        v_pore_fragments_total: float,
+        saturation_parent: float,
+        particle_idx: Optional[int] = None,
+        solver: Optional[Any] = None
+    ) -> float:
+        """
+        Compute liquid externalization during breakage (reverse of Braumann).
+
+        Formula:
+            ΔV_pore = v_pore_parent - v_pore_fragments_total
+            V_liq_int→ext = saturation_parent × ΔV_pore
+
+        Physical background: new fracture surfaces destroy part of the
+        parent's pore volume (see porosity growth kernel, e.g. cone_model's
+        ΔV term). The internal liquid that occupied that lost pore volume
+        can no longer be held internally and is pushed out to become
+        external liquid on the fragments' surfaces.
+
+        Args:
+            v_pore_parent: Pore volume of the parent particle before
+                breakage [m³]
+            v_pore_fragments_total: Summed pore volume of all fragments
+                after breakage [m³]
+            saturation_parent: Saturation of the parent particle before
+                breakage (S = V_liq_int / V_pore, in [0, 1])
+            particle_idx: Not used (kept for API consistency)
+            solver: Not used (kept for API consistency)
+
+        Returns:
+            V_liq_int_to_ext: Amount of liquid externalized [m³]
+                               (0.0 if pore volume did not shrink, or if
+                               inputs are invalid/non-finite)
+        """
+        # ==========================================
+        # Edge cases: invalid or non-finite inputs
+        # ==========================================
+        if not (np.isfinite(v_pore_parent) and np.isfinite(v_pore_fragments_total)
+                and np.isfinite(saturation_parent)):
+            return 0.0
+
+        if v_pore_parent <= 0.0:
+            return 0.0
+
+        saturation_parent = max(0.0, min(1.0, saturation_parent))
+
+        # ==========================================
+        # ΔV_pore: pore volume destroyed by new fracture surfaces
+        # ==========================================
+        delta_v_pore = v_pore_parent - v_pore_fragments_total
+
+        if delta_v_pore <= 0.0:
+            # Pore volume did not shrink (e.g. volume_mixing porosity
+            # kernel, which conserves pore volume additively) -> nothing
+            # to externalize.
+            return 0.0
+
+        v_liq_int_to_ext = saturation_parent * delta_v_pore
+
+        # ==========================================
+        # Physical constraint: cannot externalize more internal liquid
+        # than the parent actually held
+        # ==========================================
+        v_liq_int_parent = saturation_parent * v_pore_parent
+        if v_liq_int_to_ext > v_liq_int_parent:
+            v_liq_int_to_ext = v_liq_int_parent
+
+        if not np.isfinite(v_liq_int_to_ext) or v_liq_int_to_ext < 0.0:
+            return 0.0
+
+        return float(v_liq_int_to_ext)
