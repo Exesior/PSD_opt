@@ -30,6 +30,30 @@ def prepare_process_delta_config(
     return dW_const
 
 
+# Loeschkriterium: ein Rechenpartikel gilt als verbraucht, sobald ``W <= 0.0``.
+#
+# Historie: Hier stand frueher eine Epsilon-Schwelle ``W_MIN_ACTIVE = 1e-12``,
+# weil wiederholtes ``W[i] -= dW`` Ausloeschungsreste (~1e-15) hinterliess. Ueber
+# ``Propensity = Rate / delta`` mit ``delta = min(dW_const, W_i)`` wurde daraus
+# eine praktisch unendliche Propensity, der Zeitschritt kollabierte und die
+# Simulation fror ein.
+#
+# Die Schwelle war jedoch nur ein Symptom-Pflaster. Die Ursache -- dass ueberhaupt
+# Restgewichte entstehen -- ist mit der Batch-Disziplin behoben:
+#
+#     Jeder gewichtsverbrauchende Pfad konsumiert exakt ``dW = delta_i``
+#     (bei Selbstkollision exakt ``2 * min(delta_i, W_i/2)``).
+#
+# Damit gilt: ist ``W_i < dW_const``, so ist ``delta_i = W_i`` und der Event raeumt
+# das Partikel exakt auf ``0.0`` -- in IEEE-754 fehlerfrei, da ``0.5 * W_i`` nur
+# den Exponenten dekrementiert und ``2 * (0.5 * W_i) == W_i`` exakt gilt.
+# Restgewichte koennen so nicht mehr entstehen, ``> 0.0`` genuegt als Kriterium.
+#
+# Entspricht damit wieder dem Referenzstand des Betreuers
+# (upstream/dev_monorepo, ``mcpbe/script/weighted_pure_death_experiment.py``).
+# Herleitung und Begruendung: ``mcpbe/docs/Bias_Correction_und_Gewichtsdisziplin.md``.
+
+
 def delta_from_weights(W: np.ndarray, dW_const: float) -> np.ndarray:
     delta = np.minimum(np.asarray(W, dtype=float), float(dW_const))
     delta = np.where(np.isfinite(delta) & (delta > 0.0), delta, 0.0)

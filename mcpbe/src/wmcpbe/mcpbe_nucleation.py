@@ -134,27 +134,54 @@ class NucleationConfig:
     consistency_tol: float = 0.001  # 0.1%
 
     # Relative tolerance used when looking for an existing particle with the
-    # same post-droplet state (see NucleationHandler._find_similar_particle).
+    # same post-droplet state. Passed to ParticleMerger.find_or_create() as
+    # tol_rel_override -- nucleation, agglomeration and breakage all share the
+    # same merger, they only differ in how tight they want the match.
     similarity_tol: float = 0.00001
 
     # What the liquid part of that tolerance is measured against.
     #
-    #   "total"   (default, legacy) - relative to the particle's total liquid.
-    #             Merging two particles whose liquid differs by up to
-    #             similarity_tol * total books a full droplet in the statistics
-    #             while the state gains less, so the liquid phase drifts. The
-    #             error grows with how much liquid a particle already carries;
-    #             measured at 0.58 % over a short granulation run.
-    #   "droplet" - relative to the droplet volume. The merge is then
-    #             mass-neutral at droplet scale, at the cost of a lower merge
-    #             hit rate (more computational particles, slower).
+    #   "total"   - relative to the particle's own liquid, i.e. the plain rule
+    #               |ist - Kandidat| / ist <= similarity_tol.
+    #   "droplet" (default) - the same rule, but additionally capped at
+    #               similarity_tol * v_droplet. The cap can only tighten the
+    #               tolerance, never loosen it.
     #
-    # See docs/REFACTORING_FINDINGS.md (F-03).
-    # 
-    # FIX APPLIED (2024): Changed default from "total" to "droplet" to ensure
-    # mass conservation. The "total" option causes systematic liquid loss that
-    # grows linearly with the number of droplets per particle.
+    # Why the cap: under "total" the accepted absolute liquid difference grows
+    # with how much liquid a particle already carries, so late merges accept
+    # ever larger differences while the statistics still book a whole droplet.
+    # That mechanism is plausible but its magnitude has NOT been measured here.
+    #
+    # CORRECTION (2026-08): earlier revisions of this comment justified the
+    # default with "0.58 % liquid drift, see docs/REFACTORING_FINDINGS.md
+    # (F-03)". That attribution was wrong on two counts: F-03 describes the
+    # nucleation REMAINDER path (the child was created with only
+    # _liquid_remainder instead of parent_liquid + remainder) and has long been
+    # fixed, and the file now lives at docs/old/REFACTORING_FINDINGS.md. The
+    # 0.58 % belongs to that unrelated bug and says nothing about this
+    # tolerance. "droplet" is kept as the conservative default; switch to
+    # "total" and compare `python -m tests.test_conservation` if you want the
+    # higher merge hit rate.
     liquid_match_scale: str = "droplet"
+
+    # Suchweg im ParticleMerger.
+    #   True (Default) - vektorisierter linearer Scan ueber alle aktiven
+    #           Partikel. Zusaetzlich deterministisch: liefert den niedrigsten
+    #           passenden Index, waehrend der Hash-Pfad ueber ein set iteriert.
+    #   False - Hash-Index.
+    #
+    # Warum NICHT der Hash, obwohl er "O(1)" ist: der Hash-Key binnt V_dry und
+    # liquid auf log10/8 Stellen und poro/sat auf 4 Nachkommastellen. In der
+    # Nucleation starten aber alle Partikel monodispers und trocken, sitzen also
+    # im selben Bucket. _find_via_hash iteriert dieses Bucket in einer
+    # PYTHON-Schleife und ruft _matches_exact je Kandidat einzeln auf -- bei
+    # einem Bucket mit ~n Eintraegen und einer Trefferquote von wenigen Prozent
+    # heisst das: fast jeder Lookup laeuft das ganze Bucket interpretiert durch.
+    # Der lineare Scan macht dieselbe Pruefung vektorisiert in NumPy und ist
+    # dadurch um Groessenordnungen schneller, obwohl er formal dieselbe
+    # Komplexitaet hat. Gemessen: mit Hash blieb ein 20-s-Lauf nach t~4 haengen,
+    # mit linearem Scan laeuft er in ~50 s durch.
+    merge_linear_scan: bool = True
 
     # Diagnostic output. The handler used to print progress unconditionally,
     # which polluted stdout of every production run (and cost measurable time
@@ -1033,80 +1060,6 @@ class NucleationHandler:
         # Sample weighted by W -> uniform over physical particles
         return int(self._weight_sampler.sample(self._rng))
         
-    def _find_similar_particle(self, V_solid_target: float, liquid_target: float,
-                                poro_target: Optional[float] = None,
-                                sat_target: Optional[float] = None,
-                                tol: float = 0.000001,
-                                liquid_tol_ref: Optional[float] = None) -> int:
-        """
-        Sucht existierendes Partikel mit aehnlichen Eigenschaften zum Mergen.
-        
-        Match-Kriterien (alle relativ zu tol):
-        1. Trockenvolumen (V_dry)
-        2. Fluessigkeitsvolumen
-        3. Porositaet (falls nicht NaN)
-        4. Saettigung
-        
-        Das niedrigste passende Index wird zurueckgegeben (First-Match-Strategie).
-        
-        Parameter
-        ---------
-        V_solid_target : float
-            Ziel-Feststoffvolumen [m^3]
-        liquid_target : float
-            Zielfluessigkeitsvolumen [m^3]
-        poro_target : float, optional
-            Zielporositaet (kann NaN sein)
-        sat_target : float, optional
-            Zielsaettigung
-        tol : float
-            Relative Toleranz fuer Vergleich
-        liquid_tol_ref : float, optional
-            Referenzwert fuer Liquid-Toleranz. Default: liquid_target.
-            Bei "droplet" Modus: v_droplet fuer massenerhaltendes Mergen.
-        
-        Returns
-        -------
-        int
-            Index des passenden Partikels, oder -1 wenn nicht gefunden
-        
-        Notes
-        -----
-        Die Vergleiche nutzen `~(|delta| > tol)` statt `|delta| <= tol`.
-        Dies unterscheidet sich bei NaN-Operanden und erhaelt das Verhalten
-        der urspruenglichen Implementierung.
-        """
-        solver = self.solver
-        n_active = solver.a_tot
-        if n_active <= 0:
-            return -1
-
-        # Pre-compute absolute tolerances from the relative one.
-        V_tol = tol * V_solid_target
-        liq_tol = tol * (liquid_target if liquid_tol_ref is None else liquid_tol_ref)
-
-        match = ~(np.abs(solver.V_flat[-1, :n_active] - V_solid_target) > V_tol)
-        if not match.any():
-            return -1
-
-        match &= ~(np.abs(solver.liquid_volume[:n_active] - liquid_target) > liq_tol)
-        if not match.any():
-            return -1
-
-        if poro_target is not None:
-            poro = solver.porosity[:n_active]
-            match &= ~(np.abs(poro - poro_target) > tol * poro_target)
-            if not match.any():
-                return -1
-
-        if sat_target is not None:
-            sat = solver.saturation[:n_active]
-            match &= ~(np.abs(sat - sat_target) > tol * sat_target)
-            if not match.any():
-                return -1
-
-        return int(np.argmax(match))
-    
     def _distribute_liquid_volume(self, v_liquid_to_distribute: float, 
                                    is_manual_trigger: bool = False) -> None:
         """
@@ -1258,34 +1211,18 @@ class NucleationHandler:
                 # ==========================================
                 # UNIFIED LOGIC: Same as _distribute_one_droplet_with_dW()
                 # ==========================================
-                V_dry_i = float(solver.V_flat[-1, i])
                 current_liquid = float(solver.liquid_volume[i]) if hasattr(solver, 'liquid_volume') else 0.0
                 new_liquid = current_liquid + self._liquid_remainder
-                
-                # Get PorosityGrowthKernel
-                porosity_kernel = self._get_porosity_kernel()
-                
+
                 # Check if first contact (for Volume Mixing special case)
                 is_first_contact = (current_liquid == 0.0)
-                
-                # Kernel-spezifische Porositaet
-                if porosity_kernel.name == 'volume_mixing' and is_first_contact:
-                    nucleation_params = {'default_porosity': 0.4}
-                else:
-                    nucleation_params = None
-                
-                # Compute V_solid from V_dry and porosity
-                poro_i = solver.porosity[i] if hasattr(solver, 'porosity') else np.nan
-                V_solid_i = V_dry_i * (1.0 - poro_i) if not np.isnan(poro_i) else V_dry_i
-                
-                # Compute nucleation porosity via kernel
-                v_dry_new, poro_new = porosity_kernel.compute_nucleation_porosity(
-                    v_solid=V_solid_i,
-                    v_liquid=new_liquid,
-                    nucleation_params=nucleation_params,
-                    solver=solver
+
+                # Geometrie nach dem Tropfen: bestehende Porenstruktur bleibt
+                # erhalten, nur echte Neu-Nukleation geht in den Kernel.
+                v_dry_new, poro_new = self._resolve_nucleation_geometry(
+                    i, new_liquid, is_first_contact
                 )
-                
+
                 # Compute saturation (every droplet!)
                 sat_new = self._compute_saturation_for_liquid(
                     v_dry=v_dry_new,
@@ -1294,22 +1231,25 @@ class NucleationHandler:
                     is_first_contact=is_first_contact
                 )
                 
-                # Create particle with unified method
-                self._create_or_update_nucleated_particle(
+                # Zielzustand einbuchen (mergen oder neu anlegen) -- gleicher
+                # Merger-Pfad wie im regulaeren Tropfenpfad. Frueher legte
+                # dieser Restpfad IMMER ein neues Partikel an, ohne Dedup.
+                self._place_nucleated_state(
                     src_idx=i,
                     dW=dW_for_one_physical,
                     v_dry=v_dry_new,
                     poro=poro_new,
                     liquid=new_liquid,
-                    saturation=sat_new
+                    saturation=sat_new,
+                    v_droplet=v_droplet if self.config.liquid_match_scale == "droplet" else None,
                 )
-                
+
                 # Reduce parent weight by dW
                 solver.W[i] -= dW_for_one_physical
                 self._record_weight_change(i, solver.W[i])
-                
-                if solver.W[i] <= 0:
-                    solver._remove_particle_column(i)
+
+                if solver.W[i] <= 0.0:
+                    self._remove_particle_tracked(i)
                 
                 # Update statistics: count fractional droplets based on actual remainder volume
                 # This avoids systematic overshoot when remainder < 1.0 droplet
@@ -1466,46 +1406,51 @@ class NucleationHandler:
         if W_i <= 0:
             return 0.0
         
+        # Effektive Batch-Groesse (Paper Gl. 33): der Event verbraucht GENAU dW,
+        # deshalb raeumt der letzte Event ein Partikel exakt auf 0.0 leer und es
+        # koennen keine Restgewichte entstehen.
         dW = min(self.config.batch_size, W_i)
-        
-        # Cap dW falls max_physical_droplets gesetzt
+
+        # Volumen-Deckelung. Frueher wurde hier dW auf den kontinuierlichen Quotienten
+        # max_physical_droplets/vc_scale heruntergesetzt -- das war die Hauptquelle
+        # fraktionaler Restgewichte.
+        #
+        # Der Deckel ist aber eine VOLUMEN-Bedingung, keine Gewichts-Bedingung: es soll
+        # insgesamt max_physical_droplets * v_droplet an physikalischer Fluessigkeit
+        # abgegeben werden. Statt das Paket zu verkleinern, wird deshalb die Menge PRO
+        # Partikel verkleinert -- dW bleibt auf dem delta-Raster, und
+        #
+        #     dW * vc_scale * v_eff  ==  max_physical_droplets * v_droplet
+        #
+        # gilt exakt. Physikalisch ist das auch die richtige Lesart: ein Partikel
+        # bekommt weniger Fluessigkeit, nicht "ein Bruchteil eines Partikels bekommt
+        # einen vollen Tropfen".
         if max_physical_droplets is not None and max_physical_droplets > 0:
             vc_scale = self._Vc_reference / self.solver.Vc
             max_dW_allowed = max_physical_droplets / vc_scale
-            dW = min(dW, max_dW_allowed)
-        
+            if dW > max_dW_allowed:
+                v_eff = v_droplet * max_dW_allowed / dW
+                if v_eff <= 0.0:
+                    return 0.0
+                # new_liquid mit der kleineren Menge neu bilden. Die
+                # Aufnahmefaehigkeit wurde oben mit dem GROESSEREN v_droplet geprueft,
+                # bleibt also konservativ gueltig.
+                v_droplet = v_eff
+                new_liquid = current_liquid + v_droplet
+
+
         # ==========================================
         # SCHRITT 4: Porositaet bestimmen (Kernel-spezifisch!)
         # ==========================================
-        V_dry_i = float(solver.V_flat[-1, i])
-        poro_old = solver.porosity[i] if hasattr(solver, 'porosity') else np.nan
-        
-        # Get PorosityGrowthKernel
-        porosity_kernel = self._get_porosity_kernel()
-        
         # Kernel-spezifische Behandlung fuer first contact
         is_first_contact = (current_liquid == 0.0)
-        
-        if porosity_kernel.name == 'volume_mixing' and is_first_contact:
-            # Volume Mixing BRAUCHT initiale 0.4!
-            nucleation_params = {'default_porosity': 0.4}
-        else:
-            # Cone Model oder already wet -> Kernel default
-            nucleation_params = None
-        
-        # Compute V_solid from V_dry and porosity (inline - base class has this logic)
-        V_dry_i_for_solid = float(solver.V_flat[-1, i])
-        poro_for_solid = solver.porosity[i] if hasattr(solver, 'porosity') else np.nan
-        V_solid_i = V_dry_i_for_solid * (1.0 - poro_for_solid) if not np.isnan(poro_for_solid) else V_dry_i_for_solid
-        
-        # Compute nucleation porosity via kernel
-        v_dry_new, poro_new = porosity_kernel.compute_nucleation_porosity(
-            v_solid=V_solid_i,
-            v_liquid=new_liquid,
-            nucleation_params=nucleation_params,
-            solver=solver
+
+        # Geometrie nach dem Tropfen: bestehende Porenstruktur bleibt erhalten,
+        # nur echte Neu-Nukleation geht in den Porositaets-Kernel.
+        v_dry_new, poro_new = self._resolve_nucleation_geometry(
+            i, new_liquid, is_first_contact
         )
-        
+
         # ==========================================
         # SCHRITT 5: Saturation berechnen (jeder Tropfen!)
         # ==========================================
@@ -1517,58 +1462,103 @@ class NucleationHandler:
         )
         
         # ==========================================
-        # SCHRITT 6: Merging versuchen (Optimierung!)
+        # SCHRITT 6: Zielzustand einbuchen (mergen oder neu anlegen)
         # ==========================================
-        # V_solid from kernel result (V_dry_new, poro_new)
-        V_solid_target = v_dry_new * (1.0 - poro_new) if not np.isnan(poro_new) else v_dry_new
-        
-        existing = self._find_similar_particle(
-            V_solid_target=V_solid_target,
-            liquid_target=new_liquid,
-            poro_target=poro_new,
-            sat_target=sat_new,
-            tol=self.config.similarity_tol,
-            liquid_tol_ref=v_droplet if self.config.liquid_match_scale == "droplet" else new_liquid
-        )
-        
-        if existing >= 0 and existing != i:
-            # MERGING: Transfer dW zu existierendem Partikel
-            solver.W[existing] += dW
-            solver.W[i] -= dW
-            
-            self._record_weight_change(existing, solver.W[existing])
-            self._record_weight_change(i, solver.W[i])
-            
-            if solver.W[i] <= 0:
-                solver._remove_particle_column(i)
-            
-            return dW
-        
-        # ==========================================
-        # SCHRITT 7: Neues Partikel erstellen
-        # ==========================================
-        self._create_or_update_nucleated_particle(
+        # Geht ueber den gemeinsamen ParticleMerger -- Matching-Regeln und
+        # Hash-Index sind damit dieselben wie bei Agglomeration und Breakage.
+        self._place_nucleated_state(
             src_idx=i,
             dW=dW,
             v_dry=v_dry_new,
             poro=poro_new,
             liquid=new_liquid,
-            saturation=sat_new
+            saturation=sat_new,
+            v_droplet=v_droplet if self.config.liquid_match_scale == "droplet" else None,
         )
-        
+
         # Parent weight reduzieren
         solver.W[i] -= dW
         self._record_weight_change(i, solver.W[i])
-        
-        if solver.W[i] <= 0:
-            solver._remove_particle_column(i)
-        
+
+        if solver.W[i] <= 0.0:
+            self._remove_particle_tracked(i)
+
         return dW
     
+    def _resolve_nucleation_geometry(self, i: int, new_liquid: float,
+                                      is_first_contact: bool) -> tuple:
+        """
+        Bestimmt (V_dry, Porositaet) eines Partikels nach Tropfenauftrag.
+
+        Zwei Faelle, physikalisch verschieden:
+
+        1. **Partikel hat bereits Porenstruktur** (``poro_old > 0``):
+           Benetzen fuegt Fluessigkeit hinzu, es verdichtet das Feststoffgeruest
+           nicht. V_solid und V_pore bleiben, also bleibt auch V_dry und die
+           Porositaet unveraendert. Die Fluessigkeit landet in ``liquid_volume``;
+           der Internalisierungs-Kernel zieht sie ueber die Zeit in die Poren und
+           ``saturation`` bildet den Fuellgrad ab. Porositaet = geometrischer
+           Hohlraum, Saettigung = Fuellgrad -- zwei getrennte Groessen.
+
+        2. **Partikel ist porenlos** (``poro_old == 0`` oder NaN):
+           Echte Neu-Nukleation, der Kernel bestimmt die Startgeometrie.
+           ``volume_mixing`` setzt seine 0.4-Saat (ohne die koennte durch reine
+           Porenaddition nie Porositaet entstehen), ``cone_model`` startet bei
+           0.0 und laesst Porositaet erst durch Agglomeration entstehen.
+
+        Vorher lief JEDER Tropfen durch Fall 2. Da an
+        ``compute_nucleation_porosity`` nur ``v_solid`` uebergeben wird, kam bei
+        ``cone_model`` ``(v_solid, 0.0)`` zurueck -- ein Tropfen auf ein Partikel
+        mit eps=0.8 loeschte dessen kompletten Porenraum und liess V_dry auf
+        V_solid zusammenfallen. V_solid blieb erhalten (kein Massenfehler), aber
+        Durchmesser, Rumpf-Festigkeit, Kompression und Internalisierung wurden
+        dadurch entwertet.
+
+        Parameter
+        ---------
+        i : int
+            Index des getroffenen Partikels
+        new_liquid : float
+            Gesamtfluessigkeit des Partikels nach dem Tropfen [m^3]
+        is_first_contact : bool
+            True, wenn das Partikel vorher trocken war (nur fuer volume_mixing)
+
+        Returns
+        -------
+        (v_dry_new, poro_new) : tuple[float, float]
+        """
+        solver = self.solver
+
+        V_dry_i = float(solver.V_flat[-1, i])
+        poro_old = float(solver.porosity[i]) if hasattr(solver, 'porosity') else np.nan
+
+        # Fall 1: bestehende Porenstruktur -> Geometrie unveraendert lassen.
+        if not np.isnan(poro_old) and poro_old > 0.0:
+            return V_dry_i, poro_old
+
+        # Fall 2: porenloses Partikel -> Kernel bestimmt die Startgeometrie.
+        porosity_kernel = self._get_porosity_kernel()
+
+        if porosity_kernel.name == 'volume_mixing' and is_first_contact:
+            # Volume Mixing BRAUCHT die initiale 0.4 (reine Porenaddition
+            # koennte aus 0 + 0 nie Porositaet erzeugen).
+            nucleation_params = {'default_porosity': 0.4}
+        else:
+            nucleation_params = None
+
+        V_solid_i = V_dry_i if np.isnan(poro_old) else V_dry_i * (1.0 - poro_old)
+
+        return porosity_kernel.compute_nucleation_porosity(
+            v_solid=V_solid_i,
+            v_liquid=new_liquid,
+            nucleation_params=nucleation_params,
+            solver=solver
+        )
+
     def _get_porosity_kernel(self):
         """
         Get PorosityGrowthKernel from solver or create default.
-        
+
         Returns:
             PorosityGrowthKernel instance (volume_mixing as default)
         """
@@ -1667,63 +1657,147 @@ class NucleationHandler:
             # Volume Mixing: 0.4 hardcoded (legacy behavior)
             return 0.4
         elif porosity_kernel.name == 'cone_model':
-            # Cone Model: Aus Params oder default
+            # HINWEIS: Der Default 0.4 ist fuer cone_model fragwuerdig. Der
+            # Kernel erzeugt Porenraum geometrisch bei Kontakt und trifft
+            # bewusst keine Aussage darueber, wie viel Fluessigkeit beim
+            # Auftreffen sofort nach innen geht -- 0.0 waere die konsistente
+            # Wahl. Frueher war der Wert ohnehin unerreichbar, weil
+            # compute_nucleation_porosity fuer cone_model immer poro=0 lieferte
+            # und _compute_saturation_for_liquid dann am poro<=0-Guard abbrach.
+            # Seit die Porositaet bei Nucleation erhalten bleibt, ist der Pfad
+            # erreichbar, sobald KEIN liquid_internalization-Kernel aktiv ist.
+            # Nicht geaendert, weil das Ergebnisse verschiebt -- bewusst
+            # entscheiden und dann hier festhalten.
             return porosity_kernel.params.get('liquid_split_ratio', 0.4)
         else:
             # Other kernels: Default 0.4
             return 0.4
     
-    def _create_or_update_nucleated_particle(self, src_idx: int, dW: float,
-                                              v_dry: float, poro: float,
-                                              liquid: float, saturation: float) -> None:
+    def _get_merger(self):
         """
-        Erstellt neues Partikel mit Nukleationseigenschaften.
-        
-        Einheitlicher Pfad fuer:
-        - Erster Tropfen auf trockenem Partikel
-        - Weitere Tropfen auf bereits benetztem Partikel
-        
+        Liefert den ParticleMerger des Solvers, oder None.
+
+        Die Nucleation nutzt bewusst denselben Merger wie Agglomeration und
+        Breakage. Frueher hatte sie eine eigene ``_find_similar_particle``, die
+        (a) das Feststoffvolumen gegen ``V_flat[-1]`` = V_dry verglich, also
+        gegen die falsche Groesse, und (b) den Hash-Index weder fuellte noch
+        aufraeumte -- Agglomeration und Breakage konnten die so erzeugten
+        Partikel deshalb nie wiederfinden und legten Duplikate an.
+        """
+        return getattr(self.solver, '_particle_merger', None)
+
+    def _remove_particle_tracked(self, idx: int) -> None:
+        """
+        Entfernt ein Partikel und haelt den Merger-Hash-Index konsistent.
+
+        ``_remove_particle_column`` arbeitet mit Swap-with-last. Der Eintrag des
+        entfernten Partikels muss VORHER aus dem Hash-Index, sonst zeigt er auf
+        einen Slot, der danach von einem fremden Partikel belegt wird (der Swap
+        selbst wird von ``notify_index_swap`` abgedeckt). Agglomeration und
+        Breakage machen das an ihren Entfernstellen genauso.
+        """
+        merger = self._get_merger()
+        if merger is not None:
+            merger.remove_from_hash_index(idx)
+        self.solver._remove_particle_column(idx)
+
+    def _place_nucleated_state(self, src_idx: int, dW: float, v_dry: float,
+                               poro: float, liquid: float, saturation: float,
+                               v_droplet: Optional[float] = None) -> tuple:
+        """
+        Bucht den Zustand nach dem Tropfen ein: mergen oder neu anlegen.
+
+        Geht ueber ``ParticleMerger.find_or_create``, damit Nucleation,
+        Agglomeration und Breakage dieselbe Dedup-Logik und denselben
+        Hash-Index benutzen.
+
         Parameter
         ---------
         src_idx : int
-            Quell-Partikelindex zum Kopieren der Feststoffvolumina
+            Quellpartikel (liefert die Feststoffkomponenten, wird vom Matching
+            ausgeschlossen)
         dW : float
-            Gewicht fuer neues Partikel
+            Gewicht, das dem Zielpartikel zugeschlagen wird
+        v_dry, poro, liquid, saturation : float
+            Zielzustand nach dem Tropfen
+        v_droplet : float, optional
+            Tropfenvolumen als Referenzmassstab fuer die Liquid-Toleranz
+            (nur bei ``liquid_match_scale == "droplet"``)
+
+        Returns
+        -------
+        (idx, was_merged) : tuple[int, bool]
+        """
+        solver = self.solver
+        V_solid_src = solver.V_flat[:solver.dim, src_idx].copy()
+
+        merger = self._get_merger()
+        if merger is None:
+            # Kein Merger konfiguriert -> direkt anlegen (Alt-Verhalten).
+            self._create_nucleated_particle_direct(
+                V_solid_src, dW, v_dry, poro, liquid, saturation, src_idx
+            )
+            return solver.a_tot - 1, False
+
+        idx, merged = merger.find_or_create(
+            V_solid_target=V_solid_src,
+            V_dry_target=v_dry,
+            liquid_target=liquid,
+            poro_target=poro,
+            sat_target=saturation,
+            weight_to_add=dW,
+            component_sum=V_solid_src,
+            tol_rel_override=self.config.similarity_tol,
+            liquid_scale_ref=v_droplet,
+            exclude_idx=src_idx,
+            force_linear_scan=self.config.merge_linear_scan,
+        )
+        self._record_weight_change(idx, solver.W[idx])
+        return idx, merged
+
+    def _create_nucleated_particle_direct(self, V_solid_src, dW: float,
+                                          v_dry: float, poro: float,
+                                          liquid: float, saturation: float,
+                                          src_idx: int) -> None:
+        """
+        Legt ein Partikel ohne Merger an (Fallback, wenn kein Merger existiert).
+
+        Parameter
+        ---------
+        V_solid_src : np.ndarray
+            Feststoffkomponenten des Quellpartikels
+        dW : float
+            Gewicht fuer das neue Partikel
         v_dry : float
-            Trockenvolumen vom Kernel [m^3]
+            Trockenvolumen [m^3]
         poro : float
-            Porositaet vom Kernel
+            Porositaet
         liquid : float
             Gesamtes Fluessigkeitsvolumen [m^3]
         saturation : float
             Berechnete Saettigung
-        
-        See Also
-        --------
-        _perform_nucleation_agglomeration : Agglomeration waehrend V_dry-Sammlung
+        src_idx : int
+            Quell-Partikelindex (nur fuer Debug-Ausgaben)
         """
         solver = self.solver
-        
-        # Copy solid volumes from source
-        V_solid_src = solver.V_flat[:solver.dim, src_idx].copy()
-        
+
         # Create new particle
         solver._append_particle_column(V_solid_src)
         new_idx = solver.a_tot - 1
-        
+
         # Set properties
         solver.V_flat[-1, new_idx] = v_dry  # ← V_dry from kernel!
         solver.W[new_idx] = dW
-        
+
         if hasattr(solver, 'liquid_volume'):
             solver.liquid_volume[new_idx] = liquid
-        
+
         if hasattr(solver, 'porosity'):
             solver.porosity[new_idx] = poro
-        
+
         if hasattr(solver, 'saturation'):
             solver.saturation[new_idx] = saturation
-        
+
         # === DEBUG NUC: CREATE/UPDATE PARTICLE ===
         if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_nuc', True):
             # V_solid vom Parent (Source)
@@ -1745,17 +1819,6 @@ class NucleationHandler:
         
         # Record weight change
         self._record_weight_change(new_idx, dW)
-    
-    # DEPRECATED: Replaced by _create_or_update_nucleated_particle() with unified path
-    # Old method kept for reference only - DO NOT USE
-    def _create_nucleated_particle_copy_DEPRECATED(self, src_idx: int, dW: float, liquid: float):
-        """
-        DEPRECATED: Use _create_or_update_nucleated_particle() instead.
-        
-        Old method had hardcoded 0.4 porosity and separate logic for first contact.
-        New method uses unified path with kernel-specific porosity and saturation.
-        """
-        pass  # Placeholder - old code removed
     
     def _perform_nucleation_agglomeration(self, i: int, j: int) -> int:
         """
@@ -1897,18 +1960,22 @@ class NucleationHandler:
         V_solid_i = V_dry_i * (1.0 - poro_i) if not np.isnan(poro_i) else V_dry_i
         V_solid_j = V_dry_j * (1.0 - poro_j) if not np.isnan(poro_j) else V_dry_j
 
-        # DSMC-compliant weight handling:
-        # dW = amount that actually merges (not sum of both weights!)
-        # For i==j: we merge the particle with itself, consuming 2*dW from the
-        # SAME packet, so dW must be capped at Wi/2 (mirrors the self-collision
-        # handling in mcpbe_agg.py::_compute_agg_dW). Without this cap, W[i] -=
-        # 2*dW below would remove twice the available weight and duplicate mass.
+        # DSMC-compliant weight handling, identical to mcpbe_agg.py::_compute_agg_dW:
+        # the consumed batch is exactly the effective batch size (paper Eq. 33), so
+        # the final event on a particle drains it to exactly 0 and no residual
+        # weight can survive. For i == j one event consumes 2*dW from the SAME
+        # packet, hence the W_i/2 cap (2*(0.5*W_i) == W_i is exact in IEEE-754).
+        dW_const = float(
+            getattr(solver, "_agg_dW_const", None) or solver._prepare_agg_delta_config()
+        )
+        delta_i = min(dW_const, Wi)
+        delta_j = min(dW_const, Wj)
         if i == j:
-            dW = Wi / 2.0
-            if dW <= 0.0:
-                return -1
+            dW = min(delta_i, 0.5 * Wi)
         else:
-            dW = min(Wi, Wj)
+            dW = min(delta_i, delta_j)
+        if dW <= 0.0:
+            return -1
         
         # Get porosity growth kernel (create default if not exists)
         porosity_kernel = None
@@ -2019,7 +2086,16 @@ class NucleationHandler:
         
         if sat_merged is not None and hasattr(solver, 'saturation'):
             solver.saturation[new_idx] = sat_merged
-        
+
+        # Im Merger-Hash-Index registrieren. Das Kind wird hier bewusst direkt
+        # angelegt statt ueber find_or_create, weil der folgende Code seinen
+        # Index durch mehrere Eltern-Entfernungen hindurch nachverfolgen muss
+        # (child_current_idx). Ohne Registrierung waere es fuer jede spaetere
+        # Suche unsichtbar und Agglomeration/Breakage wuerden Duplikate anlegen.
+        merger = self._get_merger()
+        if merger is not None:
+            merger.register_particle(new_idx)
+
         # Record new particle weight for incremental sampler update
         self._record_weight_change(new_idx, dW)
         
@@ -2037,7 +2113,7 @@ class NucleationHandler:
             # Record weight change for incremental sampler update
             self._record_weight_change(i, solver.W[i])
             
-            if solver.W[i] <= 0:
+            if solver.W[i] <= 0.0:
                 # If removing i which is also the child location, we have a problem
                 if i == child_current_idx:
                     # Child would be removed - this shouldn't happen in normal operation
@@ -2045,7 +2121,7 @@ class NucleationHandler:
                     return -1
                 # CRITICAL: Save 'last' BEFORE remove, because a_tot changes!
                 last_before_remove = solver.a_tot - 1
-                solver._remove_particle_column(i)
+                self._remove_particle_tracked(i)
                 # After swap-remove: if child was at 'last' position, it moved to 'i'
                 if child_current_idx == last_before_remove:
                     child_current_idx = i
@@ -2063,11 +2139,11 @@ class NucleationHandler:
             for idx in sorted([i, j], reverse=True):
                 if idx >= solver.a_tot:
                     continue
-                if solver.W[idx] <= 0:
+                if solver.W[idx] <= 0.0:
                     child_was_at = child_current_idx
                     # CRITICAL: Save 'last' BEFORE remove, because a_tot changes!
                     last_before_remove = solver.a_tot - 1
-                    solver._remove_particle_column(idx)
+                    self._remove_particle_tracked(idx)
                     # After swap-remove: if child was at 'last' position, it moved to 'idx'
                     if child_was_at == last_before_remove:
                         child_current_idx = idx

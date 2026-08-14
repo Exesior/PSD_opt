@@ -171,15 +171,28 @@ im alten Dokument), wenn Partikelzahl unter 50% der Kapazität fällt.
 
 ### 3.1 Agglomeration (`mcpbe_agg.py`)
 
+> **Stand 14.08.2026 — Bias-Correction umgesetzt.** Propensity und Partnerauswahl folgen
+> jetzt der Pair-Delta-korrigierten Form aus Ji & Rhein (Gl. 33/36–41). Vollständige
+> Herleitung, Verifikationsprotokoll und Umbaubeschreibung:
+> [`Bias_Correction_und_Gewichtsdisziplin.md`](Bias_Correction_und_Gewichtsdisziplin.md).
+> Das Wichtigste in Kürze:
+> - `_r_agg[i]` hält jetzt `R_i* = W_i·Σ_j W_j·β(i,j)/min(ΔW_i,ΔW_j)`, **nicht** mehr
+>   `Σ_j W_j·β(i,j)/ΔW_i`. Der `W_i`-Vorfaktor und die *paarweise* Division sind neu.
+> - Partner `j` wird proportional zu `W_j·β(i,j)/ΔW_ij` gezogen, nicht mehr zu `W_j`.
+> - `W_MIN_ACTIVE` existiert nicht mehr; das Löschkriterium ist wieder `W > 0.0`.
+
 Ablauf pro Event (`_do_one_agg`):
-1. `_select_pair(a)`: Partikel `i` via Fenwick-Sampler proportional zur Propensity
-   `r_i`, Partner `j` proportional zu `W_j`. Optional Größen-Akzeptanz (SIZEEVAL) und
-   physikalisches Akzeptanzkriterium (`agglomeration_acceptance_kernel`, z.B. Stokes).
+1. `_select_pair(a)`: Zweistufiger Sampler — Partikel `i` via Fenwick-Sampler
+   proportional zu `R_i*`, dann Partner `j` bedingt proportional zu
+   `W_j·β(i,j)/min(ΔW_i,ΔW_j)`. Danach Größen-Akzeptanz (SIZEEVAL, **eigene**
+   Zufallszahl) und physikalisches Akzeptanzkriterium
+   (`agglomeration_acceptance_kernel`, z.B. Stokes).
    Bei Ablehnung: `None` zurück, Event ist ein No-Op.
 2. `_compute_agg_dW(...)`: Paketgröße `dW` (wie viele physische Kollisionen dieses
    Event repräsentiert). **Selbstkollision (`i==j`) ist explizit erlaubt** und wird
-   speziell behandelt: `dW` wird so begrenzt, dass `2*dW <= W[i]` (ein Self-Collision-
-   Event "verbraucht" zwei physische Partikel aus demselben Pool).
+   speziell behandelt: `dW` wird auf `δ_ii = min(δ_i, W_i/2)` **gekappt** (früher
+   wurde der Event stattdessen abgelehnt). Dadurch gilt `2*dW <= W[i]` mit Gleichheit
+   im Grenzfall, und der letzte Event räumt das Partikel exakt auf `0.0`.
 3. `_merge_pair(i, j, dW)`: Erzeugt Kind-Partikel via `ParticleMerger.find_or_create`
    (Dedup, s. Abschnitt 4). `V_solid_child = V_solid_i + V_solid_j` (exakt, unabhängig
    vom Porositäts-Kernel). `V_dry_child`/`poro_child` kommen vom
@@ -353,12 +366,12 @@ Status-Update zum aktuellen Bugfix-Stand (siehe dafür `git log` und
    würde – reine Seiteneffekt-freie Prints sind sicher, alles andere ist riskant.
 
 2. **`i == j` (Selbstkollision) braucht überall dieselbe Sonderbehandlung**: `dW` muss
-   so begrenzt werden, dass `2*dW <= W[i]` (ein Self-Collision-Event verbraucht zwei
-   physische Partikel aus demselben Pool). `mcpbe_agg.py::_compute_agg_dW` macht das
-   korrekt. `mcpbe_nucleation.py::_manual_agglomerate_particles` ist eine **separate
-   Code-Kopie** derselben Idee und hatte diese Begrenzung ursprünglich vergessen
-   (`dW = min(Wi, Wj)` statt `Wi/2` bei `i==j`) – klassischer
-   Copy-Paste-Divergenz-Bug zwischen Parallel-Implementierungen.
+   auf `δ_ii = min(δ_i, W_i/2)` gekappt werden (ein Self-Collision-Event verbraucht
+   zwei physische Partikel aus demselben Pool). `mcpbe_agg.py::_compute_agg_dW` und
+   `mcpbe_nucleation.py::_manual_agglomerate_particles` sind zwei **separate
+   Code-Kopien** derselben Idee und sind historisch mehrfach auseinandergelaufen.
+   Seit 14.08.2026 sind beide auf `min(δ_i, 0.5*W_i)` bzw. `min(δ_i, δ_j)`
+   angeglichen — bei Änderungen weiterhin **beide** anfassen.
 
 3. **Swap-with-last-Entfernung (`_remove_particle_column`) verschiebt Indizes.** Jede
    Datenstruktur, die Partikel-Indizes "von außen" referenziert (Hash-Index in

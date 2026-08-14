@@ -2,12 +2,22 @@
 
 Responsibilities
 ----------------
-* ``_rebuild_all_propensities`` - recompute ``r_i = sum_j W_j beta(i,j)`` for
-  every active particle. Runs once per accepted event and used to dominate the
-  solver runtime; see :mod:`wmcpbe.kernels.aggregation.jit_kernels`.
+* ``_rebuild_all_propensities`` - recompute the bias-corrected propensity
+  ``R_i* = W_i sum_j W_j beta(i,j)/min(dW_i,dW_j)`` for every active particle.
+  Runs once per accepted event and dominates the solver runtime; see
+  :mod:`wmcpbe.kernels.aggregation.jit_kernels`.
 * ``_do_one_agg``               - execute a single agglomeration event:
   pick a pair, decide the packet size ``dW``, merge volumes / porosity /
   liquid, consume the parents' weight, refresh the samplers.
+
+Bias correction (Ji & Rhein, Eqs. 33/36-41)
+-------------------------------------------
+Because the executed batch is capped by the available weight of *both* partners
+(``dW_ij = min(dW_i, dW_j)``, ``dW_i = min(dW, W_i)``), the sampling probability
+has to be divided by exactly that cap, and the partial rate carries a ``W_i``
+prefactor. Partner ``j`` is drawn proportional to ``W_j beta(i,j)/dW_ij``
+(Eq. 40), not proportional to ``W_j`` alone. Derivation and verification:
+``mcpbe/docs/Bias_Correction_und_Gewichtsdisziplin.md``.
 
 Volume semantics (see also ``.agents/informations.txt``)
 -------------------------------------------------------
@@ -30,150 +40,25 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from numba import njit
 
 from .fenwick_new import rebuild_sampler
 from .particle_merger import ParticleMerger
 from .kernels.aggregation.jit_kernels import (
+    KERNEL_IDS,
     MOMENT_KERNELS,
     PARALLEL_MIN_N,
-    rebuild_r_array_brownian,
-    rebuild_r_array_brownian_moment,
-    rebuild_r_array_brownian_serial,
-    rebuild_r_array_constant,
-    rebuild_r_array_liquid_bridge,
-    rebuild_r_array_liquid_bridge_serial,
-    rebuild_r_array_shear,
-    rebuild_r_array_shear_moment,
-    rebuild_r_array_shear_serial,
-    rebuild_r_array_sum,
-    rebuild_r_array_sum_moment,
-    rebuild_r_array_sum_serial,
+    kernel_p0,
+    pick_partner_pairdelta,
+    rebuild_r_pairdelta_liquid_bridge,
+    rebuild_r_pairdelta_liquid_bridge_serial,
+    rebuild_r_pairdelta_moment,
+    rebuild_r_pairdelta_pairwise,
+    rebuild_r_pairdelta_pairwise_serial,
+    separable_tables,
 )
-
-# (parallel, serial) pairwise implementations per kernel name. Both members of
-# a pair are bit-identical; only the dispatch threshold differs.
-_PAIRWISE_IMPLS = {
-    "shear_chin1998": (rebuild_r_array_shear, rebuild_r_array_shear_serial),
-    "brownian_tsouris1995": (rebuild_r_array_brownian, rebuild_r_array_brownian_serial),
-    "sum": (rebuild_r_array_sum, rebuild_r_array_sum_serial),
-    "liquid_bridge": (rebuild_r_array_liquid_bridge, rebuild_r_array_liquid_bridge_serial),
-}
 
 #: Propensity evaluation modes for :attr:`MCPBEAgg.agg_propensity_mode`.
 PROPENSITY_MODES = ("pairwise", "moment")
-
-
-# =============================================================================
-# JIT-compiled partner selection for the constant kernel
-# =============================================================================
-
-
-@njit(cache=True)
-def pick_partner_constant_jit(
-    i,
-    W,
-    R,
-    V0,
-    V1,
-    dim,
-    alpha1d,
-    alpha4,
-    SIZEEVAL,
-    X_SEL,
-    Y_SEL,
-    Vmean2,
-    u_sel,
-    corr_beta,
-):
-    """Partner selection specialised for the constant kernel.
-
-    Returns ``(j, pick_w)`` where ``j`` is the partner index (-1 if rejected)
-    and ``pick_w`` is the pair propensity ``W[j] * beta_eff`` (or
-    ``(W[i]-1) * beta_eff`` for a self-collision).
-    """
-    a = len(W)
-    if a < 2 or i < 0 or i >= a:
-        return -1, 0.0
-
-    # Step 1: partner j drawn with probability proportional to W[j].
-    total_W = 0.0
-    for j in range(a):
-        total_W += W[j]
-
-    if total_W <= 0.0:
-        return -1, 0.0
-
-    target = u_sel * total_W
-    cumsum = 0.0
-    j = 0
-    for j_idx in range(a):
-        cumsum += W[j_idx]
-        if cumsum > target:
-            j = j_idx
-            break
-
-    if j >= a:
-        j = a - 1
-
-    # Step 2: beta(i,j) for the constant kernel.
-    beta_ij = corr_beta
-    if beta_ij <= 0.0:
-        return -1, 0.0
-
-    # Step 3: collision efficiency alpha(i,j).
-    if dim == 1:
-        alpha_ij = alpha1d
-    else:
-        Vi0 = V0[i]
-        Vi1 = V1[i]
-        Vti = Vi0 + Vi1
-        Vj0 = V0[j]
-        Vj1 = V1[j]
-        Vtj = Vj0 + Vj1
-        if Vti <= 0.0 or Vtj <= 0.0:
-            return -1, 0.0
-        p0 = (Vi0 / Vti) * (Vj0 / Vtj)
-        p1 = (Vi0 / Vti) * (Vj1 / Vtj)
-        p2 = (Vi1 / Vti) * (Vj0 / Vtj)
-        p3 = (Vi1 / Vti) * (Vj1 / Vtj)
-        alpha_ij = p0 * alpha4[0] + p1 * alpha4[1] + p2 * alpha4[2] + p3 * alpha4[3]
-
-    if alpha_ij <= 0.0:
-        return -1, 0.0
-
-    beta_eff = beta_ij * alpha_ij
-
-    # Step 4: pair propensity.
-    if i == j:
-        # Self-agglomeration offers (W[i] - 1) distinct partners.
-        pick_w = max(0.0, W[i] - 1.0) * beta_eff
-    else:
-        pick_w = W[j] * beta_eff
-
-    if pick_w <= 0.0:
-        return -1, 0.0
-
-    # Step 5: size-dependent acceptance (SIZEEVAL).
-    if SIZEEVAL != 0:
-        if dim == 1:
-            Vi = V0[i]
-            Vj = V0[j]
-        else:
-            Vi = V0[i] + V1[i]
-            Vj = V0[j] + V1[j]
-
-        V_target = np.sqrt(Vmean2) if Vmean2 > 0 else 1e-18
-        sigma_V = V_target * Y_SEL
-
-        diff_i = (Vi - V_target) / sigma_V if sigma_V > 0 else 0.0
-        diff_j = (Vj - V_target) / sigma_V if sigma_V > 0 else 0.0
-        size_factor = np.exp(-0.5 * diff_i * diff_i) * np.exp(-0.5 * diff_j * diff_j)
-
-        if u_sel > size_factor:
-            return -1, 0.0
-
-    return j, pick_w
 
 
 class MCPBEAgg:
@@ -303,27 +188,6 @@ class MCPBEAgg:
             ap = np.ones(4, dtype=float)
         return float(p0 * ap[0] + p1 * ap[1] + p2 * ap[2] + p3 * ap[3])
 
-    def _alpha_params(self, a: int) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
-        """Return ``(alpha1d, alpha4, V0, V1)`` views for partner selection."""
-        buf = self._agg_buffers(a)
-        alpha4 = buf["alpha4"]
-        V0 = self.V_flat[0, :a]
-
-        if self.dim == 1:
-            if np.ndim(self.alpha_prim) == 0:
-                alpha1d = float(self.alpha_prim)
-            else:
-                alpha1d = float(np.mean(self.alpha_prim))
-            alpha4[:] = 0.0
-            V1 = buf["zeros"][:a]
-        else:
-            alpha1d = 1.0
-            ap = np.asarray(self.alpha_prim, dtype=np.float64)
-            alpha4[:] = ap if ap.size == 4 else 1.0
-            V1 = self.V_flat[1, :a]
-
-        return alpha1d, alpha4, V0, V1
-
     def _beta(self, i: int, j: int) -> float:
         """Pair kernel ``beta(i, j)`` via the kernel framework."""
         if self.kernel_manager is None or self.kernel_manager.agg_kernel is None:
@@ -338,61 +202,108 @@ class MCPBEAgg:
         )
 
     # ------------------------------------------------------------------
-    # Partner selection
+    # Partner selection (paper Eq. 40)
     # ------------------------------------------------------------------
+    def _compiled_kernel_spec(self) -> tuple[int, float] | None:
+        """``(kernel_id, p0)`` if the compiled fast path applies, else ``None``.
+
+        The compiled kernels fold the scalar collision efficiency ``alpha`` into
+        ``p0``. That is only exact for ``dim == 1``, where ``alpha`` is a single
+        number shared by every pair; in 2D it depends on the component mix of the
+        pair and the generic Python path is used instead.
+        """
+        if int(self.dim) != 1:
+            return None
+        manager = getattr(self, "kernel_manager", None)
+        kernel = getattr(manager, "agg_kernel", None) if manager is not None else None
+        if kernel is None:
+            return None
+        name = getattr(kernel, "name", "")
+        if name not in KERNEL_IDS:
+            return None
+        alpha = self._alpha_scalar()
+        if alpha <= 0.0:
+            return None
+        return KERNEL_IDS[name], kernel_p0(name, kernel) * alpha
+
+    def _alpha_scalar(self) -> float:
+        """Scalar collision efficiency for ``dim == 1``."""
+        if np.ndim(self.alpha_prim) == 0:
+            return float(self.alpha_prim)
+        return float(np.mean(self.alpha_prim))
+
     def _pick_partner_kernel(
-        self,
-        i: int,
-        R: np.ndarray,
-        W: np.ndarray,
-        V0: np.ndarray,
-        V1: np.ndarray,
-        dim: int,
-        alpha1d: float,
-        alpha4: np.ndarray,
-        SIZEEVAL: int,
-        X_SEL: float,
-        Y_SEL: float,
-        Vmean2: float,
-        u_sel: float,
+        self, i: int, R: np.ndarray, W: np.ndarray, delta: np.ndarray,
+        dW_const: float, partner_total: float, u_sel: float,
     ) -> tuple[int, float]:
-        """Weight-proportional partner sampling using the configured kernel.
+        """Draw partner ``j`` proportional to ``W_j beta(i,j) alpha(i,j) / dW_ij``.
 
-        Mirrors :func:`pick_partner_constant_jit` but obtains ``beta`` from
-        ``kernel_manager`` so that partner selection stays consistent with
-        :meth:`_rebuild_all_propensities`.
+        This is the conditional stage of the two-stage sampler (paper Eqs. 17/40).
+        ``partner_total`` is ``R_i* / W_i``, i.e. the very sum that
+        :meth:`_rebuild_all_propensities` accumulated for this ``i``, so the
+        conditional distribution is consistent with the primary draw by
+        construction.
 
-        Note on ``u_sel``: the same draw is used both to pick the partner and,
-        when ``SIZEEVAL != 0``, as the acceptance variate. That correlation is
-        inherited from the original implementation and is preserved here on
-        purpose - changing it would alter every recorded trajectory. It is
-        documented as a known statistical defect in ``docs/``.
-
-        Returns:
-            ``(j, pick_w)``; ``j == -1`` means the attempt was rejected.
+        Returns ``(j, w_ij)``; ``j == -1`` means the draw failed.
         """
         a = len(W)
-        if a < 2 or i < 0 or i >= a:
+        if a < 1 or i < 0 or i >= a or partner_total <= 0.0:
+            return -1, 0.0
+        di = float(delta[i])
+        if di <= 0.0:
             return -1, 0.0
 
-        # Step 1: partner j with probability proportional to W[j].
-        total_W = np.sum(W)
-        if total_W <= 0.0:
+        compute_beta = self.kernel_manager.compute_beta
+        dim = int(self.dim)
+        ri = float(R[i])
+        thresh = u_sel * partner_total
+        acc = 0.0
+        last_j, last_w = -1, 0.0
+
+        for j in range(a):
+            if j == i:
+                Wi = float(W[i])
+                if Wi <= 1.0:
+                    continue
+                sd = min(di, 0.5 * Wi)
+                if sd <= 0.0:
+                    continue
+                b = self._safe_beta(compute_beta, ri, ri, i, i)
+                if dim != 1:
+                    b *= self._alpha_ccm(i, i)
+                if b <= 0.0:
+                    continue
+                wij = (Wi - 1.0) * b / sd
+            else:
+                Wj = float(W[j])
+                dj = float(delta[j])
+                if Wj <= 0.0 or dj <= 0.0:
+                    continue
+                b = self._safe_beta(compute_beta, ri, float(R[j]), i, j)
+                if dim != 1:
+                    b *= self._alpha_ccm(i, j)
+                if b <= 0.0:
+                    continue
+                wij = Wj * b / (di if di < dj else dj)
+
+            if wij <= 0.0:
+                continue
+            acc += wij
+            last_j, last_w = j, wij
+            if acc > thresh:
+                return j, wij
+
+        if last_j < 0 or last_w <= 0.0:
             return -1, 0.0
+        return last_j, last_w
 
-        cumsum_W = self._agg_buffers(a)["cumsum"][:a]
-        np.cumsum(W, out=cumsum_W)
-        j = int(np.searchsorted(cumsum_W, u_sel * total_W, side="right"))
-        j = min(j, a - 1)
-
-        # Step 2: beta(i,j) from the kernel framework.
+    def _safe_beta(self, compute_beta, r1: float, r2: float, i: int, j: int) -> float:
+        """``compute_beta`` with the kernel-failure guard, returning 0 on error."""
         try:
-            beta_ij = self.kernel_manager.compute_beta(
-                float(R[i]), float(R[j]), particle1_idx=i, particle2_idx=j, solver=self
-            )
+            b = compute_beta(r1, r2, particle1_idx=i, particle2_idx=j, solver=self)
         except Exception as exc:
-            # Use specific KernelEvaluationError if available, otherwise generic warning
             from .kernel_integration import KernelEvaluationError
+
             if isinstance(exc, KernelEvaluationError):
                 self._warn_once(
                     "agg_beta_failed",
@@ -405,65 +316,39 @@ class MCPBEAgg:
                     f"Aggregation kernel raised {type(exc).__name__}: {exc}. "
                     f"Treating the collision as rejected.",
                 )
-            beta_ij = 0.0
+            return 0.0
+        if not np.isfinite(b) or b <= 0.0:
+            return 0.0
+        return float(b)
 
-        if not np.isfinite(beta_ij) or beta_ij <= 0.0:
-            return -1, 0.0
+    def _accept_sizeeval(self, i: int, j: int, u_acc: float) -> bool:
+        """SIZEEVAL size-dependent acceptance.
 
-        # Step 3: collision efficiency alpha(i,j).
-        if dim == 1:
-            alpha_ij = alpha1d
+        Uses its own random draw ``u_acc``. The previous implementation reused the
+        partner-selection variate for this test, which correlated the two and was
+        documented as a known statistical defect; the two-stage sampler makes that
+        reuse impossible anyway.
+        """
+        if int(getattr(self, "SIZEEVAL", 1)) == 0:
+            return True
+
+        V = self.V_flat
+        if int(self.dim) == 1:
+            Vi, Vj = float(V[0, i]), float(V[0, j])
         else:
-            Vi0 = V0[i]
-            Vi1 = V1[i]
-            Vti = Vi0 + Vi1
-            Vj0 = V0[j]
-            Vj1 = V1[j]
-            Vtj = Vj0 + Vj1
-            if Vti <= 0.0 or Vtj <= 0.0:
-                return -1, 0.0
-            p0 = (Vi0 / Vti) * (Vj0 / Vtj)
-            p1 = (Vi0 / Vti) * (Vj1 / Vtj)
-            p2 = (Vi1 / Vti) * (Vj0 / Vtj)
-            p3 = (Vi1 / Vti) * (Vj1 / Vtj)
-            alpha_ij = float(
-                p0 * alpha4[0] + p1 * alpha4[1] + p2 * alpha4[2] + p3 * alpha4[3]
-            )
+            Vi = float(np.sum(V[: self.dim, i]))
+            Vj = float(np.sum(V[: self.dim, j]))
 
-        if alpha_ij <= 0.0:
-            return -1, 0.0
+        Vmean2 = self._mean_initial_volume_sq(self.a_tot)
+        V_target = np.sqrt(Vmean2) if Vmean2 > 0 else 1e-18
+        sigma_V = V_target * float(getattr(self, "Y_SEL", 1.06))
+        if sigma_V <= 0.0:
+            return True
 
-        beta_eff = beta_ij * alpha_ij
-
-        # Step 4: pair propensity.
-        if i == j:
-            pick_w = max(0.0, float(W[i] - 1)) * beta_eff
-        else:
-            pick_w = float(W[j]) * beta_eff
-
-        if pick_w <= 0.0:
-            return -1, 0.0
-
-        # Step 5: size-dependent acceptance (SIZEEVAL).
-        if SIZEEVAL != 0:
-            if dim == 1:
-                Vi = V0[i]
-                Vj = V0[j]
-            else:
-                Vi = V0[i] + V1[i]
-                Vj = V0[j] + V1[j]
-
-            V_target = np.sqrt(Vmean2) if Vmean2 > 0 else 1e-18
-            sigma_V = V_target * Y_SEL
-
-            size_factor = np.exp(-0.5 * ((Vi - V_target) / sigma_V) ** 2) * np.exp(
-                -0.5 * ((Vj - V_target) / sigma_V) ** 2
-            )
-
-            if u_sel > size_factor:
-                return -1, 0.0
-
-        return j, pick_w
+        size_factor = np.exp(-0.5 * ((Vi - V_target) / sigma_V) ** 2) * np.exp(
+            -0.5 * ((Vj - V_target) / sigma_V) ** 2
+        )
+        return u_acc <= size_factor
 
     def _warn_once(self, key: str, message: str) -> None:
         """Emit ``message`` as a RuntimeWarning at most once per solver."""
@@ -564,113 +449,163 @@ class MCPBEAgg:
         R = self._agg_radii(a)
         W = self.W[:a]
 
-        # delta_i = min(dW_const, W_i), zeroed where W is non-finite or <= 0.
+        # delta_i = min(dW_const, W_i)  [paper Eq. 33], zeroed where W is
+        # non-finite or non-positive. No epsilon threshold is needed: every
+        # weight-consuming path drains a particle to exactly 0 (see
+        # mcpbe_time_helper and docs/Bias_Correction_und_Gewichtsdisziplin.md).
         dW_const = float(getattr(self, "_agg_dW_const", None) or self._prepare_agg_delta_config())
         delta = buf["delta"][:a]
         np.minimum(W, dW_const, out=delta)
         np.copyto(delta, 0.0, where=~(np.isfinite(delta) & (delta > 0.0)))
         self._delta_agg[:a] = delta
 
+        # The pair-delta division 1/min(delta_i, delta_j) and the W_i prefactor
+        # are part of the kernel batch functions themselves - there is no
+        # post-hoc division by delta_i any more (that was the biased form).
         r = buf["r"][:a]
-        self._compute_raw_propensities(R, W, r)
-
-        # r_i / delta_i, guarding against delta_i == 0.
-        np.divide(r, delta, out=r, where=delta > 0.0)
-        np.copyto(r, 0.0, where=~(delta > 0.0))
+        self._compute_raw_propensities(R, W, delta, dW_const, r)
         np.maximum(r, 0.0, out=r)
 
         self._r_agg[:a] = r
         self._r_agg[a:] = 0.0
         self._delta_agg[a:] = 0.0
 
-    def _compute_raw_propensities(self, R: np.ndarray, W: np.ndarray, out: np.ndarray) -> None:
-        """Fill ``out[i] = sum_j W_j beta(i,j)`` (with the self-pair correction)."""
+    def _compute_raw_propensities(
+        self,
+        R: np.ndarray,
+        W: np.ndarray,
+        delta: np.ndarray,
+        dW_const: float,
+        out: np.ndarray,
+    ) -> None:
+        """Fill ``out[i] = R_i*``, the pair-delta corrected propensity (Eq. 36/37).
+
+        ``R_i* = W_i [ sum_{j!=i} W_j beta(i,j)/min(dW_i,dW_j)
+                     + (W_i-1) beta(i,i)/min(dW_i, W_i/2) ]``
+        """
         manager = getattr(self, "kernel_manager", None)
         kernel = getattr(manager, "agg_kernel", None) if manager is not None else None
         if kernel is None:
             raise RuntimeError("Aggregation kernel not initialized")
 
         name = getattr(kernel, "name", "")
-        mode = str(getattr(self, "agg_propensity_mode", "pairwise")).lower()
+        mode = str(getattr(self, "agg_propensity_mode", "moment")).lower()
         if mode not in PROPENSITY_MODES:
             raise ValueError(
                 f"agg_propensity_mode must be one of {PROPENSITY_MODES}, got {mode!r}"
             )
-        use_moment = mode == "moment" and name in MOMENT_KERNELS
 
-        if name == "shear_chin1998":
-            fn = rebuild_r_array_shear_moment if use_moment else _pairwise(name, out.shape[0])
-            fn(float(kernel.corr_beta), float(kernel.g), R, W, out)
-        elif name == "brownian_tsouris1995":
-            fn = rebuild_r_array_brownian_moment if use_moment else _pairwise(name, out.shape[0])
-            fn(float(kernel.corr_beta), float(kernel.kT), float(kernel.viscosity), R, W, out)
-        elif name == "constant":
-            # Already a closed form: pairwise and moment coincide.
-            rebuild_r_array_constant(float(kernel.corr_beta), W, out)
-        elif name == "sum":
-            fn = rebuild_r_array_sum_moment if use_moment else _pairwise(name, out.shape[0])
-            fn(float(kernel.corr_beta), R, W, out)
-        elif name == "liquid_bridge":
-            self._raw_propensities_liquid_bridge(kernel, R, W, out)
-        else:
-            self._raw_propensities_generic(R, W, out)
+        a = out.shape[0]
+        spec = self._compiled_kernel_spec()
 
-    def _raw_propensities_liquid_bridge(self, kernel, R, W, out) -> None:
-        """Compiled O(n^2) batch path for the liquid-bridge kernel.
+        if spec is not None:
+            kid, p0 = spec
+            if mode == "moment" and name in MOMENT_KERNELS:
+                alpha = self._alpha_scalar()
+                F, G, beta_ii, _ = separable_tables(name, kernel, R)
+                # alpha is a per-pair constant in 1D, so folding it into f_k
+                # scales every beta(i,j) - and beta(i,i) - identically.
+                rebuild_r_pairdelta_moment(
+                    np.ascontiguousarray(F * alpha),
+                    np.ascontiguousarray(G),
+                    np.ascontiguousarray(beta_ii * alpha),
+                    W, delta, dW_const, out,
+                )
+            else:
+                fn = (
+                    rebuild_r_pairdelta_pairwise
+                    if a >= PARALLEL_MIN_N
+                    else rebuild_r_pairdelta_pairwise_serial
+                )
+                fn(kid, p0, R, W, delta, dW_const, out)
+            return
 
-        The kernel is not separable in ``(i, j)``, so the quadratic loop stays -
-        but it runs compiled instead of as ``n^2`` Python calls.
+        if name == "liquid_bridge" and int(self.dim) == 1:
+            self._raw_propensities_liquid_bridge(kernel, R, W, delta, dW_const, out)
+            return
+
+        self._raw_propensities_generic(R, W, delta, dW_const, out)
+
+    def _raw_propensities_liquid_bridge(self, kernel, R, W, delta, dW_const, out) -> None:
+        """Compiled O(n^2) pair-delta path for the liquid-bridge kernel.
+
+        The Gaussian bridge factor contains a cross term ``s_i*s_j``, so the
+        kernel is not separable and the quadratic loop stays - but it runs
+        compiled instead of as ``n^2`` Python calls.
         """
         a = out.shape[0]
-        saturation = self.saturation[:a]
+        alpha = self._alpha_scalar()
         v_liq_ext = self.get_V_liquid_external()
         if v_liq_ext.shape[0] != a:  # pragma: no cover - defensive
-            v_liq_ext = np.ascontiguousarray(v_liq_ext[:a])
+            v_liq_ext = v_liq_ext[:a]
 
-        _pairwise("liquid_bridge", a)(
-            float(kernel.corr_beta),
+        fn = (
+            rebuild_r_pairdelta_liquid_bridge
+            if a >= PARALLEL_MIN_N
+            else rebuild_r_pairdelta_liquid_bridge_serial
+        )
+        fn(
+            float(kernel.corr_beta) * alpha,
             float(kernel.g),
             float(kernel.s_opt),
             float(kernel.sigma_s),
             float(kernel.alpha_liq),
-            R,
-            W,
-            np.ascontiguousarray(saturation),
+            R, W, delta, dW_const,
+            np.ascontiguousarray(self.saturation[:a]),
             np.ascontiguousarray(v_liq_ext, dtype=np.float64),
             out,
         )
 
-    def _raw_propensities_generic(self, R, W, out) -> None:
-        """Fallback for kernels without a batch implementation.
+    def _raw_propensities_generic(self, R, W, delta, dW_const, out) -> None:
+        """Fallback for kernels (or 2D setups) without a compiled batch path.
 
         Costs ``n^2`` Python-level kernel calls per event; emits a one-time
-        warning so the cost is visible rather than mysterious.
+        warning so the cost is visible rather than mysterious. Applies the same
+        pair-delta correction as the compiled paths.
         """
         a = out.shape[0]
         self._warn_once(
             "agg_generic_fallback",
             f"Aggregation kernel {getattr(self.kernel_manager.agg_kernel, 'name', '?')!r} "
-            "has no batch implementation; falling back to an O(n^2) Python loop "
-            "in _rebuild_all_propensities(). Add a JIT batch function in "
+            f"(dim={self.dim}) has no compiled batch path; falling back to an O(n^2) "
+            "Python loop in _rebuild_all_propensities(). Add a JIT batch function in "
             "wmcpbe/kernels/aggregation/jit_kernels.py to make this usable at scale.",
         )
         compute_beta = self.kernel_manager.compute_beta
-        for i_idx in range(a):
-            ri = 0.0
-            r1 = float(R[i_idx])
-            for j_idx in range(a):
-                beta_ij = compute_beta(
-                    r1,
-                    float(R[j_idx]),
-                    particle1_idx=i_idx,
-                    particle2_idx=j_idx,
-                    solver=self,
-                )
-                if i_idx == j_idx:
-                    ri += max(0.0, float(W[j_idx] - 1)) * beta_ij
+        dim = int(self.dim)
+
+        for i in range(a):
+            di = float(delta[i])
+            Wi = float(W[i])
+            if di <= 0.0 or Wi <= 0.0:
+                out[i] = 0.0
+                continue
+            r1 = float(R[i])
+            s = 0.0
+            for j in range(a):
+                if j == i:
+                    continue
+                dj = float(delta[j])
+                Wj = float(W[j])
+                if dj <= 0.0 or Wj <= 0.0:
+                    continue
+                b = self._safe_beta(compute_beta, r1, float(R[j]), i, j)
+                if dim != 1:
+                    b *= self._alpha_ccm(i, j)
                 else:
-                    ri += float(W[j_idx]) * beta_ij
-            out[i_idx] = ri
+                    b *= self._alpha_scalar()
+                if b <= 0.0:
+                    continue
+                s += Wj * b / (di if di < dj else dj)
+            if Wi > 1.0:
+                sd = min(di, 0.5 * Wi)
+                if sd > 0.0:
+                    b = self._safe_beta(compute_beta, r1, r1, i, i)
+                    b *= self._alpha_ccm(i, i) if dim != 1 else self._alpha_scalar()
+                    if b > 0.0:
+                        s += (Wi - 1.0) * b / sd
+            val = Wi * s
+            out[i] = val if val > 0.0 else 0.0
 
     # ------------------------------------------------------------------
     # Packet size
@@ -706,10 +641,15 @@ class MCPBEAgg:
         delta_j = self._update_delta_single(j, attr_name="_delta_agg", dW_const=dW_const)
 
         if i == j:
-            # A self-collision consumes 2*dW from the same packet.
-            if delta_i <= 0.0 or Wi <= 2.0 * delta_i:
+            # A self-collision consumes 2*dW physical particles from the same
+            # packet, so the effective self batch is delta_ii = min(delta_i, W_i/2)
+            # (paper Eq. 33). Capping - rather than rejecting when W_i <= 2*delta_i -
+            # lets the final event drain the particle to exactly 0: W_i/2 is exact
+            # in IEEE-754, hence 2*(W_i/2) == W_i bit for bit.
+            delta_ii = min(delta_i, 0.5 * Wi)
+            if delta_ii <= 0.0:
                 return 0.0
-            dW = min(dW, delta_i)
+            dW = min(dW, delta_ii)
         else:
             dW = min(dW, Wi, Wj)
             if delta_i > 0.0:
@@ -828,40 +768,48 @@ class MCPBEAgg:
         del new_idx  # merged particle index is not needed by the caller
 
     def _select_pair(self, a: int) -> tuple[int, int, float] | None:
-        """Draw a collision pair. Returns ``(i, j, pick_w)`` or ``None``."""
-        # 1) first partner proportional to r_i
+        """Two-stage pair draw (paper Eqs. 39/40).
+
+        Stage 1 picks ``i`` proportional to ``R_i*`` via the Fenwick sampler,
+        stage 2 picks ``j`` conditionally proportional to
+        ``W_j beta(i,j)/dW_ij``. Returns ``(i, j, pick_w)`` or ``None``.
+        """
+        # 1) primary particle proportional to R_i*
         i = self._agg_sampler.sample(self._rng)
 
         R = self._agg_radii(a)
         W = self.W[:a]
-        alpha1d, alpha4, V0, V1 = self._alpha_params(a)
+        delta = self._delta_agg[:a]
+        dW_const = float(getattr(self, "_agg_dW_const", None) or self._prepare_agg_delta_config())
 
-        SIZEEVAL = int(getattr(self, "SIZEEVAL", 1))
-        X_SEL = float(getattr(self, "X_SEL", 0.31))
-        Y_SEL = float(getattr(self, "Y_SEL", 1.06))
-        Vmean2 = self._mean_initial_volume_sq(a)
+        Wi = float(W[i]) if 0 <= i < a else 0.0
+        if Wi <= 0.0:
+            return None
+        # partner_total == R_i*/W_i, i.e. the sum the rebuild accumulated for i.
+        partner_total = float(self._r_agg[i]) / Wi
 
-        # 2) second partner proportional to W_j, plus SIZEEVAL acceptance
+        # 2) conditional partner draw
         u_sel = float(self._rng.random())
-
-        kernel = self.kernel_manager.agg_kernel
-        if getattr(kernel, "name", "") == "constant":
-            j, pick_w = pick_partner_constant_jit(
-                i, W, R, V0, V1, int(self.dim),
-                float(alpha1d), alpha4, SIZEEVAL, X_SEL, Y_SEL, Vmean2,
-                u_sel, float(getattr(kernel, "corr_beta", 1.0)),
+        spec = self._compiled_kernel_spec()
+        if spec is not None:
+            kid, p0 = spec
+            j, pick_w = pick_partner_pairdelta(
+                kid, p0, i, R, W, delta, dW_const, partner_total, u_sel
             )
         else:
             j, pick_w = self._pick_partner_kernel(
-                i, R, W, V0, V1, int(self.dim),
-                float(alpha1d), alpha4, SIZEEVAL, X_SEL, Y_SEL, Vmean2,
-                u_sel=u_sel,
+                i, R, W, delta, dW_const, partner_total, u_sel
             )
 
         if j < 0 or pick_w <= 0.0:
             return None
 
-        # 3) optional physical acceptance criterion (e.g. Stokes, Braumann 2007)
+        # 3) size-dependent acceptance (SIZEEVAL) with its own variate
+        if int(getattr(self, "SIZEEVAL", 1)) != 0:
+            if not self._accept_sizeeval(i, j, float(self._rng.random())):
+                return None
+
+        # 4) optional physical acceptance criterion (e.g. Stokes, Braumann 2007)
         acceptance = self.kernel_manager.agglomeration_acceptance_kernel
         if acceptance is not None:
             accepted = acceptance.accept_collision(
@@ -1228,18 +1176,6 @@ class MCPBEAgg:
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-def _pairwise(kernel_name: str, n: int):
-    """Pick the parallel or serial pairwise kernel for a population of size ``n``.
-
-    Numba's parallel dispatch costs tens of microseconds per call. Below
-    ``PARALLEL_MIN_N`` the O(n^2) loop finishes faster than the threads can be
-    started, so the serial twin wins; above it the parallel version does. The
-    two produce bit-identical output.
-    """
-    parallel_impl, serial_impl = _PAIRWISE_IMPLS[kernel_name]
-    return parallel_impl if n >= PARALLEL_MIN_N else serial_impl
-
-
 def _ensure_len(arr: np.ndarray | None, size: int) -> np.ndarray:
     """Return ``arr`` if it is at least ``size`` long, else a fresh zero array."""
     if arr is None or arr.shape[0] < size:
