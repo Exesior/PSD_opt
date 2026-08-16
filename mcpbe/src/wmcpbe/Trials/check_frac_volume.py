@@ -39,14 +39,14 @@ def main():
         vc_scale = nuc._Vc_reference / s.Vc
 
         before = liquid_total(s)
-        dW = nuc._distribute_one_droplet_with_dW(
+        dW, v_eff = nuc._distribute_one_droplet_with_dW(
             v_droplet=v_droplet, max_physical_droplets=frac
         )
         after = liquid_total(s)
 
         ist = after - before
         # Bei cap >= dW*vc_scale wird nicht skaliert -> volle Tropfenmenge je Partikel
-        soll = min(frac, dW * vc_scale) * v_droplet
+        soll = min(frac, dW * vc_scale) * v_droplet  # == dW*vc_scale*v_eff
         rel = abs(ist - soll) / soll if soll > 0 else 0.0
 
         # `ist` ist eine Differenz zweier grosser Summen (Gesamtfluessigkeit ~ before).

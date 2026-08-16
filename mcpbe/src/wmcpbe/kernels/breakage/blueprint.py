@@ -27,7 +27,7 @@ where:
     - f_environment: Environmental factors (viscosity, concentration)
 
 Common breakage models:
-    1. Power-law:           S(V) = P1 × G^P2 × V^(pl_v/3)
+    1. Power-law:           S(V) = P1 × G × V^P2
     2. Stress-based:        S(V) = A × exp(-(σ_crit/σ_applied)^m)
     3. Energy-based:        S(V) = k × (E_impact / E_threshold)^n
 
@@ -164,21 +164,20 @@ class ExampleBreakageKernel(BreakageKernel):
             'g': 1000.0,
             
             # Base breakage rate coefficient
-            # Units: [1/s] (if size-independent) or [m^(-pl_v)/s] (if size-dependent)
+            # Units: [1/s] (if size-independent) or [m^(-3*p2)/s] (if size-dependent)
             # Typical range: 1e-3 to 10 1/s
             'p1': 3e-2,
-            
-            # Shear exponent (dimensionless)
-            # Typical range: 0.5 - 2.0
-            # Default: 1.0 (linear with shear)
-            'p2': 1.0,
-            
+
             # Volume exponent (dimensionless)
-            # Controls size dependence: S ~ V^(pl_v/3)
-            # Typical range: 0.0 - 3.0
-            # Default: 2.0 (larger particles break faster)
-            'pl_v': 2.0,
-            
+            # Controls size dependence: S ~ V^p2
+            # Typical range: 0.0 - 2.0
+            # Default: 1.0 (larger particles break faster)
+            # NOTE: do NOT name this `pl_v` -- that name belongs to the
+            # breakage FUNCTION (fragment size distribution, BREAKFVAL).
+            # Mixing the two up is what made the rate formula diverge from
+            # the reference implementation once before.
+            'p2': 1.0,
+
             # Your custom parameter (replace with your own)
             # Description, units, range
             'your_param_here': 1.0,
@@ -200,7 +199,7 @@ class ExampleBreakageKernel(BreakageKernel):
             kernel = ExampleBreakageKernel(
                 p1=1e-2,         # Override default
                 g=500,           # Override default
-                pl_v=1.5         # Override default
+                p2=1.5           # Override default
             )
         
         Implementation pattern:
@@ -222,8 +221,7 @@ class ExampleBreakageKernel(BreakageKernel):
         self.g = float(self.params['g'])
         self.p1 = float(self.params['p1'])
         self.p2 = float(self.params['p2'])
-        self.pl_v = float(self.params['pl_v'])
-        
+
         # Cache your custom parameters
         # self.your_param = float(self.params['your_param_here'])
     
@@ -341,16 +339,16 @@ class ExampleBreakageKernel(BreakageKernel):
         
         Example Implementation (Power-Law):
             # Classic power-law breakage rate
-            # S(V) = P1 × G^P2 × V^(pl_v/3)
-            
-            rate = self.p1 * (self.g ** self.p2) * (v_particle ** (self.pl_v / 3.0))
-            
+            # S(V) = P1 × G × V^P2
+
+            rate = self.p1 * self.g * (v_particle ** self.p2)
+
             return rate
-        
+
         Example with Solver State (Porosity-Dependent):
             # Base breakage rate
-            rate = self.p1 * (self.g ** self.p2)
-            
+            rate = self.p1 * self.g * (v_particle ** self.p2)
+
             # Access porosity if available
             if solver is not None and particle_idx is not None:
                 poro = solver.porosity[particle_idx]
@@ -368,10 +366,10 @@ class ExampleBreakageKernel(BreakageKernel):
         
         # Choose ONE of these common models (or implement your own):
         
-        # Option A: Power-law (most common, legacy-compatible)
-        # S(V) = P1 × G^P2 × V^(pl_v/3)
+        # Option A: Power-law (most common, reference-compatible)
+        # S(V) = P1 × G × V^P2  -- see kernels/breakage/_base_rate.py
         # Best for: General purpose, empirical fitting
-        rate = self.p1 * (self.g ** self.p2) * (v_particle ** (self.pl_v / 3.0))
+        rate = self.p1 * self.g * (v_particle ** self.p2)
         
         # Option B: Size-independent (constant rate)
         # S(V) = constant
@@ -540,7 +538,7 @@ if __name__ == '__main__':
     
     # Test with custom parameters
     print("\n3. Testing with custom parameters...")
-    kernel_custom = ExampleBreakageKernel(p1=1e-2, g=500, pl_v=1.5)
+    kernel_custom = ExampleBreakageKernel(p1=1e-2, g=500, p2=1.5)
     rate_custom = kernel_custom.compute_rate(v)
     print(f"   S(custom) = {rate_custom:.3e} 1/s")
     

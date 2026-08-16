@@ -5,14 +5,19 @@ Breakage rate model incorporating particle strength σ as function of
 porosity and saturation, based on Rumpf's theory for granule strength.
 
 Formula:
-    S(V,poro,saturation) = P1 × (1/σ) × G^P2 × V^alpha
+    S(V,poro,saturation) = S_base(V) / σ(poro, saturation)
 
 Where:
-    - P1, P2: Empirical parameters
-    - G: Shear rate [1/s]
+    - S_base: Breakage rate from :mod:`._base_rate` (BREAKRVAL 1-4, identical
+      to pbe_core.func.jit_kernel_break.calc_break_rate_1d). For BREAKRVAL=3/4
+      this is P1 × G × V^P2.
+    - P1: Pre-factor, P2: Volume exponent
+    - G: Shear rate [1/s], enters linearly
     - V: Particle volume [m³]
-    - alpha: Size exponent (typically pl_v/3 for volume scaling)
     - σ: Particle strength [Pa], depends on porosity and saturation
+
+The 1/σ correction is a wet-granulation extension of this branch; the base
+rate S_base itself is bit-for-bit the reference formula.
 
 Particle Strength Model (Rumpf Theory, 3 Saturation Regimes):
     
@@ -63,6 +68,7 @@ Example:
 
 import numpy as np
 from ..base import BreakageKernel
+from ._base_rate import compute_base_rate, validate_rate_params
 
 # Try to import numba for JIT acceleration
 try:
@@ -125,36 +131,6 @@ def _compute_sigma_jit(poro: float, saturation: float, x_s: float,
     return sigma
 
 
-@njit(cache=True, fastmath=True)
-def _compute_base_rate_jit(v_particle: float, p1: float, p2: float, g: float,
-                            breakrval: int, pl_v: float, pl_q: float) -> float:
-    """
-    JIT-compiled base PowerLaw rate calculation.
-    """
-    if v_particle <= 0:
-        return 0.0
-    
-    if breakrval == 1:
-        rate = p1
-    elif breakrval == 2:
-        rate = p1 * (v_particle ** (1.0/3.0))
-    elif breakrval == 3:
-        rate = p1
-    elif breakrval == 4:
-        alpha = pl_v / 3.0
-        rate = p1 * (g ** p2) * (v_particle ** alpha)
-    elif breakrval == 5:
-        V_ref = 1e-18
-        rate = p1 * (g ** p2) * ((v_particle / V_ref) ** pl_q)
-    else:
-        rate = p1
-    
-    if rate < 0.0:
-        rate = 0.0
-    
-    return rate
-
-
 # =============================================================================
 # Kernel Class
 # =============================================================================
@@ -179,12 +155,11 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
         - Saturation regimes: Iveson et al., Powder Technology 2001
     
     Parameters:
-        p1: Pre-factor [1/s·m^(-3*alpha)·Pa] (default: 3e-2)
-        p2: Shear exponent (default: 1.0)
+        p1: Pre-factor [1/s·m^(-3*P2)·Pa] (default: 3e-2)
+        p2: Volume exponent (default: 1.0)
         g: Shear rate [1/s] (default: 1000)
-        breakrval: Breakage model variant (default: 4)
-                   4: Power law with pl_v
-        pl_v: Volume exponent for breakrval=4 (default: 2.0)
+        breakrval: Breakage model variant 1-4 (default: 4)
+                   4: Power law S = P1 × G × V^P2
         k: Fitting parameter dry regime [2.2-2.8] (default: 2.5)
         alpha: Fitting parameter wet regime [1.0-1.33] (default: 1.15)
         gamma: Surface tension [N/m] (default: 0.072 for water)
@@ -193,7 +168,7 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
     
     Example:
         >>> kernel = PowerLawRumpfBreakageKernel(
-        ...     p1=3e-2, p2=1.0, g=1000, breakrval=4, pl_v=2.0,
+        ...     p1=3e-2, p2=1.0, g=1000, breakrval=4,
         ...     k=2.5, alpha=1.15, gamma=0.072, delta=0.0
         ... )
     """
@@ -216,8 +191,7 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
             'p2': 1.0,            # Shear exponent
             'g': 1000.0,          # Shear rate [1/s]
             'breakrval': 4,       # Breakage model variant
-            'pl_v': 2.0,          # Volume exponent for breakrval=4
-            
+
             # Strength model parameters
             'k': 2.5,             # Fitting parameter dry [2.2-2.8]
             'alpha': 1.15,        # Fitting parameter wet [1.0-1.33]
@@ -236,8 +210,7 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
         self.p2 = float(self.params['p2'])
         self.g = float(self.params['g'])
         self.breakrval = int(self.params['breakrval'])
-        self.pl_v = float(self.params.get('pl_v', 2.0))
-        
+
         # Cache strength model values
         self.k = float(self.params['k'])
         self.alpha = float(self.params['alpha'])
@@ -267,13 +240,9 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
         if params['g'] < 0:
             raise ValueError(f"g must be non-negative, got {params['g']}")
         
-        # Validate breakrval
-        breakrval = params.get('breakrval', 4)
-        if breakrval not in (1, 2, 3, 4, 5):
-            raise ValueError(
-                f"Invalid breakrval={breakrval}. Must be one of: 1, 2, 3, 4, 5"
-            )
-        
+        # Validate breakrval and reject breakage-FUNCTION parameters
+        validate_rate_params(params, self.name)
+
         # Validate strength model parameters
         k = params.get('k', 2.5)
         if not (2.2 <= k <= 2.8):
@@ -425,10 +394,8 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
         Returns:
             base_rate: PowerLaw breakage rate [1/s]
         """
-        pl_q = getattr(self, 'pl_q', 0.5)
-        return _compute_base_rate_jit(
-            v_particle, self.p1, self.p2, self.g,
-            self.breakrval, self.pl_v, pl_q
+        return compute_base_rate(
+            v_particle, self.p1, self.p2, self.g, self.breakrval
         )
     
     def compute_rate(self, v_particle: float,
@@ -436,9 +403,9 @@ class PowerLawRumpfBreakageKernel(BreakageKernel):
                      solver = None) -> float:
         """
         Compute breakage rate with porosity/saturation-dependent strength.
-        
-        Formula: S(V) = P1 × (1/σ) × G^P2 × V^alpha
-        
+
+        Formula: S(V) = S_base(V) / σ(poro, saturation)
+
         Special cases:
         - poro = NaN (Vollkörper): Use base PowerLaw rate without σ correction
         - saturation = NaN: Treat as dry (S = 0.0)

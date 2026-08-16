@@ -684,27 +684,12 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # Check 3: Suspicious parameter combinations (warnings only)
         import warnings
         
-        # Warn when the breakage RATE exponent and the breakage FUNCTION
-        # exponent disagree. They are independent by design (see
-        # _compute_frag_num), but they used to be the same value, so a setup
-        # carried over from before the split may expect the old coupling.
-        # Surfacing the difference beats letting it act silently.
-        if hasattr(self, 'kernel_manager') and self.kernel_manager is not None:
-            km = self.kernel_manager
-            rate_v = (km.break_kernel_params or {}).get('pl_v') if km.break_kernel is not None else None
-            if rate_v is not None:
-                frag_v = getattr(self, 'break_frag_v', None)
-                frag_v = float(frag_v) if frag_v is not None else float(getattr(self, 'pl_v', 2.0))
-                if abs(float(rate_v) - frag_v) > 1e-12:
-                    warnings.warn(
-                        f"Breakage rate exponent pl_v={float(rate_v)} differs from the "
-                        f"breakage function exponent break_frag_v={frag_v}. This is "
-                        f"allowed -- the rate exponent controls how OFTEN a particle "
-                        f"breaks, break_frag_v how MANY fragments it makes. Set "
-                        f"break_frag_v explicitly if you meant them to match.",
-                        UserWarning,
-                        stacklevel=2
-                    )
+        # NOTE: The former "breakage rate exponent vs. breakage function
+        # exponent" warning is gone. `pl_v` / `pl_q` are breakage FUNCTION
+        # parameters only; the rate kernels no longer accept them at all and
+        # raise a ValueError with a migration hint if they are passed. The
+        # breakage rate's volume exponent is `p2`. There is nothing left to
+        # confuse, so there is nothing left to warn about.
 
         # Warn if recon_enable but no recon_N_max set
         if self.recon_enable and not hasattr(self, 'recon_N_max'):

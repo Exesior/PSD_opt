@@ -633,18 +633,23 @@ class NucleationHandler:
             while v_distributed < v_target and consecutive_failures < max_consecutive_failures:
                 v_remaining = v_target - v_distributed
                 n_physical_remaining = v_remaining / v_droplet
-                dW = self._distribute_one_droplet_with_dW(v_droplet, max_physical_droplets=n_physical_remaining)
-                
+                dW, v_eff = self._distribute_one_droplet_with_dW(
+                    v_droplet, max_physical_droplets=n_physical_remaining)
+
                 if dW > 0:
                     effective_dW = dW * vc_scale
-                    v_event = v_droplet * effective_dW
+                    # v_eff, nicht v_droplet: bei gedeckelten Events bekommt
+                    # jedes physikalische Partikel weniger als einen vollen
+                    # Tropfen. Mit v_droplet gerechnet wuerde hier mehr
+                    # abgebucht als real verteilt wurde.
+                    v_event = v_eff * effective_dW
                     v_distributed += v_event
-                    self._droplets_added_total += effective_dW
+                    self._droplets_added_total += v_event / v_droplet
                     self._liquid_volume_added_total += v_event
                     consecutive_failures = 0
                 else:
                     consecutive_failures += 1
-            
+
             self._liquid_remainder -= v_distributed
         
         else:
@@ -657,20 +662,22 @@ class NucleationHandler:
             # This ensures dW is capped correctly: dW <= n_droplets_exact / vc_scale
             # Without this cap, dW would be W[i]/2.0 (~46.5) and the particle would
             # receive dW × v_droplet = 46.5 × 5.236e-13 = 2.43e-11 m^3 (83x too much!)
-            dW = self._distribute_one_droplet_with_dW(
+            dW, v_eff = self._distribute_one_droplet_with_dW(
                 v_droplet=v_droplet,  # Actual droplet volume for saturation calc
                 max_physical_droplets=n_droplets_exact  # Cap: only 0.56 physical droplets!
             )
-            
+
             if dW > 0:
                 effective_dW = dW * vc_scale
-                # The distributed physical volume is: effective_dW × v_droplet
-                # With proper capping: effective_dW ≈ n_droplets_exact = 0.56
-                v_physical_distributed = effective_dW * v_droplet
-                
-                # Statistics: Add PHYSICAL droplet count
-                # effective_dW IS the number of physical droplets distributed
-                self._droplets_added_total += effective_dW
+                # Die Deckelung verkleinert die Menge PRO Partikel (v_eff),
+                # nicht dW. Die real abgegebene Fluessigkeit ist deshalb
+                # effective_dW * v_eff -- mit dem nominalen v_droplet
+                # gerechnet wurde hier frueher zu viel abgebucht, wodurch
+                # _liquid_remainder negativ wurde.
+                v_physical_distributed = effective_dW * v_eff
+
+                # Statistik in NOMINALEN Tropfen, konsistent zum Volumen
+                self._droplets_added_total += v_physical_distributed / v_droplet
                 self._liquid_volume_added_total += v_physical_distributed
                 self._liquid_remainder -= v_physical_distributed
                 
@@ -1156,13 +1163,16 @@ class NucleationHandler:
             v_remaining = v_target - v_distributed
             n_physical_remaining = v_remaining / v_droplet
             
-            dW = self._distribute_one_droplet_with_dW(v_droplet, max_physical_droplets=n_physical_remaining)
-            
+            dW, v_eff = self._distribute_one_droplet_with_dW(
+                v_droplet, max_physical_droplets=n_physical_remaining)
+
             if dW > 0:
                 effective_dW = dW * vc_scale
-                v_event = v_droplet * effective_dW
+                # v_eff statt v_droplet -- siehe _distribute_remaining_liquid:
+                # gedeckelte Events geben weniger als einen vollen Tropfen ab.
+                v_event = v_eff * effective_dW
                 v_distributed += v_event
-                self._droplets_added_total += effective_dW
+                self._droplets_added_total += v_event / v_droplet
                 self._liquid_volume_added_total += v_event
                 consecutive_failures = 0
                 
@@ -1341,9 +1351,19 @@ class NucleationHandler:
         
         Returns
         -------
-        float
-            Fuer dieses Event verbrauchtes Gewicht dW
-        
+        tuple[float, float]
+            ``(dW, v_droplet_effective)`` -- das fuer dieses Event verbrauchte
+            Gewicht und die Tropfengroesse, die dabei TATSAECHLICH abgegeben
+            wurde.
+
+            Wenn ``max_physical_droplets`` greift, wird nicht ``dW``
+            verkleinert, sondern die Menge pro Partikel (s.u.). Der Aufrufer
+            muss die abgegebene Fluessigkeit deshalb als
+            ``dW * vc_scale * v_droplet_effective`` verbuchen -- mit dem
+            NOMINALEN ``v_droplet`` gerechnet zieht er zu viel vom
+            ``_liquid_remainder`` ab, was diesen negativ werden laesst.
+            Ohne Deckelung ist ``v_droplet_effective == v_droplet``.
+
         See Also
         --------
         _perform_nucleation_agglomeration : Manuelle Agglomeration fuer V_dry-Sammlung
@@ -1352,17 +1372,17 @@ class NucleationHandler:
         """
         solver = self.solver
         a_tot = solver.a_tot
-        
+
         if a_tot < 1:
-            return 0.0
-        
+            return 0.0, 0.0
+
         # ==========================================
         # SCHRITT 1: Partikel auswaehlen
         # ==========================================
         i = self._select_particle_uniform_physical()
-        
+
         if i < 0 or i >= a_tot:
-            return 0.0
+            return 0.0, 0.0
         
         # ==========================================
         # SCHRITT 2: V_dry sammeln bis >= v_liquid
@@ -1397,14 +1417,14 @@ class NucleationHandler:
         
         # Check ob erfolgreich
         if V_dry_sum < new_liquid or i >= solver.a_tot:
-            return 0.0  # Nicht genug Feststoff gefunden
-        
+            return 0.0, 0.0  # Nicht genug Feststoff gefunden
+
         # ==========================================
         # SCHRITT 3: dW berechnen (DSMC-compliant)
         # ==========================================
         W_i = float(solver.W[i])
         if W_i <= 0:
-            return 0.0
+            return 0.0, 0.0
         
         # Effektive Batch-Groesse (Paper Gl. 33): der Event verbraucht GENAU dW,
         # deshalb raeumt der letzte Event ein Partikel exakt auf 0.0 leer und es
@@ -1431,7 +1451,7 @@ class NucleationHandler:
             if dW > max_dW_allowed:
                 v_eff = v_droplet * max_dW_allowed / dW
                 if v_eff <= 0.0:
-                    return 0.0
+                    return 0.0, 0.0
                 # new_liquid mit der kleineren Menge neu bilden. Die
                 # Aufnahmefaehigkeit wurde oben mit dem GROESSEREN v_droplet geprueft,
                 # bleibt also konservativ gueltig.
@@ -1483,8 +1503,10 @@ class NucleationHandler:
         if solver.W[i] <= 0.0:
             self._remove_particle_tracked(i)
 
-        return dW
-    
+        # `v_droplet` ist ab hier die TATSAECHLICH abgegebene Menge pro
+        # physikalischem Tropfen (durch die Deckelung oben ggf. verkleinert).
+        return dW, v_droplet
+
     def _resolve_nucleation_geometry(self, i: int, new_liquid: float,
                                       is_first_contact: bool) -> tuple:
         """

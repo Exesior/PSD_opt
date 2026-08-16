@@ -46,7 +46,7 @@ def main():
         s2.solve(maxiter=200)
         n2 = s2.nucleation
         before = float(np.sum(s2.W[: s2.a_tot]))
-        dW = n2._distribute_one_droplet_with_dW(
+        dW, v_eff = n2._distribute_one_droplet_with_dW(
             v_droplet=v_droplet, max_physical_droplets=frac
         )
         after = float(np.sum(s2.W[: s2.a_tot]))
@@ -59,7 +59,7 @@ def main():
         s2 = build(sc)
         s2.solve(maxiter=200)
         n2 = s2.nucleation
-        dW = n2._distribute_one_droplet_with_dW(
+        dW, v_eff = n2._distribute_one_droplet_with_dW(
             v_droplet=v_droplet, max_physical_droplets=frac
         )
         verdict = "VERWORFEN" if dW <= 0 else f"dW={dW:.6g}"

@@ -303,7 +303,7 @@ def test_rate_calculation():
         
         kernel = get_breakage_kernel(
             'powerlaw_rumpf',
-            p1=3e-2, p2=1.0, g=1000, breakrval=4, pl_v=2.0,
+            p1=3e-2, p2=1.0, g=1000, breakrval=4,
             k=2.5, alpha=1.15, gamma=0.072, delta=0.0, x_s=10e-6
         )
         
@@ -311,8 +311,8 @@ def test_rate_calculation():
         
         # Compute base PowerLaw rate (without σ correction)
         base_rate = kernel._compute_base_rate_powerlaw(v_particle)
-        # = p1 * g^p2 * v^(pl_v/3) = 0.03 * 1000^1 * (1e-18)^(2/3)
-        # = 0.03 * 1000 * 1e-12 = 3e-11
+        # = p1 * g * v^p2 = 0.03 * 1000 * (1e-18)^1.0
+        # = 3e-17
         
         # Test without solver (should return base rate)
         rate_no_solver = kernel.compute_rate(v_particle)
@@ -401,7 +401,7 @@ def test_sauter_diameter():
         
         kernel = get_breakage_kernel(
             'powerlaw_rumpf',
-            p1=3e-2, p2=1.0, g=1000, breakrval=4, pl_v=2.0,
+            p1=3e-2, p2=1.0, g=1000, breakrval=4,
             k=2.5, alpha=1.15, gamma=0.072, delta=0.0,
             x_s=None  # Will be computed from X0
         )
@@ -441,7 +441,7 @@ def test_sauter_diameter():
         # Test explicit x_s parameter overrides X0
         kernel_explicit = get_breakage_kernel(
             'powerlaw_rumpf',
-            p1=3e-2, p2=1.0, g=1000, breakrval=4, pl_v=2.0,
+            p1=3e-2, p2=1.0, g=1000, breakrval=4,
             k=2.5, alpha=1.15, gamma=0.072, delta=0.0,
             x_s=15e-6  # Explicit value
         )
@@ -476,7 +476,7 @@ def test_edge_cases():
         
         kernel = get_breakage_kernel(
             'powerlaw_rumpf',
-            p1=3e-2, p2=1.0, g=1000, breakrval=4, pl_v=2.0,
+            p1=3e-2, p2=1.0, g=1000, breakrval=4,
             k=2.5, alpha=1.15, gamma=0.072, delta=0.0, x_s=10e-6
         )
         
@@ -530,11 +530,11 @@ def test_edge_cases():
                       f"Expected {base_rate:.2e}, got {rate_no_attr:.2e}")
             all_passed = False
         
-        # Test different BREAKRVAL variants
-        for breakrval in [1, 2, 3, 4, 5]:
+        # Test different BREAKRVAL variants (1-4; the reference has no 5)
+        for breakrval in [1, 2, 3, 4]:
             kernel_br = get_breakage_kernel(
                 'powerlaw_rumpf',
-                p1=3e-2, p2=1.0, g=1000, breakrval=breakrval, pl_v=2.0,
+                p1=3e-2, p2=1.0, g=1000, breakrval=breakrval,
                 k=2.5, alpha=1.15, gamma=0.072, delta=0.0, x_s=10e-6
             )
             rate_br = kernel_br.compute_rate(v_particle)
@@ -544,7 +544,24 @@ def test_edge_cases():
                 print_test(f"BREAKRVAL={breakrval}", False,
                           f"Invalid rate: {rate_br}")
                 all_passed = False
-        
+
+        # breakrval=5 and the breakage FUNCTION params must be refused,
+        # not silently ignored (they used to steer the rate by mistake).
+        for bad in [{'breakrval': 5}, {'pl_v': 2.0}, {'pl_q': 1.0}]:
+            try:
+                get_breakage_kernel(
+                    'powerlaw_rumpf',
+                    p1=3e-2, p2=1.0, g=1000,
+                    k=2.5, alpha=1.15, gamma=0.072, delta=0.0, x_s=10e-6,
+                    **bad
+                )
+            except ValueError:
+                print_test(f"rejects {bad}", True)
+            else:
+                print_test(f"rejects {bad}", False, "no ValueError raised")
+                all_passed = False
+
+
     except Exception as e:
         print_test("Edge cases", False, str(e))
         all_passed = False
@@ -592,7 +609,7 @@ def main():
         print("    solver = MCPBEBase(")
         print("        break_kernel_name='powerlaw_rumpf',")
         print("        break_kernel_params={")
-        print("            'p1': 3e-2, 'p2': 1.0, 'g': 1000, 'breakrval': 4, 'pl_v': 2.0,")
+        print("            'p1': 3e-2, 'p2': 1.0, 'g': 1000, 'breakrval': 4,")
         print("            'k': 2.5, 'alpha': 1.15, 'gamma': 0.072, 'delta': 0.0")
         print("        }")
         print("    )")

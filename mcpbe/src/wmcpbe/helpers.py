@@ -241,7 +241,6 @@ def create_wet_granulation_solver(
             'p2': 1.0,
             'g': g_shear,
             'breakrval': 4,
-            'pl_v': 2.0,
             'k': 2.5,
             'alpha': 1.0,
             'gamma': 0.036,
@@ -296,7 +295,7 @@ def create_breakage_test_solver(
     n_particles: int = 500,
     particle_diameter: float = 1e-3,
     p1: float = 0.01,
-    pl_v: float = 2.0,
+    p2: float = 2.0,
     g_shear: float = 1000,
     t_total: float = 10.0,
     seed: int = 42,
@@ -318,8 +317,10 @@ def create_breakage_test_solver(
         Partikeldurchmesser [m]. Default: 1mm (groß für hohe Breakage-Rate)
     p1 : float
         Breakage rate pre-factor [1/s·m⁻³ᵅ]. Höher = mehr Breakage
-    pl_v : float
-        Volumen-Exponent. >1 bedeutet größere Partikel brechen leichter
+    p2 : float
+        Volumen-Exponent in S = P1·G·V^P2. >1 bedeutet größere Partikel
+        brechen leichter. (Hieß früher `pl_v` und war wirkungslos, weil
+        `breakrval` auf dem Default 1 = konstante Rate stand.)
     g_shear : float
         Scherrate [1/s]
     t_total : float
@@ -366,8 +367,9 @@ def create_breakage_test_solver(
         break_kernel_name='power_law',
         break_kernel_params={
             'p1': p1,
-            'pl_v': pl_v,
+            'p2': p2,
             'g': g_shear,
+            'breakrval': 4,   # S = P1 * G * V^P2 (size dependent)
         },
         maybe_double_control_volume=False,
         recon_enable=False,

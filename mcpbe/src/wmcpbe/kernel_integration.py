@@ -176,10 +176,15 @@ class KernelManager:
             )
             # Set solver attributes for backward compatibility
             # (legacy code reads CORR_BETA, G from solver, not kernel)
+            _agg_defaults = self.agg_kernel.get_default_params()
             if 'corr_beta' in self.agg_kernel_params:
                 solver.CORR_BETA = self.agg_kernel_params['corr_beta']
-            if 'g' in self.agg_kernel_params:
-                solver.G = self.agg_kernel_params['g']
+            # The aggregation kernel owns solver.G (the process shear rate).
+            # Always set it -- falling back to the kernel default keeps
+            # solver.G defined and consistent with what the kernel computes.
+            _agg_g = self.agg_kernel_params.get('g', _agg_defaults.get('g'))
+            if _agg_g is not None:
+                solver.G = float(_agg_g)
         else:
             # No aggregation kernel selected - raise error (aggregation is essential!)
             from .kernels.aggregation import list_aggregation_kernels
@@ -199,18 +204,41 @@ class KernelManager:
                 self.break_kernel_name,
                 **self.break_kernel_params
             )
-            # Set solver attributes for backward compatibility
-            solver.pl_P1 = float(self.break_kernel_params.get('p1', 3e-2))
-            solver.pl_P2 = float(self.break_kernel_params.get('p2', 1.0))
-            solver.G = float(self.break_kernel_params.get('g', 1000))
-            # NOTE: `solver.pl_v` / `solver.pl_q` are deliberately NOT written
-            # from the kernel params any more. The kernel's `pl_v` is the
-            # breakage RATE exponent (alpha = pl_v/3); the solver's `pl_v` feeds
-            # _compute_frag_num() and the fragment size CDF, i.e. the breakage
-            # FUNCTION. Copying one onto the other meant that sweeping the rate
-            # exponent silently changed the fragment count too, which made any
-            # pl_v sensitivity study uninterpretable. To steer the breakage
-            # function, set `solver.break_frag_v` / `break_frag_q` explicitly.
+            # Set solver attributes for backward compatibility.
+            # Fall back to the kernel's own defaults, not to literals, so the
+            # solver mirror cannot drift away from what the kernel computes.
+            _bk_defaults = self.break_kernel.get_default_params()
+            solver.pl_P1 = float(self.break_kernel_params.get(
+                'p1', _bk_defaults.get('p1', 3e-2)))
+            solver.pl_P2 = float(self.break_kernel_params.get(
+                'p2', _bk_defaults.get('p2', 1.0)))
+            # NOTE: `solver.G` is NOT written here. G is a property of the
+            # process (the mixer), not of the breakage model, and it is read by
+            # other physics too (e.g. mcpbe_nucleation). Letting the breakage
+            # kernel overwrite it meant the nucleation collision velocity
+            # silently followed the breakage kernel's `g`. The aggregation
+            # kernel owns `solver.G`; a disagreeing breakage `g` is surfaced as
+            # a warning below instead of being applied behind the scenes.
+            _break_g = self.break_kernel_params.get(
+                'g', _bk_defaults.get('g'))
+            _solver_g = getattr(solver, 'G', None)
+            if (_break_g is not None and _solver_g is not None
+                    and abs(float(_break_g) - float(_solver_g)) > 1e-12):
+                import warnings
+                warnings.warn(
+                    f"Breakage kernel shear rate g={float(_break_g)} differs "
+                    f"from the aggregation/solver shear rate G={float(_solver_g)}. "
+                    f"Both describe the same mixer. The breakage rate uses its "
+                    f"own g; solver.G (used e.g. by nucleation) is left at the "
+                    f"aggregation value. Set both explicitly if they should match.",
+                    UserWarning,
+                    stacklevel=2
+                )
+            # NOTE: `solver.pl_v` / `solver.pl_q` are not written from the
+            # kernel params either -- they belong to the breakage FUNCTION
+            # (fragment size distribution) and the rate kernels no longer
+            # accept them at all. To steer the breakage function, set
+            # `solver.break_frag_v` / `break_frag_q` explicitly.
         else:
             # No breakage kernel selected - disable breakage
             # IMPORTANT: Keep pl_v, pl_q at valid defaults for _compute_frag_num()!
@@ -220,7 +248,9 @@ class KernelManager:
             solver.pl_P2 = 0.0
             solver.pl_v = 2.0   # Default value (required by _compute_frag_num)
             solver.pl_q = 1.0   # Default value (required by _compute_frag_num)
-            solver.G = 0.0
+            # solver.G is NOT reset to 0.0 here: it is the process shear rate
+            # owned by the aggregation kernel and read by other physics
+            # (nucleation). Disabling breakage must not silently zero it.
         
         # ==========================================
         # Porosity Growth Kernel

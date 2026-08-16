@@ -135,7 +135,7 @@ def _build_minimal_solver():
         agg_kernel_name='constant',
         agg_kernel_params={'beta0': 0.0},
         break_kernel_name='power_law',
-        break_kernel_params={'p1': 1.0, 'pl_v': 1.0, 'g': 1000.0},
+        break_kernel_params={'p1': 1.0, 'p2': 1.0, 'g': 1000.0, 'breakrval': 4},
         porosity_growth_kernel_name='volume_mixing',
         porosity_growth_kernel_params={},
         liq_internalisation_agglomeration_kernel_name='liq_internalisation_agglomeration',

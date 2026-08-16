@@ -52,100 +52,44 @@ class TestConfig:
     SEED = 42
     
     # Time settings
-    T_TOTAL = 10.0      # Total simulation time [s] - EXTENDED RUN
+    T_TOTAL = 20.0      # Total simulation time [s] - EXTENDED RUN
     T_WRITE = 0.2       # Output interval [s]
     
     # Particle properties (initial)
-    PARTICLE_DIAMETER = 700e-6        # 500 µm
-    PARTICLE_DENSITY = 2500.0         # kg/m³ (solid material)
-    INITIAL_POROSITY = 0.4            # 40% void fraction
+    PARTICLE_DIAMETER = 700e-6            # 700 µm
+    PARTICLE_DENSITY = 2500.0             # kg/m³ (solid material)
+    INITIAL_POROSITY = 0.0                # 80% void fraction
     
     # Droplet properties
-    DROPLET_DIAMETER = 200e-6         # 100 µm
-    DROPLET_DENSITY = 1000.0          # kg/m³ (water)
+    DROPLET_DIAMETER = 100e-6             # 200 µm
+    DROPLET_DENSITY = 1000.0              # kg/m³ (water)
     
     # Process parameters
-    VOLUMETRIC_FLOW_RATE = 1e-8       # m³/s
-    NUCLEATION_DURATION = 3.0         # s
+    VOLUMETRIC_FLOW_RATE = 3e-8       # m³/s
+    NUCLEATION_DURATION = 10.0         # s
     AGG_COEFFICIENT = 1e-4            # Constant kernel coefficient [m³/s] - HIGH for testing
-    BATCH_SIZE = 250                   # Wie viele Tropfen werden identisch verteilt?   
+    BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?   
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True
-    PL_P1 = 5e2                       # Pre-factor [1/s·Pa·m^(-3*alpha)]
-    PL_P2 = 1.0                       # Shear exponent
-    G = 1000.0                        # Shear rate [1/s]
+    PL_P1 = 400                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
+    PL_P2 = 1.0                       # Volume exponent in S = P1*G*V^P2
+    G = 5000.0                        # Shear rate [1/s]
     BREAKRVAL = 4                     # Volume-based power law
-    PL_V = 2.0                        # Volume exponent
-    # Rumpf strength parameters - REDUCED for higher breakage rates
+    # Rumpf strength parameters
     RUMPF_K = 2.5                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
-    RUMPF_ALPHA = 1.0                 # Fitting parameter wet [1.0-1.33] - MIN VALUE
-    RUMPF_GAMMA = 0.072               # Surface tension [N/m] - REDUCED (surfactant)
-    RUMPF_DELTA = 0.0                 # Contact angle [rad] (perfect wetting)
-    
-    # Compression parameters
-    COMPRESSION_ENABLED = True
-    COMPRESSION_RATE = 0.02           # Porosity decay rate [1/s]
-    MIN_POROSITY = 0.15               # Minimum achievable porosity
-    
-    # Liquid internalization parameters
-    LIQ_INTERN_ENABLED = True
-    LIQ_INTERN_RATE = 1e8             # Rate constant [1/(m³·s)]
-    
-    # Liquid internalization during agglomeration
-    LIQ_INTERN_AGG_ENABLED = True
-    
-    # Agglomeration acceptance (Stokes criterion)
-    STOKES_ENABLED = True
-    BINDER_VISCOSITY = 0.1            # Pa·s
-    COLLISION_VELOCITY = 0.5          # m/s
-    H_A = 500e-9                      # m (half-distance of closest approach)
-    
-    # Numerical settings
-    INITIAL_PARTICLES = 1000          # Computational particles
-    INITIAL_WEIGHT = 5000.0             # Weight per particle
-    CONTROL_VOLUME = 0.5              # m³ # Seed for reproducibility
-    SEED = 42
-    
-    # Time settings
-    T_TOTAL = 10.0      # Total simulation time [s] - EXTENDED RUN
-    T_WRITE = 0.2       # Output interval [s]
-    
-    # Particle properties (initial)
-    PARTICLE_DIAMETER = 500e-6        # 500 µm
-    PARTICLE_DENSITY = 2500.0         # kg/m³ (solid material)
-    INITIAL_POROSITY = 0.4            # 40% void fraction
-    
-    # Droplet properties
-    DROPLET_DIAMETER = 100e-6         # 100 µm
-    DROPLET_DENSITY = 1000.0          # kg/m³ (water)
-    
-    # Process parameters
-    VOLUMETRIC_FLOW_RATE = 1e-10      # m³/s
-    NUCLEATION_DURATION = 3.0         # s
-    AGG_COEFFICIENT = 1e-4            # Constant kernel coefficient [m³/s] - HIGH for testing
-    
-    # Breakage parameters (PowerLaw-Rumpf)
-    BREAKAGE_ENABLED = True
-    PL_P1 = 5e5                       # Pre-factor [1/s·Pa·m^(-3*alpha)]
-    PL_P2 = 1.0                       # Shear exponent
-    G = 1000.0                        # Shear rate [1/s]
-    BREAKRVAL = 4                     # Volume-based power law
-    PL_V = 2.0                        # Volume exponent
-    # Rumpf strength parameters - REDUCED for higher breakage rates
-    RUMPF_K = 2.2                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
     RUMPF_ALPHA = 1.0                 # Fitting parameter wet [1.0-1.33] - MIN VALUE
     RUMPF_GAMMA = 0.036               # Surface tension [N/m] - REDUCED (surfactant)
     RUMPF_DELTA = 0.0                 # Contact angle [rad] (perfect wetting)
     
     # Compression parameters
     COMPRESSION_ENABLED = True
-    COMPRESSION_RATE = 0.02           # Porosity decay rate [1/s]
-    MIN_POROSITY = 0.15               # Minimum achievable porosity
+    COMPRESSION_RATE = 0.02             # Porosity decay rate [1/s]
+    MIN_POROSITY = 0.2                # Minimum achievable porosity
     
     # Liquid internalization parameters
     LIQ_INTERN_ENABLED = True
-    LIQ_INTERN_RATE = 1e8             # Rate constant [1/(m³·s)]
+    LIQ_INTERN_RATE = 1e-12             # Rate constant [1/(m³·s)]
     
     # Liquid internalization during agglomeration
     LIQ_INTERN_AGG_ENABLED = True
@@ -153,13 +97,18 @@ class TestConfig:
     # Agglomeration acceptance (Stokes criterion)
     STOKES_ENABLED = True
     BINDER_VISCOSITY = 0.1            # Pa·s
-    COLLISION_VELOCITY = 0.5          # m/s
+    COLLISION_VELOCITY = 0.01          # m/s
     H_A = 500e-9                      # m (half-distance of closest approach)
     
     # Numerical settings
-    INITIAL_PARTICLES = 1000          # Computational particles
-    INITIAL_WEIGHT = 50.0             # Weight per particle
-    CONTROL_VOLUME = 0.5              # m³
+    INITIAL_PARTICLES = 2000          # Computational particles
+    INITIAL_WEIGHT = 400             # Weight per particle
+    CONTROL_VOLUME = 1               # m³ 
+    
+    # Merger configuration
+    MERGER_TOLERANCE = 1e-4               # Relative tolerance for matching (0.0001%)
+    USE_HASH_INDEX = True    
+    
 
 
 # =============================================================================
@@ -249,7 +198,6 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print(f"  P2:                 {cfg.PL_P2}")
     print(f"  G:                  {cfg.G:.1f} 1/s")
     print(f"  BREAKRVAL:          {cfg.BREAKRVAL}")
-    print(f"  pl_v:               {cfg.PL_V}")
     print(f"  Rumpf k:            {cfg.RUMPF_K}")
     print(f"  Rumpf alpha:        {cfg.RUMPF_ALPHA}")
     print(f"  Gamma:              {cfg.RUMPF_GAMMA:.3f} N/m")
@@ -295,9 +243,10 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print("  - Agg. Acceptance: stokes_krit")
     print("  - Breakage: powerlaw_rumpf (porosity/saturation-dependent strength)")
     print("  - Porosity Growth: cone_model")
-    print("  - Compression: exponential_decay")
+    print("  - Porosity Compression: porosity_compression kernel")
     print("  - Liq. Internalization: continuous")
     print("  - Liq. Internalization (Agg): braumann_2007")
+    print("  - Propensity mode: moment (O(n) acceleration)")
     
     solver = MCPBESolver(
         dim=1,
@@ -307,9 +256,9 @@ def run_comprehensive_test() -> Dict[str, Any]:
         init=True,
         rng=rng,
         # Aggregation kernel
-        agg_kernel_name='constant',
-        agg_kernel_params={'corr_beta': cfg.AGG_COEFFICIENT},
-        # Agglomeration acceptance kernel (NEW)
+        agg_kernel_name='shear_chin1998',
+        agg_kernel_params={'corr_beta': cfg.AGG_COEFFICIENT,'g':cfg.G},
+        # Agglomeration acceptance kernel
         agg_acceptance_kernel_name='stokes_krit',
         agg_acceptance_kernel_params={
             'U_coll': cfg.COLLISION_VELOCITY,
@@ -325,7 +274,6 @@ def run_comprehensive_test() -> Dict[str, Any]:
             'p2': cfg.PL_P2,
             'g': cfg.G,
             'breakrval': cfg.BREAKRVAL,
-            'pl_v': cfg.PL_V,
             'k': cfg.RUMPF_K,
             'alpha': cfg.RUMPF_ALPHA,
             'gamma': cfg.RUMPF_GAMMA,
@@ -335,14 +283,8 @@ def run_comprehensive_test() -> Dict[str, Any]:
         # Porosity growth kernel
         porosity_growth_kernel_name='cone_model',
         porosity_growth_kernel_params={},
-        # Compression kernel
-        compression_kernel_name='exponential_decay',
-        compression_kernel_params={
-            'rate': cfg.COMPRESSION_RATE,
-            'min_porosity': cfg.MIN_POROSITY,
-        },
-        # Continuous processes kernels (NEW)
-        porosity_compression_kernel_name='exponential_decay',
+        # Continuous processes kernels (compression + liquid internalization)
+        porosity_compression_kernel_name='porosity_compression',
         porosity_compression_kernel_params={
             'rate': cfg.COMPRESSION_RATE,
             'min_porosity': cfg.MIN_POROSITY,
@@ -351,10 +293,14 @@ def run_comprehensive_test() -> Dict[str, Any]:
         liquid_internalization_kernel_params={
             'k_intern': cfg.LIQ_INTERN_RATE,
         },
-        # Liquid internalization during agglomeration (event-based, NEW)
-        liq_internalisation_agglomeration_kernel_name='braumann_2007',
+        # Liquid internalization during agglomeration (event-based)
+        liq_internalisation_agglomeration_kernel_name='liq_internalisation_agglomeration',
         liq_internalisation_agglomeration_kernel_params={},
     )
+    solver.mcpbe_debug = False 
+    # Enable moment-based propensity calculation for O(n) acceleration
+    # (instead of default O(n²) pairwise evaluation)
+    solver.agg_propensity_mode = "moment"
     
     # Configure process type
     solver.process_type = "mix"  # Agglomeration + Breakage
@@ -386,20 +332,16 @@ def run_comprehensive_test() -> Dict[str, Any]:
     solver.saturation[:solver.a_tot] = 0.0
     
     # Calculate initial solid mass (before any physics)
-    # Solid volume per particle = V_dry × (1 - porosity)
-    # Solid mass = solid_volume × density × weight
-    v_dry_init = solver.V_flat[-1, :solver.a_tot]
-    porosity_init = solver.porosity[:solver.a_tot]
-    weights_init = solver.W[:solver.a_tot]
+    v_dry = solver.V_flat[-1, :solver.a_tot]
+    porosity = solver.porosity[:solver.a_tot]
+    weights = solver.W[:solver.a_tot]
     
-    # For Vollkörper (NaN porosity): V_solid = V_dry
-    # For porous particles: V_solid = V_dry × (1 - porosity)
-    valid_poro_init = ~np.isnan(porosity_init)
-    v_solid_init = np.zeros_like(v_dry_init)
-    v_solid_init[valid_poro_init] = v_dry_init[valid_poro_init] * (1.0 - porosity_init[valid_poro_init])
-    v_solid_init[~valid_poro_init] = v_dry_init[~valid_poro_init]  # Vollkörper
+    valid_poro = ~np.isnan(porosity)
+    v_solid = np.zeros_like(v_dry)
+    v_solid[valid_poro] = v_dry[valid_poro] * (1.0 - porosity[valid_poro])
+    v_solid[~valid_poro] = v_dry[~valid_poro]  # Vollkörper
     
-    initial_solid_volume = np.sum(v_solid_init * weights_init)
+    initial_solid_volume = np.sum(v_solid * weights)
     initial_solid_mass = initial_solid_volume * cfg.PARTICLE_DENSITY
     
     print(f"  a_tot:      {solver.a_tot}")
@@ -423,12 +365,15 @@ def run_comprehensive_test() -> Dict[str, Any]:
         batch_size = cfg.BATCH_SIZE,
     )
     
-    # Configure compression
-    if cfg.COMPRESSION_ENABLED:
-        print("Configuring compression...")
-        solver.create_compression_handler(
+    # Configure continuous processes (liquid internalization + compression)
+    # Note: Compression is now handled here, NOT via create_compression_handler()
+    if cfg.LIQ_INTERN_ENABLED or cfg.COMPRESSION_ENABLED:
+        print("Configuring continuous processes...")
+        solver.create_continuous_processes_handler(
             enabled=True,
-            rate=cfg.COMPRESSION_RATE,
+            k_int=cfg.LIQ_INTERN_RATE if cfg.LIQ_INTERN_ENABLED else 0.0,
+            compression_enabled=cfg.COMPRESSION_ENABLED,
+            compression_rate=cfg.COMPRESSION_RATE,
             min_porosity=cfg.MIN_POROSITY,
         )
     
@@ -601,8 +546,16 @@ def run_comprehensive_test() -> Dict[str, Any]:
     # Check breakage occurred (if enabled)
     breakage_ok = break_events > 0 if cfg.BREAKAGE_ENABLED else True
     
-    # Check compression occurred (porosity should decrease)
-    comp_ok = porosity_mean < cfg.INITIAL_POROSITY if cfg.COMPRESSION_ENABLED else True
+    # Check compression occurred: porosity must have CHANGED, not necessarily
+    # decreased. Der alte Check verlangte porosity_mean < INITIAL_POROSITY. Das
+    # war nie ein Kompressions-Test: er war nur erfuellt, solange die Nucleation
+    # die Porositaet auf 0 setzte und den Mittelwert nach unten riss. Seit die
+    # Porositaet erhalten bleibt, konkurrieren zwei echte Effekte -- Kompression
+    # zieht eps mit `rate` Richtung MIN_POROSITY, cone_model schiebt bei jeder
+    # Agglomeration Porenvolumen nach -- und der Mittelwert darf in beide
+    # Richtungen laufen.
+    poro_delta = abs(porosity_mean - cfg.INITIAL_POROSITY)
+    comp_ok = poro_delta > 1e-6 if cfg.COMPRESSION_ENABLED else True
     
     # Summary
     all_ok = liquid_ok and droplet_ok and solid_ok and events_ok and breakage_ok and comp_ok
@@ -616,7 +569,7 @@ def run_comprehensive_test() -> Dict[str, Any]:
     if cfg.BREAKAGE_ENABLED:
         print(f"  {'Breakage active:':<25} {'✓ PASS' if breakage_ok else '✗ FAIL'} ({break_events:,.0f} events)")
     if cfg.COMPRESSION_ENABLED:
-        print(f"  {'Compression active:':<25} {'✓ PASS' if comp_ok else '✗ FAIL'} (Δporo = {cfg.INITIAL_POROSITY - porosity_mean:.3f})")
+        print(f"  {'Porosity evolved:':<25} {'✓ PASS' if comp_ok else '✗ FAIL'} (|Δporo| = {poro_delta:.3f}, {cfg.INITIAL_POROSITY:.3f} → {porosity_mean:.3f})")
     
     print(f"\n{'OVERALL:':<25} {'✓ ALL TESTS PASSED' if all_ok else '✗ SOME TESTS FAILED'}")
     

@@ -64,8 +64,17 @@ kernel = get_aggregation_kernel('liquid_bridge',
 
 | Kernel | Formel | Parameter | Flüssigkeit? | Porosität? |
 |--------|--------|-----------|--------------|------------|
-| **power_law** (Standard) | `S = P1 × G^P2 × V^(pl_v/3)` | `p1`, `p2`, `g`, `breakrval`, `pl_v`, `pl_q` | ❌ | ❌ |
-| **powerlaw_rumpf** ⭐ | `S = P1 × (1/σ) × G^P2 × V^alpha` | `p1`, `p2`, `g`, `breakrval`, `pl_v`, `k`, `alpha`, `gamma`, `delta`, `x_s` | ✅ **JA!** | ✅ **JA!** |
+| **power_law** (Standard) | `S = P1 × G × V^P2` | `p1`, `p2`, `g`, `breakrval` | ❌ | ❌ |
+| **powerlaw_rumpf** ⭐ | `S = (P1 × G × V^P2) / σ` | `p1`, `p2`, `g`, `breakrval`, `k`, `alpha`, `gamma`, `delta`, `x_s` | ✅ **JA!** | ✅ **JA!** |
+
+> **Achtung, geänderte Bedeutung von `P2`.** Bis 15.08.2026 rechneten beide Kernel
+> `S = P1 × G^P2 × V^(pl_v/3)` — `P2` war der *Scher*-Exponent und ein separates `pl_v`
+> der Volumen-Exponent. Das war eine Verwechslung mit `BREAKFVAL` (dort heißen die
+> Parameter der *Fragmentverteilung* tatsächlich `pl_v`/`pl_q`). Jetzt gilt wieder die
+> Referenzformel: **`P2` ist der Volumen-Exponent, `G` geht linear ein.** `pl_v`/`pl_q`
+> werden von den Ratenkerneln **abgelehnt** (`ValueError` mit Migrationshinweis);
+> die Fragmentverteilung steuerst du über `solver.break_frag_v` / `break_frag_q`.
+> Alte `P1`-Kalibrierungen sind dadurch ungültig, s. `docs/Breakage_Kernel_Formula_Divergenz.md`.
 
 **Hinweis:** `stress_based` wurde entfernt (nicht verwendet).
 
@@ -75,20 +84,18 @@ kernel = get_aggregation_kernel('liquid_bridge',
 ```python
 kernel = get_breakage_kernel('power_law',
     p1=3e-2,          # = pl_P1 in Legacy
-    p2=1.0,           # = pl_P2 in Legacy
+    p2=1.0,           # = pl_P2 in Legacy (VOLUMEN-Exponent)
     g=1000,           # = G in Legacy
-    breakrval=1,      # Modell-Variante (1-5)
-    pl_v=2.0,         # Volumen-Exponent (für BREAKRVAL=4)
-    pl_q=1.0          # ⚠️ MUSS 1.0 sein für BREAKFVAL=3!
+    breakrval=1,      # Modell-Variante (1-4)
 )
 ```
-- **BREAKRVAL-Varianten**:
+- **BREAKRVAL-Varianten** (identisch zu `pbe_core.func.jit_kernel_break.calc_break_rate_1d`):
   - `1`: Konstant (`S = P1`)
-  - `2`: Linear im Durchmesser (`S = P1 × V^(1/3)`)
-  - `3`: 2D-only (in 1D wie 1)
-  - `4`: Volumen-basiert (`S = P1 × G^P2 × V^(pl_v/3)`)
-  - `5`: Modifiziert (`S = P1 × G^P2 × (V/V_ref)^pl_q`)
-- **WARNUNG**: `pl_q ≠ 1.0` bei BREAKFVAL=3 führt zu NaN in CDF!
+  - `2`: Linear im Volumen (`S = P1 × V`)
+  - `3`: Potenzgesetz Pandy & Spielmann (`S = P1 × G × V^P2`)
+  - `4`: identisch zu `3` in 1D
+- **`breakrval=5` existiert nicht** und wird abgelehnt — der Zweig war eine
+  Fehlübernahme aus dem 5-wertigen `BREAKFVAL`-Schalter.
 
 #### `stress_based` (Physikalisch fundiert) ⭐
 ```python

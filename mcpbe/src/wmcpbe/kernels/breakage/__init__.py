@@ -2,7 +2,7 @@
 Breakage Kernels for WMCPBE Solver.
 
 Available kernels:
-    - power_law: Power-law breakage rate (BREAKRVAL=1,2,4,5)
+    - power_law: Power-law breakage rate (BREAKRVAL=1,2,3,4)
     - powerlaw_rumpf: Rumpf theory with porosity/saturation strength
 
 Usage:

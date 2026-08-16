@@ -122,9 +122,12 @@ def _attach_granulation_handlers(solver: MCPBESolver) -> None:
 SHEAR = {"corr_beta": 1e-3, "g": 1000.0}
 # breakrval=1 -> constant single-particle breakage rate S = p1. Small p1 keeps
 # the event rate in a range where the run stays inside its event budget without
-# the time step collapsing. Volume-dependent variants (breakrval=4/5) are
+# the time step collapsing. Volume-dependent variants (breakrval=3/4) are
 # covered by the unit tests, not by the benchmark.
-POWER_LAW = {"p1": 1e-2, "p2": 1.0, "g": 1000.0, "breakrval": 1, "pl_v": 2.0, "pl_q": 1.0}
+# NOTE: pl_v / pl_q are breakage FUNCTION parameters (fragment size
+# distribution) and are rejected by the rate kernels -- the rate's volume
+# exponent is p2. See kernels/breakage/_base_rate.py.
+POWER_LAW = {"p1": 1e-2, "p2": 1.0, "g": 1000.0, "breakrval": 1}
 # BREAKFVAL selects the fragment-count model in _compute_frag_num(); pin it so
 # scenarios do not silently inherit the BaseSolver default.
 BREAK_ATTRS = {"break_dW_max": 50.0, "BREAKFVAL": 2}

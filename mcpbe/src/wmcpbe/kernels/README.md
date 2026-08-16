@@ -74,7 +74,7 @@ solver = MCPBESolver(
     agg_kernel_name='shear_chin1998',
     agg_kernel_params={'corr_beta': 1e-3, 'g': 1000},
     break_kernel_name='power_law',
-    break_kernel_params={'p1': 0.01, 'pl_v': 2.0},
+    break_kernel_params={'p1': 0.01, 'p2': 1.0, 'breakrval': 4},
 )
 ```
 
@@ -214,7 +214,7 @@ agg_kernel_params={
 
 **Formel:**
 ```
-Γ(V) = p1 × V^pl_v × G^p2
+Γ(V) = p1 × G × V^p2
 ```
 
 **Parameter:**
@@ -223,14 +223,13 @@ agg_kernel_params={
 | `p1` | 1/s·m⁻³ᵅ | Pre-factor | 1e-4 bis 1e-1 |
 | `p2` | - | Shear-Exponent | 1.0 bis 3.0 |
 | `g` | 1/s | Scherrate | 100 bis 5000 |
-| `pl_v` | - | Volumen-Exponent | 0.0 bis 2.0 |
+| `p2` | - | Volumen-Exponent | 0.0 bis 2.0 |
 
 **Beispiel:**
 ```python
 break_kernel_name='power_law',
 break_kernel_params={
     'p1': 0.01,
-    'pl_v': 2.0,
     'g': 1000,
 }
 ```
@@ -269,7 +268,7 @@ break_kernel_params={
 
 **Formel:**
 ```
-Γ(V) = p1 × V^pl_v × G^p2 × f_strength(poro, sat)
+Γ(V) = p1 × G × V^p2 / sigma(poro, sat)
 
 f_strength = k × (1 - α × sat)^γ / (1 + δ × poro)
 ```
@@ -280,8 +279,8 @@ f_strength = k × (1 - α × sat)^γ / (1 + δ × poro)
 | `p1` | 1/s·Pa·m⁻³ᵅ | Pre-factor | 0.1 bis 10 |
 | `p2` | - | Shear-Exponent | 0.5 bis 2.0 |
 | `g` | 1/s | Scherrate | 100 bis 5000 |
-| `breakrval` | - | Modellvariante (1-5) | 4 (empfohlen) |
-| `pl_v` | - | Volumen-Exponent | 1.0 bis 3.0 |
+| `breakrval` | - | Modellvariante (1-4) | 4 (empfohlen) |
+| `p2` | - | Volumen-Exponent | 0.5 bis 2.0 |
 | `k` | - | Rumpf k (trocken) | 2.2 bis 2.8 |
 | `alpha` | - | Rumpf α (nass) | 1.0 bis 1.33 |
 | `gamma` | N/m | Oberflächenspannung | 0.03 bis 0.07 |
@@ -296,7 +295,6 @@ break_kernel_params={
     'p2': 1.0,
     'g': 1000,
     'breakrval': 4,
-    'pl_v': 2.0,
     'k': 2.5,
     'alpha': 1.0,
     'gamma': 0.036,
@@ -622,8 +620,7 @@ solver = MCPBESolver(
         'p2': 1.0,
         'g': 1000,
         'breakrval': 4,
-        'pl_v': 2.0,
-        'k': 2.5,
+            'k': 2.5,
         'alpha': 1.0,
         'gamma': 0.036,
         'delta': 0.0,

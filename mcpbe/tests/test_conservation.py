@@ -11,7 +11,7 @@ non-porous primary particles (``porosity`` is NaN).
 Both quantities are *extensive*: they carry the weight ``W``. Everything stored
 in the state arrays is *intensive* (per physical particle), which is the single
 most common source of conservation bugs in this code base - see
-``docs/REFACTORING_FINDINGS.md``.
+``docs/old/REFACTORING_FINDINGS.md``.
 
 Run standalone for a readable report::
 
@@ -351,7 +351,7 @@ def _report() -> int:
         "\n'components' compares sum(W*sum(V_flat[:dim])) against sum(W*V_dry*(1-poro)).\n"
         "'liquid drift' compares sum(W*liquid_volume) against initial + nucleation-reported input;\n"
         "a non-zero value there is a nucleation accounting issue, not a solver leak "
-        "(see docs/REFACTORING_FINDINGS.md, F-03)."
+        "(see docs/old/REFACTORING_FINDINGS.md, F-03)."
     )
     return 1 if failures else 0
 
