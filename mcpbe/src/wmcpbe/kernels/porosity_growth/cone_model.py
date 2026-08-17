@@ -31,6 +31,24 @@ Geometry:
         V_pill = (10/3) × π × r³
         ΔV = (2/3) × π × r³  > 0
 
+Layering (stark ungleiche Partikel):
+    Die Kegelpille ist nur bei ähnlichen Radien eine echte Hülle beider Kugeln.
+    Bei ungleichen Radien schneidet der gerade Kegelmantel in die große Kugel
+    hinein und ΔV wird negativ (positiv nur für r_j/r_i > (3-√5)/2 ≈ 0.381966).
+
+    Dort greift stattdessen ein Layering-Modell: das kleine Partikel sitzt auf
+    der lokal ebenen Oberfläche des großen, der neue Porenraum ist der
+    umschreibende Zylinder abzüglich der Halbkugel darin:
+
+        ΔV_layering = π × r_min³ - (2/3) × π × r_min³ = (1/3) × π × r_min³
+
+    Verwendet wird ΔV = max(ΔV_kegelpille, ΔV_layering); der Übergang liegt bei
+    r_j/r_i = 0.403032 und ist stetig.
+
+    LAYERING ist die Anlagerung feiner Partikel an ein deutlich größeres
+    Granulat -- ein eigenständiger, wichtiger Wachstumsmechanismus der
+    Granulation neben Nukleation, Koaleszenz und Bruch.
+
 Parameters:
     k_agg: Shape correction factor für Agglomeration [dimensionless]
            Skaliert ΔV vor Addition zum Porenvolumen.
@@ -127,16 +145,37 @@ class ConeModelKernel(PorosityGrowthKernel):
         # Result: poros < 0.5 (pore loss from new surface)
     """
     
+    #: Upper bound on porosity. Kept identical to `poro_max` of the
+    #: `powerlaw_rumpf` breakage kernel so that the two never disagree about
+    #: where the physically meaningful range ends.
+    PORO_MAX = 0.9999
+
     @property
     def name(self) -> str:
         return 'cone_model'
-    
+
     def get_default_params(self) -> dict:
         return {
-            'k_agg': 1.0,       # Shape correction for agglomeration 
+            'k_agg': 1.0,       # Shape correction for agglomeration
             'k_break': 1.0,     # Shape correction for breakage (smaller due to n-1 cones)
         }
-    
+
+    def get_optional_params(self) -> list:
+        """Keys that are honoured when present but have no default.
+
+        Both are read via ``in self.params`` / ``.get()`` rather than from
+        `get_default_params`, because *absent* is a meaningful state here:
+
+        - ``default_porosity``: seeds a nucleation porosity. Without it,
+          `compute_nucleation_porosity` returns a poreless particle (0.0) and
+          porosity arises purely geometrically at contact.
+        - ``liquid_split_ratio``: read by `mcpbe_nucleation._get_liquid_split_
+          ratio` for the internal/external split of a fresh droplet; only
+          reachable when no liquid_internalization kernel is active.
+        """
+        return ['default_porosity', 'liquid_split_ratio']
+
+
     def __init__(self, **params):
         defaults = self.get_default_params()
         defaults.update(params)
@@ -210,29 +249,78 @@ class ConeModelKernel(PorosityGrowthKernel):
         
         return V_cone + V_hemi
     
+    @staticmethod
+    def _delta_volume_layering(r_min: float) -> float:
+        """ΔV for a small particle deposited on a much larger one (LAYERING).
+
+        Geometry: the smaller sphere rests on a plane -- the surface of the far
+        larger partner, which is locally flat at this size ratio. The newly
+        enclosed void is the upright cylinder that circumscribes it (height
+        r_min, radius r_min) minus the hemisphere sitting inside::
+
+            V_cyl  = π × r_min³
+            V_hemi = (2/3) × π × r_min³
+            ΔV     = (1/3) × π × r_min³
+
+        NOTE: this term represents **layering** -- the deposition of fines onto
+        a much larger granule. Layering is a growth mechanism of granulation in
+        its own right (alongside nucleation, coalescence and breakage) and is
+        geometrically different from the coalescence of two comparably sized
+        particles that the cone-pill model describes. Which of the two applies
+        is decided by size ratio alone, see :meth:`_delta_volume_pair`.
+
+        Args:
+            r_min: Radius of the SMALLER sphere [m]
+
+        Returns:
+            ΔV: Enclosed void from layering [m³], ≥ 0
+        """
+        return (1.0 / 3.0) * np.pi * r_min ** 3
+
     def _delta_volume_pair(self, Vi: float, Vj: float) -> float:
         """
         Calculate ΔV for a pair of contacting spheres.
-        
-        ΔV = V_pill - (Vi + Vj)
-        
-        For equal spheres (ri = rj = r):
-            ΔV = (2/3) × π × r³ > 0
-        
+
+        Two competing geometries, the larger contribution wins::
+
+            ΔV = max( ΔV_cone-pill , ΔV_layering )
+
+        **Cone-pill** (coalescence of comparable spheres), ``V_pill - (Vi+Vj)``:
+        only a true hull of both spheres when the radii are similar -- then the
+        frustum degenerates into a cylinder and the pill becomes a capsule. For
+        equal spheres this gives ΔV = (2/3)πr³ > 0.
+
+        For unequal radii the straight frustum wall cuts *into* the larger
+        sphere, so the term goes negative: it is positive only above a radius
+        ratio of ``(3-√5)/2 ≈ 0.381966``. At r_j/r_i = 0.2 the pill (1.573e-10 m³
+        for r_i = 350 µm) is smaller than the large sphere alone (1.796e-10 m³)
+        -- it does not even contain it. A negative ΔV is a geometric artefact of
+        the substitute shape, not a physical statement.
+
+        **Layering** takes over there, see :meth:`_delta_volume_layering`.
+
+        Why ``max`` and not "switch when ΔV < 0": the two curves intersect at
+        r_j/r_i = 0.403032, so the maximum is *continuous* at the handover. A
+        switch at the sign change (0.381966) would instead jump from 0 to
+        +0.0186·π·r_i³.
+
         Args:
             Vi: Volume of sphere i [m³]
             Vj: Volume of sphere j [m³]
-        
+
         Returns:
-            ΔV: Additional volume from contact geometry [m³] (always ≥ 0)
+            ΔV: Additional volume from contact geometry [m³], always ≥ 0
         """
         ri = self._radius_from_volume(Vi)
         rj = self._radius_from_volume(Vj)
-        
+
         V_pill = self._cone_pill_volume(ri, rj)
         V_old = Vi + Vj
-        
-        return V_pill - V_old
+        dV_cone = V_pill - V_old
+
+        dV_layering = self._delta_volume_layering(rj if rj < ri else ri)
+
+        return dV_cone if dV_cone > dV_layering else dV_layering
     
     # =====================================================================
     # Agglomeration: 2 parents → 1 child
@@ -281,7 +369,10 @@ class ConeModelKernel(PorosityGrowthKernel):
             - V_solid is ALWAYS conserved (mass conservation!)
             - All volumes are per PHYSICAL particle (intensive)
             - Poreless particles (poro=0.0) gain porosity through ΔV on first contact!
-            - Legacy Vollkörper (NaN) remain NaN for backward compatibility
+            - Legacy Vollkörper (NaN) are treated as poreless (0.0), the modern
+              convention -- they do NOT stay NaN. Keeping NaN here was never
+              actually possible: the clamp turned it into 1.0 ("pure void") and
+              destroyed the particle's solid volume.
         """
         # ==========================================
         # Step 1: Validate inputs
@@ -298,6 +389,19 @@ class ConeModelKernel(PorosityGrowthKernel):
                 f"This indicates V_flat[-1] was corrupted in a previous step."
             )
         
+        # Legacy "Vollkoerper" sentinel (NaN) means NO pores -> 0.0, the modern
+        # convention used everywhere else (cf. mcpbe_break.py, which maps NaN
+        # fragment porosities to 0.0 as well).
+        #
+        # This MUST happen before the clamp: `min(1.0, nan)` returns 1.0 in
+        # Python, so `max(0.0, min(1.0, nan))` silently turned a pore-free body
+        # into "pure void" -- V_solid = V_dry * (1 - 1.0) = 0, i.e. the whole
+        # mass of that particle vanished.
+        if np.isnan(poro1):
+            poro1 = 0.0
+        if np.isnan(poro2):
+            poro2 = 0.0
+
         # Clamp porosity to valid range [0, 1]
         poro1 = max(0.0, min(1.0, poro1))
         poro2 = max(0.0, min(1.0, poro2))
@@ -385,30 +489,43 @@ class ConeModelKernel(PorosityGrowthKernel):
         V_pore_new = max(0.0, V_pore_new)
         
         # ==========================================
-        # Step 6: Recombine to V_dry
+        # Step 6: Cap the porosity via V_pore, then recombine to V_dry
         # ==========================================
-        # V_dry_new = V_solid_new + V_pore_new
-        V_dry_new = V_solid_new + V_pore_new
-        
-        # ==========================================
-        # Step 7: Compute new porosity
-        # ==========================================
-        # ε_new = V_pore_new / V_dry_new
-        if V_dry_new > 0:
-            poro_new = V_pore_new / V_dry_new
+        # V_solid is THE conserved quantity. When the porosity would run past
+        # PORO_MAX, cap V_pore and derive V_dry and eps from the capped value --
+        # do NOT clamp eps on its own afterwards.
+        #
+        # Clamping eps alone (the pre-2026-08 form) left V_dry at its uncapped
+        # value, so `V_dry * (1 - eps)` no longer matched the V_solid stored in
+        # `V_flat[0]` by the caller: at a true eps of 0.99998 the derived solid
+        # volume came out 5x too large. `mcpbe_continuous_processes._apply_
+        # compression` then re-derives V_solid exactly that way and writes V_dry
+        # back from it, which cemented the phantom mass permanently.
+        #
+        # Capping V_pore keeps `V_dry * (1 - eps) == V_solid_new` exact instead:
+        # V_pore = V_solid * eps/(1-eps)  =>  V_dry = V_solid / (1-eps).
+        if V_solid_new > 0.0:
+            V_pore_cap = V_solid_new * (self.PORO_MAX / (1.0 - self.PORO_MAX))
+            if V_pore_new > V_pore_cap:
+                V_pore_new = V_pore_cap
+            V_dry_new = V_solid_new + V_pore_new
+            poro_new = V_pore_new / V_dry_new if V_dry_new > 0.0 else 0.0
         else:
+            # No solid at all -- nothing to conserve, nothing to cap against.
+            V_dry_new = V_pore_new
             poro_new = 0.0
-        
+
         # GUARD: NaN check - if NaN occurs here, it's a bug!
         if np.isnan(poro_new):
             raise RuntimeError(
                 f"NaN porosity generated in compute_merged_porosity! "
                 f"V_pore_new={V_pore_new:.6e}, V_dry_new={V_dry_new:.6e}"
             )
-        
-        # Clamp to valid range [0, 1)
-        poro_new = max(0.0, min(0.9999, poro_new))
-        
+
+        # Lower bound only; the upper one is already enforced via V_pore above.
+        if poro_new < 0.0:
+            poro_new = 0.0
+
         return V_dry_new, poro_new
     
     # =====================================================================
@@ -455,7 +572,11 @@ class ConeModelKernel(PorosityGrowthKernel):
         Note:
             - V_solid is ALWAYS conserved across all fragments
             - All volumes are per PHYSICAL particle (intensive)
-            - Pore volume can only decrease (ΣΔV ≥ 0)
+            - Pore volume can only decrease: ΣΔV ≥ 0 now holds for every size
+              ratio, because ΔV falls back to the layering term instead of
+              going negative (see :meth:`_delta_volume_pair`). Before that,
+              strongly uneven fragments produced ΔV < 0 and breakage *created*
+              pore volume -- the opposite of the model's intent.
             - Clamped to prevent negative pores
         """
         # ==========================================
@@ -522,15 +643,16 @@ class ConeModelKernel(PorosityGrowthKernel):
         # ==========================================
         # Step 1: Validate and clamp parent porosity
         # ==========================================
+        # Legacy "Vollkoerper" sentinel (NaN) means NO pores -> 0.0. Must happen
+        # BEFORE the clamp: `min(1.0, nan)` is 1.0 in Python, which would turn a
+        # pore-free parent into "pure void" and annihilate its solid volume.
+        # (The NaN guard below used to sit *after* the clamp and could therefore
+        # never fire.)
+        if np.isnan(parent_porosity):
+            parent_porosity = 0.0
+
         # Clamp to valid range [0, 1]
         parent_porosity = max(0.0, min(1.0, parent_porosity))
-        
-        # GUARD: NaN check - if NaN passed, it's a bug!
-        if np.isnan(parent_porosity):
-            raise RuntimeError(
-                f"NaN parent_porosity passed to compute_fragment_porosity! "
-                f"parent_volume={parent_volume:.6e}, n_fragments={n}"
-            )
         
         # ==========================================
         # Step 2: Decompose parent into V_solid and V_pore
@@ -622,7 +744,11 @@ class ConeModelKernel(PorosityGrowthKernel):
                 poro_frag = 0.0
             
             # Clamp to valid range [0, 1)
-            poro_frag = max(0.0, min(0.9999, poro_frag))
+            # Safe to clamp eps directly here (unlike compute_merged_porosity):
+            # the caller derives V_dry from V_solid and this eps
+            # (mcpbe_break.py: V_dry_frag = V_solid_frag / (1 - frag_poro)), so
+            # V_solid stays the anchor and no phantom mass can appear.
+            poro_frag = max(0.0, min(self.PORO_MAX, poro_frag))
             poro_list.append(poro_frag)
         
         return poro_list

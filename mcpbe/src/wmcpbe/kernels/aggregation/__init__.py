@@ -15,7 +15,7 @@ Usage:
 """
 
 from typing import Type
-from ..base import AggregationKernel
+from ..base import AggregationKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .shear_chin1998 import ShearChinKernel
@@ -46,8 +46,9 @@ def get_aggregation_kernel(name: str, **params) -> AggregationKernel:
         Instantiated AggregationKernel
     
     Raises:
-        ValueError: If kernel name is not found
-    
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
+
     Example:
         >>> kernel = get_aggregation_kernel('shear_chin1998', corr_beta=1e-3, g=1000)
     """
@@ -57,7 +58,9 @@ def get_aggregation_kernel(name: str, **params) -> AggregationKernel:
             f"Unknown aggregation kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return AGG_KERNELS[name](**params)
+    kernel = AGG_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_aggregation_kernels() -> list[str]:

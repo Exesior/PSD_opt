@@ -775,6 +775,34 @@ und bleibt damit konservativ gültig.
 Verifiziert mit `check_frac_volume.py`: abgegebenes Volumen == Sollwert für Caps von
 0.01 bis 3.0, Abweichung bei 3 % der Auslöschungs-Rauschgrenze der Messung.
 
+> **Nachtrag 16.08.2026 — die Buchführung war nicht mitgezogen worden.**
+> Die Verifikation oben hat das *abgegebene* Volumen gemessen, und das war korrekt.
+> Nicht geprüft wurde, was die **Aufrufer** anschließend verbuchen. Die drei
+> Aufrufstellen rechneten weiterhin
+>
+> ```python
+> v_event = v_droplet * effective_dW      # nominaler Tropfen!
+> self._liquid_remainder -= v_event
+> ```
+>
+> also mit dem *vollen* `v_droplet`, obwohl jedes Partikel durch die Deckelung nur
+> `v_eff < v_droplet` bekommen hatte. Damit wurde systematisch mehr vom
+> `_liquid_remainder` abgezogen als real verteilt wurde. Im Fraktional-Zweig greift
+> die Deckelung laut der Sackgassen-Notiz oben **immer** (`max_physical_droplets < 1`,
+> `dW ≥ 1`) — der Fehler war dort also nicht sporadisch, sondern systematisch, und
+> ließ `_liquid_remainder` am Simulationsende negativ werden
+> (`RuntimeError: _liquid_remainder became negative`, beobachtet mit ~0.78 Tropfen
+> Überzug, d.h. weit jenseits jedes Rundungsrauschens).
+>
+> **Fix:** `_distribute_one_droplet_with_dW` gibt jetzt `(dW, v_droplet_effective)`
+> zurück; alle Aufrufer verbuchen `effective_dW * v_eff` und zählen Tropfen als
+> `v_event / v_droplet` (nominale Einheit, konsistent zum Volumen). Ohne Deckelung
+> gilt `v_eff == v_droplet`, das Verhalten ist dort unverändert.
+>
+> **Lektion:** Wenn eine Funktion eine Größe intern umskaliert, muss sie diese Größe
+> auch zurückgeben. Ein Rückgabewert `dW`, dessen physikalische Bedeutung vom internen
+> Zustand abhängt, ist eine Falle für jeden Aufrufer.
+
 **(b) `_manual_agglomerate_particles` (Z. 1945–1950).**
 
 ```python

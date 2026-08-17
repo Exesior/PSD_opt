@@ -17,7 +17,7 @@ Usage:
 """
 
 from typing import Type
-from ..base import LiquidDistributionKernel
+from ..base import LiquidDistributionKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .uniform_weighted import UniformWeightedKernel
@@ -44,7 +44,8 @@ def get_liquid_distribution_kernel(name: str, **params) -> LiquidDistributionKer
         Instantiated LiquidDistributionKernel
     
     Raises:
-        ValueError: If kernel name is not found
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
     """
     if name not in LIQUID_DIST_KERNELS:
         available = list(LIQUID_DIST_KERNELS.keys())
@@ -52,7 +53,9 @@ def get_liquid_distribution_kernel(name: str, **params) -> LiquidDistributionKer
             f"Unknown liquid distribution kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return LIQUID_DIST_KERNELS[name](**params)
+    kernel = LIQUID_DIST_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_liquid_distribution_kernels() -> list[str]:

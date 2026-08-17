@@ -23,7 +23,7 @@ Usage:
 from typing import Type
 
 # Import base class
-from ..base import AggAcceptanceKernel
+from ..base import AggAcceptanceKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .stokes_krit import StokesKritKernel
@@ -48,8 +48,9 @@ def get_agglomeration_acceptance_kernel(name: str, **params) -> AggAcceptanceKer
         Instantiated AggAcceptanceKernel
     
     Raises:
-        ValueError: If kernel name is not found
-    
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
+
     Example:
         >>> kernel = get_agglomeration_acceptance_kernel('stokes_krit',
         ...     U_coll=1.0, binder_viscosity=0.1)
@@ -60,7 +61,9 @@ def get_agglomeration_acceptance_kernel(name: str, **params) -> AggAcceptanceKer
             f"Unknown agglomeration acceptance kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return AGG_ACCEPTANCE_KERNELS[name](**params)
+    kernel = AGG_ACCEPTANCE_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_agglomeration_acceptance_kernels() -> list[str]:

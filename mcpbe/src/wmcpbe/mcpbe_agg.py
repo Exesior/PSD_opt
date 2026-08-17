@@ -877,9 +877,12 @@ class MCPBEAgg:
         poro_j = self.porosity[j]
 
         # Universal formula: V_solid = V_dry * (1 - poro)
-        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
-        V_solid_i = Vi_dry * (1.0 - poro_i)
-        V_solid_j = Vj_dry * (1.0 - poro_j)
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous).
+        # Legacy Vollkoerper (poro=NaN) have no pore space at all, so
+        # V_solid = V_dry -- without this branch the NaN propagated straight
+        # into V_flat[0] and destroyed that particle's mass.
+        V_solid_i = Vi_dry if np.isnan(poro_i) else Vi_dry * (1.0 - poro_i)
+        V_solid_j = Vj_dry if np.isnan(poro_j) else Vj_dry * (1.0 - poro_j)
         V_solid_merged = V_solid_i + V_solid_j
         
         # Compute component distribution for merged particle

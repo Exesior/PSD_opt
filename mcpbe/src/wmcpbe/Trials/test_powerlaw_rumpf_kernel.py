@@ -160,6 +160,24 @@ def test_parameter_validation():
     except ValueError:
         print_test("Reject delta > π/2", True)
     
+    # delta = pi/2 is now rejected as well: cos(delta) = 0 makes the wet-regime
+    # strength sigma vanish for ANY porosity, i.e. an infinite breakage rate.
+    try:
+        kernel = get_breakage_kernel('powerlaw_rumpf', delta=np.pi/2)
+        print_test("Reject delta == π/2", False, "Should have raised ValueError")
+        all_passed = False
+    except ValueError:
+        print_test("Reject delta == π/2", True)
+
+    # poro_max must stay strictly inside (0, 1)
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        try:
+            kernel = get_breakage_kernel('powerlaw_rumpf', poro_max=bad)
+            print_test(f"Reject poro_max={bad}", False, "Should have raised ValueError")
+            all_passed = False
+        except ValueError:
+            print_test(f"Reject poro_max={bad}", True)
+
     # Valid edge cases should work
     try:
         kernel = get_breakage_kernel('powerlaw_rumpf', k=2.2)
@@ -167,12 +185,13 @@ def test_parameter_validation():
         kernel = get_breakage_kernel('powerlaw_rumpf', alpha=1.0)
         kernel = get_breakage_kernel('powerlaw_rumpf', alpha=1.33)
         kernel = get_breakage_kernel('powerlaw_rumpf', delta=0.0)
-        kernel = get_breakage_kernel('powerlaw_rumpf', delta=np.pi/2)
+        kernel = get_breakage_kernel('powerlaw_rumpf', delta=np.pi/2 - 1e-6)
+        kernel = get_breakage_kernel('powerlaw_rumpf', poro_max=0.9999)
         print_test("Accept valid edge cases", True)
     except Exception as e:
         print_test("Accept valid edge cases", False, str(e))
         all_passed = False
-    
+
     return all_passed
 
 
@@ -206,7 +225,7 @@ def test_sigma_calculation():
         sigma_dry = kernel._compute_sigma(poro, 0.1, x_s)
         expected_dry = base_factor * kernel.k  # = 10800 * 2.5 = 27000
         
-        if np.isclose(sigma_dry, expected_dry, rtol=1e-10):
+        if np.isclose(sigma_dry, expected_dry, rtol=1e-10, atol=0.0):
             print_test("Dry regime (S=0.1)", True)
         else:
             print_test("Dry regime (S=0.1)", False, 
@@ -217,7 +236,7 @@ def test_sigma_calculation():
         sigma_03 = kernel._compute_sigma(poro, 0.3, x_s)
         expected_03 = base_factor * kernel.k
         
-        if np.isclose(sigma_03, expected_03, rtol=1e-10):
+        if np.isclose(sigma_03, expected_03, rtol=1e-10, atol=0.0):
             print_test("Dry boundary (S=0.3)", True)
         else:
             print_test("Dry boundary (S=0.3)", False,
@@ -227,9 +246,12 @@ def test_sigma_calculation():
         # --- WET REGIME (S > 0.8) ---
         sigma_wet = kernel._compute_sigma(poro, 0.9, x_s)
         expected_wet = 6.0 * kernel.alpha * base_factor * kernel.cos_delta * 0.9
-        # = 6 * 1.15 * 10800 * 1.0 * 0.9 = 67356
+        # = 6 * 1.15 * 10800 * 1.0 * 0.9 = 67068
+        # (the comment used to say 67356 -- an arithmetic slip that Test 4 then
+        #  hardcoded as its expected sigma; only visible once the isclose calls
+        #  stopped carrying the default atol=1e-8, which dwarfed rates of 1e-17)
         
-        if np.isclose(sigma_wet, expected_wet, rtol=1e-10):
+        if np.isclose(sigma_wet, expected_wet, rtol=1e-10, atol=0.0):
             print_test("Wet regime (S=0.9)", True)
         else:
             print_test("Wet regime (S=0.9)", False,
@@ -240,7 +262,7 @@ def test_sigma_calculation():
         sigma_08 = kernel._compute_sigma(poro, 0.8, x_s)
         expected_08 = 6.0 * kernel.alpha * base_factor * kernel.cos_delta * 0.8
         
-        if np.isclose(sigma_08, expected_08, rtol=1e-10):
+        if np.isclose(sigma_08, expected_08, rtol=1e-10, atol=0.0):
             print_test("Wet boundary (S=0.8)", True)
         else:
             print_test("Wet boundary (S=0.8)", False,
@@ -255,7 +277,7 @@ def test_sigma_calculation():
         sigma_wet_08 = 6.0 * kernel.alpha * base_factor * kernel.cos_delta * 0.8
         expected_mid = 0.5 * expected_03 + 0.5 * sigma_wet_08
         
-        if np.isclose(sigma_mid, expected_mid, rtol=1e-10):
+        if np.isclose(sigma_mid, expected_mid, rtol=1e-10, atol=0.0):
             print_test("Transition regime (S=0.55)", True)
         else:
             print_test("Transition regime (S=0.55)", False,
@@ -265,7 +287,7 @@ def test_sigma_calculation():
         # Test linearity: S=0.3, 0.55, 0.8 should be collinear
         slope_1 = (sigma_mid - sigma_03) / (0.55 - 0.3)
         slope_2 = (sigma_08 - sigma_mid) / (0.8 - 0.55)
-        if np.isclose(slope_1, slope_2, rtol=1e-10):
+        if np.isclose(slope_1, slope_2, rtol=1e-10, atol=0.0):
             print_test("Transition linearity", True)
         else:
             print_test("Transition linearity", False,
@@ -274,7 +296,7 @@ def test_sigma_calculation():
         
         # --- NAN SATURATION (should treat as dry) ---
         sigma_nan = kernel._compute_sigma(poro, np.nan, x_s)
-        if np.isclose(sigma_nan, expected_dry, rtol=1e-10):
+        if np.isclose(sigma_nan, expected_dry, rtol=1e-10, atol=0.0):
             print_test("NaN saturation → dry", True)
         else:
             print_test("NaN saturation → dry", False,
@@ -316,7 +338,7 @@ def test_rate_calculation():
         
         # Test without solver (should return base rate)
         rate_no_solver = kernel.compute_rate(v_particle)
-        if np.isclose(rate_no_solver, base_rate, rtol=1e-10):
+        if np.isclose(rate_no_solver, base_rate, rtol=1e-10, atol=0.0):
             print_test("No solver → base rate", True)
         else:
             print_test("No solver → base rate", False,
@@ -331,25 +353,33 @@ def test_rate_calculation():
                 self.X0 = np.array([X0])
                 self.VERBOSE = True
         
-        # Test with Vollkörper (poro = NaN) → should return base rate
+        # Vollkörper (poro = NaN) → rate 0: no pores, no pore-wall failure
+        # mechanism. This is the limit of the formula itself (sigma -> inf as
+        # eps -> 0). It used to return base_rate, which is implicitly
+        # sigma = 1 Pa and made the strongest body the most fragile one.
         solver_vollkoerper = MockSolver(poro=np.nan, sat=0.5, X0=10e-6)
         rate_vollkoerper = kernel.compute_rate(v_particle, particle_idx=0, solver=solver_vollkoerper)
-        if np.isclose(rate_vollkoerper, base_rate, rtol=1e-10):
-            print_test("Vollkörper (poro=NaN) → base rate", True)
+        if rate_vollkoerper == 0.0:
+            print_test("Vollkörper (poro=NaN) → rate = 0", True)
         else:
-            print_test("Vollkörper (poro=NaN) → base rate", False,
-                      f"Expected {base_rate:.2e}, got {rate_vollkoerper:.2e}")
+            print_test("Vollkörper (poro=NaN) → rate = 0", False,
+                      f"Expected 0.0, got {rate_vollkoerper:.2e}")
             all_passed = False
         
+        # sigma is derived from the same closed form as Test 3 instead of being
+        # hardcoded. The hardcoded values had drifted from the formula (the wet
+        # one was 67356 instead of 67068) and no test noticed, because the
+        # isclose calls carried the default atol=1e-8 while the rates are ~1e-17.
+        base_factor = ((1.0 - 0.4) / 0.4) * kernel.gamma / 10e-6   # = 10800
+        sigma_dry = base_factor * kernel.k                          # = 27000
+        sigma_wet = 6.0 * kernel.alpha * base_factor * kernel.cos_delta * 0.9
+
         # Test with dry porous particle (S=0.1)
-        # σ = 27000 Pa (from previous test)
-        # rate = base_rate / σ = 3e-11 / 27000 ≈ 1.11e-15
         solver_dry = MockSolver(poro=0.4, sat=0.1, X0=10e-6)
         rate_dry = kernel.compute_rate(v_particle, particle_idx=0, solver=solver_dry)
-        sigma_dry = 27000.0  # From Test 3
         expected_rate_dry = base_rate / sigma_dry
-        
-        if np.isclose(rate_dry, expected_rate_dry, rtol=1e-10):
+
+        if np.isclose(rate_dry, expected_rate_dry, rtol=1e-10, atol=0.0):
             print_test("Dry porous (S=0.1) → corrected rate", True)
         else:
             print_test("Dry porous (S=0.1) → corrected rate", False,
@@ -357,14 +387,11 @@ def test_rate_calculation():
             all_passed = False
         
         # Test with wet porous particle (S=0.9)
-        # σ = 67356 Pa (from previous test)
-        # rate = base_rate / σ = 3e-11 / 67356 ≈ 4.45e-16
         solver_wet = MockSolver(poro=0.4, sat=0.9, X0=10e-6)
         rate_wet = kernel.compute_rate(v_particle, particle_idx=0, solver=solver_wet)
-        sigma_wet = 67356.0  # From Test 3
         expected_rate_wet = base_rate / sigma_wet
-        
-        if np.isclose(rate_wet, expected_rate_wet, rtol=1e-10):
+
+        if np.isclose(rate_wet, expected_rate_wet, rtol=1e-10, atol=0.0):
             print_test("Wet porous (S=0.9) → corrected rate", True)
         else:
             print_test("Wet porous (S=0.9) → corrected rate", False,
@@ -413,7 +440,7 @@ def test_sauter_diameter():
         # Test monodisperse: x_s should equal particle diameter
         solver_mono = MockSolver(X0=10e-6)
         x_s_mono = kernel._get_x_s(solver_mono)
-        if np.isclose(x_s_mono, 10e-6, rtol=1e-10):
+        if np.isclose(x_s_mono, 10e-6, rtol=1e-10, atol=0.0):
             print_test("Monodisperse X0 → x_s = diameter", True)
         else:
             print_test("Monodisperse X0 → x_s = diameter", False,
@@ -431,7 +458,7 @@ def test_sauter_diameter():
         # = (125 + 1000 + 8000) / (25 + 100 + 400) * 1e-6
         # = 9125 / 525 * 1e-6 ≈ 17.38e-6
         
-        if np.isclose(x_s_poly, expected_d32, rtol=1e-10):
+        if np.isclose(x_s_poly, expected_d32, rtol=1e-10, atol=0.0):
             print_test("Polydisperse X0 → Sauter mean d32", True)
         else:
             print_test("Polydisperse X0 → Sauter mean d32", False,
@@ -447,7 +474,7 @@ def test_sauter_diameter():
         )
         solver_any = MockSolver(X0=10e-6)
         x_s_explicit = kernel_explicit._get_x_s(solver_any)
-        if np.isclose(x_s_explicit, 15e-6, rtol=1e-10):
+        if np.isclose(x_s_explicit, 15e-6, rtol=1e-10, atol=0.0):
             print_test("Explicit x_s overrides X0", True)
         else:
             print_test("Explicit x_s overrides X0", False,
@@ -500,21 +527,39 @@ def test_edge_cases():
                       f"Expected 0, got {rate_neg:.2e}")
             all_passed = False
         
-        # Test invalid porosity (poro=0) → fallback to base rate
+        # Pore-free particle (poro=0) → rate 0, same reasoning as Vollkörper
         class MockSolverInvalidPoro:
             def __init__(self):
                 self.porosity = np.array([0.0])
                 self.saturation = np.array([0.5])
                 self.X0 = np.array([10e-6])
-        
+
         solver_invalid = MockSolverInvalidPoro()
         rate_invalid = kernel.compute_rate(v_particle, particle_idx=0, solver=solver_invalid)
         base_rate = kernel._compute_base_rate_powerlaw(v_particle)
-        if np.isclose(rate_invalid, base_rate, rtol=1e-10):
-            print_test("Invalid poro=0 → base rate", True)
+        if rate_invalid == 0.0:
+            print_test("poro=0 (pore-free) → rate = 0", True)
         else:
-            print_test("Invalid poro=0 → base rate", False,
-                      f"Expected {base_rate:.2e}, got {rate_invalid:.2e}")
+            print_test("poro=0 (pore-free) → rate = 0", False,
+                      f"Expected 0.0, got {rate_invalid:.2e}")
+            all_passed = False
+
+        # poro above poro_max is clamped, NOT bounced back to base_rate:
+        # S must stay continuous and far above the eps=0.8 value.
+        class MockSolverHighPoro:
+            def __init__(self, p):
+                self.porosity = np.array([p])
+                self.saturation = np.array([0.0])
+                self.X0 = np.array([10e-6])
+
+        r_at_max = kernel.compute_rate(v_particle, 0, MockSolverHighPoro(kernel.poro_max))
+        r_above = kernel.compute_rate(v_particle, 0, MockSolverHighPoro(0.999999))
+        r_one = kernel.compute_rate(v_particle, 0, MockSolverHighPoro(1.0))
+        if r_at_max == r_above == r_one and r_at_max > 0.0:
+            print_test("poro > poro_max → clamped plateau (no jump)", True)
+        else:
+            print_test("poro > poro_max → clamped plateau (no jump)", False,
+                      f"{r_at_max:.3e} / {r_above:.3e} / {r_one:.3e}")
             all_passed = False
         
         # Test missing solver attributes → fallback to base rate
@@ -523,7 +568,7 @@ def test_edge_cases():
         
         solver_no_attr = MockSolverNoAttr()
         rate_no_attr = kernel.compute_rate(v_particle, particle_idx=0, solver=solver_no_attr)
-        if np.isclose(rate_no_attr, base_rate, rtol=1e-10):
+        if np.isclose(rate_no_attr, base_rate, rtol=1e-10, atol=0.0):
             print_test("Missing solver attributes → base rate", True)
         else:
             print_test("Missing solver attributes → base rate", False,

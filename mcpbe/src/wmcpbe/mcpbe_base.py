@@ -807,6 +807,12 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         working.
         """
         v = getattr(self, "break_frag_v", None)
+        # Der letzte Fallback weicht bewusst von `mcpbe_break.py::_prepare_break_config`
+        # ab (dort 2.0). Unerreichbar, weil base_solver.py `self.pl_v = 2` in der
+        # gemeinsamen Basisklasse setzt -- beide Stellen lesen also denselben Wert.
+        # Faellt dieser Default je weg, muessen BEIDE Stellen zusammen angefasst
+        # werden, sonst laufen Fragmentanzahl und Fragmentgroessenverteilung mit
+        # verschiedenen Werten desselben Modellparameters.
         v = float(v) if v is not None else float(getattr(self, "pl_v", 1.0))
         bf = int(getattr(self, "BREAKFVAL", 1))
         if self.dim == 1:
@@ -1694,9 +1700,19 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             poro = self.porosity[idx] if isinstance(idx, slice) else self.porosity[idx]
         
         # Universal formula: V_s = V_particle_dry * (1 - poro)
-        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous)
-        V_solid = V_particle_dry * (1.0 - poro)
-        
+        # Works for both poro=0.0 (non-porous) and poro>0.0 (porous).
+        # Legacy Vollkoerper (poro=NaN) have no pore space, so V_s = V_dry --
+        # otherwise the NaN propagated into every mass sum built on this helper.
+        poro_arr = np.asarray(poro)
+        if poro_arr.ndim == 0:
+            V_solid = V_particle_dry if np.isnan(poro_arr) else V_particle_dry * (1.0 - poro)
+        else:
+            V_solid = np.where(
+                np.isnan(poro_arr),
+                V_particle_dry,
+                V_particle_dry * (1.0 - poro_arr),
+            )
+
         return V_solid
     
     def get_V_particle_dry(self, idx: int | slice = None) -> float | np.ndarray:
@@ -2286,6 +2302,37 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
 
                 # Step: calculates overlap and distributes liquid
                 nucleation.step(float(current_time), float(dt_event))
+
+                # Nucleation appends particles and moves weight around, so the
+                # agglomeration/breakage propensities are stale afterwards --
+                # exactly as after an agglomeration or breakage event, which
+                # both refresh them (see mcpbe_agg._refresh_samplers_after_agg
+                # and mcpbe_break). Nucleation never did, and nothing else
+                # covers it: `_append_particle_column` hands the new column to
+                # the sampler as `_r_agg[idx]`, which for a fresh slot is 0.
+                #
+                # A nucleated particle was therefore UNREACHABLE for the pair
+                # draw -- with `INITIAL_POROSITY = 0` (no breakage, hence no
+                # refresh from that side either) this locked itself in place:
+                # every drawn pair consisted of the original, still dry
+                # particles, the Stokes criterion rejected it as "both dry",
+                # no agglomeration happened, and so nothing ever refreshed the
+                # propensities. Measured: 0 agglomerations across 13 parameter
+                # variants, including one with 21812 collisions.
+                #
+                # The rebuild is O(n), so it is tied to a change actually having
+                # happened rather than run on every event.
+                if nucleation.consume_population_changed():
+                    if pt in ("agglomeration", "mix"):
+                        self._rebuild_all_propensities()
+                        self._agg_sampler = rebuild_sampler(
+                            self._agg_sampler, self._r_agg[: self.a_tot]
+                        )
+                    if pt in ("breakage", "mix"):
+                        self._calc_break_rates_full()
+                        self._break_sampler = rebuild_sampler(
+                            self._break_sampler, self._break_rate[: self.a_tot]
+                        )
 
             # Agglomeration-dominated safety: duplicate the control volume once
             # the population has halved (DSMC).

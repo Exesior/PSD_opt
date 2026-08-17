@@ -483,20 +483,32 @@ liquid_dist_kernel_params={}
 
 **Beschreibung:** Kapillar-getriebene interne Flüssigkeitsaufnahme.
 
-**Formel:**
+**Formel** (Braumann et al. 2007):
 ```
-dV_int/dt = k_intern × (V_pore - V_int)
+dV_int/dt = k_int × V_ext × (V_pore - V_int)        mit V_ext = V_liq,ges - V_int
 ```
+
+Der Faktor `V_ext` ist wesentlich und stand hier früher nicht: die Rate hängt vom
+*Produkt* aus verfügbarer externer Flüssigkeit und freiem Porenraum ab. Erst damit
+ergibt auch die Einheit 1/(m³·s) einen Sinn. Der Kernel integriert diese ODE pro
+Zeitschritt analytisch, nicht per Euler-Schritt.
 
 **Parameter:**
 | Parameter | Einheit | Beschreibung | Typisch |
 |-----------|---------|--------------|---------|
-| `k_intern` | 1/(m³·s) | Internalisierungsrate | 1e6 bis 1e10 |
+| `k_int` | 1/(m³·s) | Internalisierungsrate | siehe Größenordnung unten |
+
+> **Der Parameter heißt `k_int`, nicht `k_intern`.** Diese Doku nannte ihn bis
+> 17.08.2026 falsch, und mehrere Trial-Skripte hatten den falschen Namen übernommen —
+> deren Wert wurde dadurch stillschweigend verworfen und der Kernel lief auf seinem
+> Default 1e12. Seit derselben Runde weisen die Factory-Funktionen unbekannte
+> Parameternamen mit `ValueError` zurück (siehe FEHLERBEHANDLUNG), ein solcher
+> Tippfehler kann also nicht mehr unbemerkt bleiben.
 
 **Beispiel:**
 ```python
 liquid_internalization_kernel_name='liquid_internalization',
-liquid_internalization_kernel_params={'k_intern': 1e8}
+liquid_internalization_kernel_params={'k_int': 1e12}
 ```
 
 **Anwendung:** Langsame Porenfüllung während Simulation.
@@ -630,16 +642,17 @@ solver = MCPBESolver(
     porosity_growth_kernel_name='cone_model',
     porosity_growth_kernel_params={},
     
-    # Kompression
-    compression_kernel_name='exponential_decay',
-    compression_kernel_params={
+    # Kompression (Kernel-Name und -Kategorie, NICHT 'exponential_decay';
+    # mcpbe_compression.py und kernels/compression/ existieren nicht mehr)
+    porosity_compression_kernel_name='porosity_compression',
+    porosity_compression_kernel_params={
         'rate': 0.02,
         'min_porosity': 0.15,
     },
     
     # Kontinuierliche Internalisierung
     liquid_internalization_kernel_name='liquid_internalization',
-    liquid_internalization_kernel_params={'k_intern': 1e8},
+    liquid_internalization_kernel_params={'k_int': 1e12},
     
     # Event-basierte Internalisierung
     liq_internalisation_agglomeration_kernel_name='braumann_2007',
@@ -751,10 +764,32 @@ AGG_KERNELS['my_custom'] = MyCustomKernel
 2. **Viskos:** verzögert durch hohe Viskosität
 3. **Agglomeration:** Einschluss bei Partikelkontakt
 
-**Zeitskalen:**
-- Schnell: k_intern > 1e9 (sofortige Füllung)
-- Mittel: k_intern ≈ 1e6-1e8 (Sekunden bis Minuten)
-- Langsam: k_intern < 1e4 (Stunden)
+**Zeitskalen — `k_int` ist NICHT absolut zu lesen.**
+
+In der Rate steht `k_int` immer im Produkt mit einem Volumen. Die charakteristische
+Zeit ist daher
+
+```
+t_char ≈ 1 / (k_int × V_pore)
+```
+
+und die sinnvolle Größenordnung hängt direkt an der Partikelgröße. Für die
+34-µm-Konfiguration der Trials (V_pore ≈ 1.4e-14 m³) gemessen, S₀ = 0.10, dt = 0.5 s:
+
+| `k_int` | S nach einem Schritt | Wirkung |
+|---|---|---|
+| ≤ 1e8 | 0.100000 | **keine** — `exp(α·dt)` ist in double exakt 1.0 |
+| 1e12 | 0.100646 | langsam, über viele Ereignisse sichtbar |
+| 1e14 | 0.146716 | schnell |
+
+Unterhalb von etwa 1e11 ist der Kernel für diese Partikelgröße ein exakter No-op:
+`α = k_int × (V_pore − V_liq,ges)` wird so klein, dass `exp(α·dt)` auf 1.0 rundet, und
+die analytische Lösung gibt dann algebraisch **exakt** den Eingangswert zurück. Das ist
+kein Rundungsrauschen, sondern Stillstand. Die frühere Angabe „1e6–1e10" in dieser Doku
+war für µm-Granulate damit durchweg wirkungslos.
+
+Faustregel: `k_int` so wählen, dass `k_int × V_pore × t_prozess` in der Größenordnung 1
+liegt.
 
 ---
 
@@ -766,17 +801,45 @@ AGG_KERNELS['my_custom'] = MyCustomKernel
 from wmcpbe.kernels.aggregation import get_aggregation_kernel
 
 try:
-    kernel = get_aggregation_kernel('shear_chin1998', {'corr_beta': -1e-3})
+    kernel = get_aggregation_kernel('shear_chin1998', corr_beta=-1e-3)
 except ValueError as e:
     print(f"Ungültiger Parameter: {e}")
 ```
+
+### Unbekannte Parameternamen werden abgelehnt (seit 17.08.2026)
+
+Jede `get_*_kernel(...)`-Factory prüft nach der Konstruktion, ob alle übergebenen
+Namen von diesem Kernel überhaupt gelesen werden, und wirft sonst einen `ValueError`
+mit Vorschlag:
+
+```python
+get_continuous_kernel('liquid_internalization', k_intern=1e12)
+# ValueError: Unknown parameter(s) for kernel 'liquid_internalization':
+# 'k_intern' (did you mean 'k_int'?). Accepted parameters: ['k_int']. ...
+```
+
+**Warum das nötig war:** jeder Kernel baut seinen Zustand als
+`get_default_params()` aktualisiert mit den Werten des Aufrufers. Ein falsch
+geschriebener Name überschrieb dadurch nichts — er landete als zusätzlicher
+Dict-Eintrag, den nie jemand liest, und der Kernel lief auf seinem Default weiter.
+Der Lauf war vollständig, die Ergebnisse plausibel, und der Parameter schien
+wirkungslos zu sein, egal welchen Wert man einsetzte.
+
+Akzeptiert werden die Schlüssel aus `get_default_params()` **plus** die aus
+`get_optional_params()`. Letzteres ist für Parameter gedacht, bei denen „nicht
+gesetzt" ein eigener Zustand ist — bei `cone_model` etwa `default_porosity`
+(ohne den entstehen Poren ausschließlich geometrisch beim Kontakt) und
+`liquid_split_ratio`. Wer einen neuen optionalen Parameter über
+`self.params.get(...)` einliest, muss ihn dort eintragen, sonst lehnt die Factory
+ihn ab.
 
 ### Typische Fehler
 
 | Fehler | Ursache | Lösung |
 |--------|---------|--------|
 | `Unknown kernel 'xyz'` | Tippfehler oder nicht registriert | Kernel-Name prüfen |
-| `Missing required param` | Parameter vergessen | docs/Parameter_Liste.md konsultieren |
+| `Unknown parameter(s) for kernel …` | Tippfehler im Parameternamen | Vorgeschlagenen Namen übernehmen; bei neuen optionalen Parametern `get_optional_params()` ergänzen |
+| `Missing required param` | Parameter vergessen | Parametertabelle des Kernels oben konsultieren |
 | `NaN in rate calculation` | Ungültige Werte (negativ, NaN) | Input-Validation vor compute_rate() |
 
 ---

@@ -12,7 +12,7 @@ Usage:
 """
 
 from typing import Type
-from ..base import BreakageKernel
+from ..base import BreakageKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .power_law import PowerLawBreakageKernel
@@ -37,7 +37,8 @@ def get_breakage_kernel(name: str, **params) -> BreakageKernel:
         Instantiated BreakageKernel
     
     Raises:
-        ValueError: If kernel name is not found
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
     """
     if name not in BREAK_KERNELS:
         available = list(BREAK_KERNELS.keys())
@@ -45,7 +46,9 @@ def get_breakage_kernel(name: str, **params) -> BreakageKernel:
             f"Unknown breakage kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return BREAK_KERNELS[name](**params)
+    kernel = BREAK_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_breakage_kernels() -> list[str]:

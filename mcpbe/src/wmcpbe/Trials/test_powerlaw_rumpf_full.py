@@ -56,30 +56,30 @@ class TestConfig:
     T_WRITE = 0.2       # Output interval [s]
     
     # Particle properties (initial)
-    PARTICLE_DIAMETER = 700e-6            # 700 µm
-    PARTICLE_DENSITY = 2500.0             # kg/m³ (solid material)
+    PARTICLE_DIAMETER = 34e-6            # 700 µm
+    PARTICLE_DENSITY = 500.0             # kg/m³ (solid material)
     INITIAL_POROSITY = 0.0                # 80% void fraction
     
     # Droplet properties
-    DROPLET_DIAMETER = 100e-6             # 200 µm
+    DROPLET_DIAMETER = 20e-6             # 200 µm
     DROPLET_DENSITY = 1000.0              # kg/m³ (water)
     
     # Process parameters
-    VOLUMETRIC_FLOW_RATE = 3e-8       # m³/s
+    VOLUMETRIC_FLOW_RATE = 3e-10       # m³/s
     NUCLEATION_DURATION = 10.0         # s
-    AGG_COEFFICIENT = 1e-4            # Constant kernel coefficient [m³/s] - HIGH for testing
+    AGG_COEFFICIENT = 4            # Constant kernel coefficient [m³/s] - HIGH for testing
     BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?   
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True
-    PL_P1 = 400                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
+    PL_P1 = 4e14                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
     PL_P2 = 1.0                       # Volume exponent in S = P1*G*V^P2
     G = 5000.0                        # Shear rate [1/s]
     BREAKRVAL = 4                     # Volume-based power law
     # Rumpf strength parameters
     RUMPF_K = 2.5                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
     RUMPF_ALPHA = 1.0                 # Fitting parameter wet [1.0-1.33] - MIN VALUE
-    RUMPF_GAMMA = 0.036               # Surface tension [N/m] - REDUCED (surfactant)
+    RUMPF_GAMMA = 0.072               # Surface tension [N/m] - REDUCED (surfactant)
     RUMPF_DELTA = 0.0                 # Contact angle [rad] (perfect wetting)
     
     # Compression parameters
@@ -89,7 +89,7 @@ class TestConfig:
     
     # Liquid internalization parameters
     LIQ_INTERN_ENABLED = True
-    LIQ_INTERN_RATE = 1e-12             # Rate constant [1/(m³·s)]
+    LIQ_INTERN_RATE = 1e9             # Rate constant [1/(m³·s)]
     
     # Liquid internalization during agglomeration
     LIQ_INTERN_AGG_ENABLED = True
@@ -98,11 +98,11 @@ class TestConfig:
     STOKES_ENABLED = True
     BINDER_VISCOSITY = 0.1            # Pa·s
     COLLISION_VELOCITY = 0.01          # m/s
-    H_A = 500e-9                      # m (half-distance of closest approach)
+    H_A = 500e-15                      # m (half-distance of closest approach)
     
     # Numerical settings
     INITIAL_PARTICLES = 2000          # Computational particles
-    INITIAL_WEIGHT = 400             # Weight per particle
+    INITIAL_WEIGHT = 600             # Weight per particle
     CONTROL_VOLUME = 1               # m³ 
     
     # Merger configuration
@@ -291,7 +291,7 @@ def run_comprehensive_test() -> Dict[str, Any]:
         },
         liquid_internalization_kernel_name='liquid_internalization',
         liquid_internalization_kernel_params={
-            'k_intern': cfg.LIQ_INTERN_RATE,
+            'k_int': cfg.LIQ_INTERN_RATE,
         },
         # Liquid internalization during agglomeration (event-based)
         liq_internalisation_agglomeration_kernel_name='liq_internalisation_agglomeration',

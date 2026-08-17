@@ -32,17 +32,25 @@ class MCPBEBreak:
     def _prepare_break_config(self) -> None:
         """Cache breakage configuration from kernel parameters."""
         self._bf_ready = False
-        self._break_G = float(getattr(self, "G", 1000))
-        self._break_pl_P1 = float(getattr(self, "pl_P1", 3e-2))
-        self._break_pl_P2 = float(getattr(self, "pl_P2", 1.0))
-        self._break_pl_P3 = float(getattr(self, "pl_P3", 1.0))
-        self._break_pl_P4 = float(getattr(self, "pl_P4", 1.0))
+        # NOTE: `_break_G` / `_break_pl_P1..P4` used to be cached here. They date
+        # from the pre-kernel-framework path that called `calc_break_rate_1d`
+        # directly and were read nowhere in `wmcpbe` any more -- they only
+        # suggested that the solver attributes `G` / `pl_P1` / `pl_P2` still
+        # steered the breakage rate. They do not; the breakage KERNEL parameters
+        # do. Removed to avoid that confusion.
+        #
         # Breakage FUNCTION parameters. `break_frag_v` / `break_frag_q` are the
         # canonical names; `pl_v` / `pl_q` remain the fallback for setups that
         # configure them directly. These are NOT the breakage rate exponent --
         # that one lives in the breakage kernel, also called `pl_v`.
         _frag_v = getattr(self, "break_frag_v", None)
         _frag_q = getattr(self, "break_frag_q", None)
+        # Der letzte Fallback weicht bewusst von `mcpbe_base.py::_compute_frag_num`
+        # ab (dort 1.0). Unerreichbar, weil base_solver.py `self.pl_v = 2` in der
+        # gemeinsamen Basisklasse setzt -- beide Stellen lesen also denselben Wert.
+        # Faellt dieser Default je weg, muessen BEIDE Stellen zusammen angefasst
+        # werden, sonst laufen Fragmentanzahl und Fragmentgroessenverteilung mit
+        # verschiedenen Werten desselben Modellparameters.
         self._break_pl_v = float(_frag_v) if _frag_v is not None else float(getattr(self, "pl_v", 2.0))
         self._break_pl_q = float(_frag_q) if _frag_q is not None else float(getattr(self, "pl_q", 1.0))
 
@@ -66,6 +74,30 @@ class MCPBEBreak:
     # ------------------------------------------------------------------
     # Breakage rate (full table and single-point)
     # ------------------------------------------------------------------
+    def _assert_finite_rates(self, rates, source: str) -> None:
+        """Fail loudly on NaN/inf breakage rates instead of masking them.
+
+        A corrupted ``V_flat`` entry would otherwise turn into rate ``0.0``
+        (the kernels treat NaN like a non-positive volume) and the particle
+        would simply never break -- a silent result change that is very hard to
+        trace back. ``inf`` is just as bad: it poisons the Fenwick sampler's
+        running total. One O(n) pass per event, negligible next to the rate
+        computation itself.
+        """
+        rates = np.asarray(rates, dtype=float)
+        bad_mask = ~np.isfinite(rates)
+        if not bad_mask.any():
+            return
+        bad = int(np.argmax(bad_mask))
+        poro = self.porosity[bad] if hasattr(self, "porosity") else "n/a"
+        raise RuntimeError(
+            f"Non-finite breakage rate from {source} at particle {bad}: "
+            f"rate={rates[bad]}, V_dry={self.V_flat[-1, bad]:.6e}, "
+            f"W={self.W[bad]:.6e}, porosity={poro}. "
+            f"{int(bad_mask.sum())} of {rates.size} particles affected. "
+            "This points at corrupted particle data further upstream."
+        )
+
     def _calc_break_rates_full(self):
         """Compute BREAKAGE PROPENSITIES for active slice.
     
@@ -105,6 +137,7 @@ class MCPBEBreak:
             )
 
             rates = self.B_R
+            self._assert_finite_rates(rates, "break kernel")
             prop = np.divide(
                 W * rates,
                 delta,
@@ -125,6 +158,7 @@ class MCPBEBreak:
             if adapter is None:
                 raise RuntimeError("MLP breakage model enabled but adapter not configured")
             rates = np.asarray(adapter.compute_rates_full(self), dtype=float)
+            self._assert_finite_rates(rates, "MLP breakage adapter")
 
             prop = np.divide(
                 W * rates,
@@ -191,8 +225,16 @@ class MCPBEBreak:
             val = Wi * Si / delta_i
             return float(val) if val > 0.0 else 0.0
     
-        # No kernel or MLP configured
-        raise RuntimeError("Breakage kernel not initialized and no MLP model available")
+        # No kernel and no MLP configured -> breakage is disabled.
+        # Deliberately mirrors the batch path (`_calc_break_rates_full`,
+        # branch 2), which sets all rates to 0.0 in the same situation. This
+        # used to raise here, so the very same configuration was legal on one
+        # code path and a hard error on the other -- a run could look healthy
+        # for a long time and only abort at the first incremental update.
+        # A run without breakage is a valid setup (pure dry agglomeration, see
+        # `helpers.create_dry_agglomeration_solver`); a typo in the kernel name
+        # is already rejected by `kernel_integration`.
+        return 0.0
 
     # ------------------------------------------------------------------
     # Two-level CDF builder (cached)

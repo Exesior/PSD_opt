@@ -420,6 +420,13 @@ class NucleationHandler:
         # PERFORMANCE: Incremental sampler updates (O(log n) vs O(n))
         self._pending_weight_updates: list[tuple[int, float]] = []
         self._use_incremental_updates = True
+
+        # Signals to the solve() loop that this handler changed the population
+        # (new particle appended and/or weights moved) and the AGGLOMERATION /
+        # BREAKAGE propensities are therefore stale. The sampler maintained by
+        # this class (`_weight_sampler`) only serves the droplet target draw --
+        # it says nothing about `_r_agg` / `_break_rate`.
+        self._population_changed = False
     
     def _initialize_mass_mode(self) -> None:
         """
@@ -635,6 +642,10 @@ class NucleationHandler:
                 n_physical_remaining = v_remaining / v_droplet
                 dW, v_eff = self._distribute_one_droplet_with_dW(
                     v_droplet, max_physical_droplets=n_physical_remaining)
+
+                # Sampler pro Tropfen aktualisieren, siehe Begruendung in
+                # _distribute_liquid_volume.
+                self._ensure_samplers()
 
                 if dW > 0:
                     effective_dW = dW * vc_scale
@@ -1014,9 +1025,28 @@ class NucleationHandler:
         --------
         _apply_pending_weight_updates : Wendet aufgezeichnete Änderungen an
         """
+        # Unconditional: this is the single hook every weight change of this
+        # handler passes through (droplet transfer, parent depletion, forced
+        # agglomeration child). It is therefore the right place to mark the
+        # agglomeration/breakage propensities as stale -- independently of
+        # whether the handler's OWN sampler is updated incrementally or rebuilt.
+        self._population_changed = True
+
         if self._use_incremental_updates:
             self._pending_weight_updates.append((idx, new_weight))
-    
+
+    def consume_population_changed(self) -> bool:
+        """Report and reset whether the population changed since the last call.
+
+        Used by :meth:`MCPBEBase.solve` to refresh the agglomeration and
+        breakage propensities only when this handler actually moved something,
+        instead of paying an O(n) rebuild on every Monte-Carlo event.
+        """
+        changed = self._population_changed
+        self._population_changed = False
+        return changed
+
+
     def _select_particle_uniform_physical(self) -> int:
         """
         Waehlt computationales Partikel sodass alle PHYSISCHEN gleiche Wahrscheinlichkeit haben.
@@ -1166,6 +1196,23 @@ class NucleationHandler:
             dW, v_eff = self._distribute_one_droplet_with_dW(
                 v_droplet, max_physical_droplets=n_physical_remaining)
 
+            # Sampler nach JEDEM Tropfen aktualisieren. Der Tropfen hat gerade
+            # Gewicht vom getroffenen Partikel abgezogen, ggf. ein neues Partikel
+            # angelegt und ggf. zwangsagglomeriert -- der naechste Tropfen muss
+            # aus dem Zustand DANACH ziehen.
+            #
+            # Vorher lief dieser Aufruf nur EINMAL vor der Schleife: ab dem
+            # zweiten Tropfen zog der Sampler mit veralteten Gewichten, und die
+            # innerhalb dieses Schrittes neu entstandenen Partikel waren fuer
+            # die restlichen Tropfen ueberhaupt nicht auswaehlbar. Die
+            # Batch-Verarbeitung sollte Rechenzeit sparen, hat damit aber die
+            # Sampling-Verteilung veraendert -- und genau dieses gewichtete
+            # Ziehen ueber ALLE verfuegbaren Partikel ist der Zweck von
+            # `batch_size`: sie ist das W des Tropfens, analog zum W eines
+            # Partikels. Bei batch_size = 1 entspricht ein Event damit genau
+            # einem physikalischen Tropfen auf ein Partikel.
+            self._ensure_samplers()
+
             if dW > 0:
                 effective_dW = dW * vc_scale
                 # v_eff statt v_droplet -- siehe _distribute_remaining_liquid:
@@ -1233,11 +1280,14 @@ class NucleationHandler:
                     i, new_liquid, is_first_contact
                 )
 
-                # Compute saturation (every droplet!)
+                # Saettigung fortschreiben (jeder Tropfen!). Der Rest-Tropfen
+                # `_liquid_remainder` ist der Zuwachs, der rein extern ankommt.
                 sat_new = self._compute_saturation_for_liquid(
+                    src_idx=i,
                     v_dry=v_dry_new,
                     poro=poro_new,
                     v_liquid=new_liquid,
+                    v_added=self._liquid_remainder,
                     is_first_contact=is_first_contact
                 )
                 
@@ -1475,9 +1525,11 @@ class NucleationHandler:
         # SCHRITT 5: Saturation berechnen (jeder Tropfen!)
         # ==========================================
         sat_new = self._compute_saturation_for_liquid(
+            src_idx=i,
             v_dry=v_dry_new,
             poro=poro_new,
             v_liquid=new_liquid,
+            v_added=v_droplet,
             is_first_contact=is_first_contact
         )
         
@@ -1595,57 +1647,113 @@ class NucleationHandler:
         from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
         return get_porosity_growth_kernel('volume_mixing')
     
-    def _compute_saturation_for_liquid(self, v_dry: float, poro: float, 
-                                        v_liquid: float, is_first_contact: bool) -> float:
+    def _compute_saturation_for_liquid(self, src_idx: int, v_dry: float, poro: float,
+                                        v_liquid: float, v_added: float,
+                                        is_first_contact: bool) -> float:
         """
-        Compute saturation for given liquid state.
-        
-        IMPORTANT: Called for EVERY droplet (not just first contact!).
-        
-        Physics:
-            - If liquid_internalization_kernel active -> S=0 (all external)
-            - Otherwise: Empirical split (split_ratio × liquid, capped at V_pore)
-        
-        Args:
-            v_dry: Dry volume [m^3]
-            poro: Porosity (may be NaN for legacy Vollkoerper)
-            v_liquid: Total liquid volume [m^3]
-            is_first_contact: True if this is the first droplet (not used currently,
-                            but available for future kernel-specific logic)
-        
-        Returns:
-            Saturation S ∈ [0, 1]
+        Saettigung des Zielzustands nach dem Auftreffen eines Tropfens.
+
+        WIRD FUER JEDEN TROPFEN AUFGERUFEN -- deshalb ist die Fortschreibung
+        entscheidend, nicht die Neuberechnung.
+
+        Physik
+        ------
+        Die Aufteilung intern/extern ist eine Zustandsgroesse **mit Gedaechtnis**:
+        interne Fluessigkeit entsteht durch Kapillarsog ueber die Zeit
+        (Internalisierungs-Kernel), nicht als fester Anteil der Gesamtmenge. Ein
+        frisch auftreffender Tropfen hat noch nichts durchdrungen und ist damit
+        **vollstaendig extern**; die bereits imbibierte Fluessigkeit bleibt, wo
+        sie ist.
+
+        Daraus folgt::
+
+            V_int_neu = V_int_alt                         (Internalisierungs-Kernel aktiv)
+            V_int_neu = V_int_alt + split * v_added       (kein Kernel: empirischer Split,
+                                                           aber NUR auf den Zuwachs)
+            V_int_neu = min(V_int_neu, V_pore_neu, v_liquid)   -> Ueberschuss wird extern
+            S         = V_int_neu / V_pore_neu
+
+        Frueher wurde der Split fuer jeden Tropfen aus der Gesamtfluessigkeit neu
+        gebildet und bei aktivem Kernel unbedingt ``0.0`` zurueckgegeben. Ein
+        vollstaendig gesaettigtes Partikel (S = 1) fiel dadurch mit dem naechsten
+        Tropfen auf S = 0 zurueck -- gemessen betraf das 35,6 % aller
+        Tropfen-Ereignisse bei poroeser Population. Die Internalisierung arbeitete
+        so gegen einen staendigen Reset an, und die Kopplung Benetzung ->
+        Festigkeit -> Bruch war aufgetrennt.
+
+        Der Ueberschuss beim Schrumpfen des Porenraums wird externalisiert, nicht
+        verworfen: die Fluessigkeitsbilanz ist so unantastbar wie die Massenbilanz
+        (identisch zu ``_apply_compression`` und ``mcpbe_agg._merge_pair``).
+
+        Parameter
+        ---------
+        src_idx : int
+            Index des getroffenen Partikels -- Quelle des bisherigen
+            intern/extern-Zustands. ``None``/ungueltig => kein Vorzustand.
+        v_dry, poro : float
+            Geometrie des Zielzustands.
+        v_liquid : float
+            Gesamtfluessigkeit des Zielzustands (alt + Tropfen).
+        v_added : float
+            Volumen des gerade auftreffenden Tropfens [m^3].
+        is_first_contact : bool
+            True, wenn das Partikel vorher trocken war.
+
+        Returns
+        -------
+        float
+            Saettigung S in [0, 1].
         """
+        solver = self.solver
+
         # Handle NaN or zero porosity
         if np.isnan(poro) or poro <= 0.0:
             return 0.0
-        
-        V_pore = v_dry * poro
-        
-        if V_pore <= 0:
+
+        V_pore_new = v_dry * poro
+        if V_pore_new <= 0:
             return 0.0
-        
+
+        # ------------------------------------------------------------------
+        # Bisherige interne Fluessigkeit des getroffenen Partikels
+        # ------------------------------------------------------------------
+        V_int_old = 0.0
+        if src_idx is not None and 0 <= src_idx < solver.a_tot:
+            poro_old = float(solver.porosity[src_idx])
+            if np.isfinite(poro_old) and poro_old > 0.0:
+                V_pore_old = float(solver.V_flat[-1, src_idx]) * poro_old
+                sat_old = float(solver.saturation[src_idx])
+                if not np.isfinite(sat_old):
+                    sat_old = 0.0
+                sat_old = min(max(sat_old, 0.0), 1.0)
+                liq_old = float(solver.liquid_volume[src_idx])
+                # Deckel auf die tatsaechlich vorhandene Fluessigkeit: poro,
+                # saturation und liquid_volume werden an anderen Stellen
+                # unabhaengig gesetzt und sind nicht garantiert konsistent.
+                V_int_old = max(0.0, min(liq_old, V_pore_old * sat_old))
+
         # Check if internalization kernel is active
         has_internalization_kernel = (
-            hasattr(self.solver, 'kernel_manager') and
-            self.solver.kernel_manager is not None and
-            self.solver.kernel_manager.liquid_internalization_kernel is not None
+            hasattr(solver, 'kernel_manager') and
+            solver.kernel_manager is not None and
+            solver.kernel_manager.liquid_internalization_kernel is not None
         )
-        
+
         if has_internalization_kernel:
-            # Kernel macht Internalization ueber Zeit -> hier alles external
-            return 0.0
-        
-        # Kein Kernel: Empirischer Split (parameterized!)
-        split_ratio = self._get_liquid_split_ratio(poro)
-        
-        V_liq_int_target = split_ratio * v_liquid
-        V_liq_int = min(V_liq_int_target, V_pore)  # Cap at pore capacity!
-        
-        # S ∈ [0, 1]
-        saturation = V_liq_int / V_pore
-        
-        return saturation
+            # Der Kernel zieht die Fluessigkeit ueber die Zeit nach innen.
+            # Der Tropfen selbst landet vollstaendig aussen.
+            V_int_new = V_int_old
+        else:
+            # Kein Kernel: der empirische Split ist der einzige Mechanismus, der
+            # ueberhaupt Fluessigkeit nach innen bringt -- er greift deshalb auf
+            # den ZUWACHS, nicht auf die Gesamtmenge.
+            split_ratio = self._get_liquid_split_ratio(poro)
+            V_int_new = V_int_old + split_ratio * max(0.0, v_added)
+
+        # Porenraum kann geschrumpft sein -> Ueberschuss wird extern, nicht geloescht.
+        V_int_new = min(V_int_new, V_pore_new, max(0.0, v_liquid))
+
+        return V_int_new / V_pore_new
     
     def _get_liquid_split_ratio(self, poro: float) -> float:
         """
@@ -2069,11 +2177,36 @@ class NucleationHandler:
             # External liquid of parents (total - internal)
             V_liq_ext_i = liq_i - V_liq_int_i
             V_liq_ext_j = liq_j - V_liq_int_j
-            
+
             # Merge: add internal liquids
             V_liq_int_merged = V_liq_int_i + V_liq_int_j
             V_liq_ext_merged = V_liq_ext_i + V_liq_ext_j
-            
+
+            # An der neu entstehenden Kontaktstelle wird zusaetzlich Fluessigkeit
+            # aus den Oberflaechenfilmen in die frisch gebildete Bruecke gezogen.
+            # Das ist ein eigener, ereignisbasierter Vorgang beim Stoss -- nicht
+            # dasselbe wie die kontinuierliche Internalisierung ueber die Zeit.
+            # `mcpbe_agg._merge_pair` ruft diesen Kernel auf; hier fehlte er, die
+            # Nucleations-Agglomeration uebersprang ihn also stillschweigend.
+            l_e_to_i = 0.0
+            if getattr(solver, 'kernel_manager', None) is not None:
+                l_e_to_i = solver.kernel_manager.compute_liquid_internalization_agglomeration(
+                    v_dry1=float(V_dry_i),
+                    v_dry2=float(V_dry_j),
+                    v_liq_ext1=float(V_liq_ext_i),
+                    v_liq_ext2=float(V_liq_ext_j),
+                    particle1_idx=i,
+                    particle2_idx=j,
+                    solver=solver,
+                )
+            V_liq_int_merged += l_e_to_i
+            V_liq_ext_merged -= l_e_to_i
+            if V_liq_ext_merged < 0.0:
+                # Kernel wollte mehr internalisieren als aussen vorhanden war:
+                # alles nach innen, nichts erfinden (wie in _merge_pair).
+                V_liq_int_merged = V_liq_int_i + V_liq_int_j + V_liq_ext_i + V_liq_ext_j
+                V_liq_ext_merged = 0.0
+
             # Compute new saturation from merged internal liquid
             if V_pore_merged > 0:
                 sat_merged = V_liq_int_merged / V_pore_merged

@@ -18,7 +18,11 @@ Usage:
 """
 
 from typing import Type
-from ..base import CompressionKernel, LiquidInternalizationKernel as InternalizationKernelBase
+from ..base import (
+    CompressionKernel,
+    LiquidInternalizationKernel as InternalizationKernelBase,
+    reject_unknown_params,
+)
 
 # Import all kernel implementations
 from .porosity_compression import PorosityCompressionKernel
@@ -45,7 +49,8 @@ def get_continuous_kernel(name: str, **params):
         Instantiated ContinuousProcessKernel
     
     Raises:
-        ValueError: If kernel name is not found
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
     """
     if name not in CONTINUOUS_KERNELS:
         available = list(CONTINUOUS_KERNELS.keys())
@@ -53,7 +58,9 @@ def get_continuous_kernel(name: str, **params):
             f"Unknown continuous process kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return CONTINUOUS_KERNELS[name](**params)
+    kernel = CONTINUOUS_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_continuous_kernels() -> list[str]:

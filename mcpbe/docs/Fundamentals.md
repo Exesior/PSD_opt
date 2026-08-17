@@ -236,6 +236,17 @@ aufgerufen. Kern-Methoden:
   `mcpbe_agg.py` (insbesondere: `i==j` → `dW` auf `Wi/2` begrenzen – **hier lag am
   10.–11.08.2026 ein Bug**, siehe Abschnitt 7).
 
+> ⚠ **Der ausgelassene Rebuild war bis 17.08.2026 unkompensiert.** Ihn *innerhalb* der
+> Tropfenschleife wegzulassen ist richtig — nur hat ihn danach auch niemand auf
+> Ereignisebene nachgeholt. Neu angelegte Partikel gingen deshalb mit Propensity 0 in
+> `_r_agg`/`_break_rate` und konnten weder agglomerieren noch brechen. Bei
+> `INITIAL_POROSITY = 0` wurde daraus eine Selbstblockade (kein Bruch ⇒ kein Refresh ⇒
+> keine Agglomeration ⇒ kein Refresh), die 13 von 14 Parametervarianten auf exakt null
+> Agglomerationen festnagelte. `solve()` frischt jetzt einmal pro MC-Event auf, und nur
+> wenn die Nucleation tatsächlich etwas verändert hat — also O(n) pro Ereignis statt
+> pro Tropfen. Details:
+> [`Nucleation_Propensity_Blockade.md`](Nucleation_Propensity_Blockade.md).
+
 **DSMC-Skalierung bei Nucleation**: `effective_dW = dW * (Vc_ref/Vc)` –
 physikalische Tropfenzahl bleibt korrekt, auch wenn sich `Vc` durch
 Vc-Doubling ändert.
@@ -250,6 +261,15 @@ Pro `.step(current_time, dt_event)`:
    `ε(t) = ε_min + (ε_0-ε_min)·exp(-rate·t)`. **Ändert `V_dry` und `porosity`, hält
    `V_solid` exakt konstant** (verifiziert: ΔV_solid = 0.0 exakt bei jedem Event, kein
    Rundungsfehler beobachtet). Externalisiert überschüssige Flüssigkeit, wenn `S > 1`.
+
+> ⚠ **Bis 17.08.2026 war dieser Schritt wirkungslos.** `PorosityCompressionKernel.
+> compute_array` schrieb sein Ergebnis über eine verkettete Zuweisung
+> `out[finite][can_compress] = updated` — Boolean-Indizierung liefert in NumPy eine
+> Kopie, die Zuweisung landete also in einem Wegwerf-Array. Der Handler nutzt den
+> Kernel, sobald einer registriert ist (der korrekte analytische Fallback darunter wird
+> dann nie erreicht), womit `COMPRESSION_RATE` und `MIN_POROSITY` in **jedem** Lauf mit
+> registriertem Kompressions-Kernel folgenlos blieben. Details, Messung und Konsequenzen:
+> [`Kompression_und_Parametervalidierung.md`](Kompression_und_Parametervalidierung.md).
 
 ---
 
@@ -301,6 +321,18 @@ zugewiesen."*
 Jeder Kernel-Typ hat eine `blueprint.py` (abstrakte Basisklasse/Contract) im jeweiligen
 Unterverzeichnis. Kernel werden per Name + Params-Dict beim `MCPBESolver(...)`-
 Konstruktor ausgewählt (`agg_kernel_name=...`, `agg_kernel_params={...}`, usw.).
+
+**Parameternamen werden geprüft (seit 17.08.2026).** Jede `get_*_kernel(...)`-Factory
+ruft `kernels/base.py::reject_unknown_params` und wirft einen `ValueError`, wenn ein
+übergebener Name von diesem Kernel gar nicht gelesen wird — mit Vorschlag des
+vermutlich gemeinten Namens. Vorher wurde ein Tippfehler stillschweigend geschluckt
+(`get_default_params()` aktualisiert mit den Aufrufer-Werten: ein unbekannter Schlüssel
+überschreibt nichts, er kommt nur zusätzlich ins Dict) und der Kernel lief auf seinem
+Default weiter — genau so blieb `k_intern` statt `k_int` über mehrere Trial-Skripte
+hinweg unbemerkt. Kernel mit optionalen, absichtlich default-losen Parametern
+deklarieren diese in `get_optional_params()`; derzeit nur `cone_model`
+(`default_porosity`, `liquid_split_ratio`). Siehe
+[`Kompression_und_Parametervalidierung.md`](Kompression_und_Parametervalidierung.md).
 
 ### 5.1 Porositäts-Kernel im Detail (wichtig für Masse-Invarianten)
 

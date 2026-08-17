@@ -8,12 +8,24 @@ Verifies:
 4. Geometric calculations correctness
 5. Fitting parameter effects
 
-Usage:
-    python test_cone_model.py
+Usage (from mcpbe/src):
+    python -m wmcpbe.kernels.porosity_growth.test_cone_model
 """
 
+import os
+import sys
+
 import numpy as np
-from cone_model import ConeModelKernel
+
+# `cone_model` itself imports `..base`, so it can only be loaded as part of the
+# package -- the previous flat `from cone_model import ConeModelKernel` failed
+# with ImportError no matter which directory it was started from. Adding
+# mcpbe/src to sys.path keeps a direct `python test_cone_model.py` working too.
+if __package__ in (None, ""):
+    sys.path.insert(
+        0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    )
+from wmcpbe.kernels.porosity_growth.cone_model import ConeModelKernel
 
 
 def test_radius_volume_conversion():
@@ -160,27 +172,45 @@ def test_breakage_mass_conservation():
         poro_parent, fragment_volumes, V_dry_parent
     )
     
+    # CONTRACT: the input `fragment_volumes` are V_DRY. The kernel keeps the
+    # solid share of the parent (V_solid = V_dry * (1 - ε_parent)) and returns a
+    # NEW porosity for the shrunken pore space. The consumer therefore has to
+    # re-derive V_dry from the solid volume -- exactly what mcpbe_break.py does:
+    #     V_dry_frag = V_solid_frag / (1 - frag_poro)
+    #
+    # Applying the NEW ε to the OLD V_dry instead mixes two states and produced
+    # an apparent 3.23% mass error, which this test used to print and then not
+    # assert on (its only assertion was that the input volumes sum to the parent
+    # volume -- a tautology about its own test data).
     print(f"\nFragments: {len(fragment_volumes)} pieces")
-    for k, (V_frag, poro_frag) in enumerate(zip(fragment_volumes, poros_frag)):
-        V_solid_frag = V_frag * (1 - poro_frag)
-        V_pore_frag = V_frag * poro_frag
-        print(f"  Frag {k+1}: V_dry={V_frag:.3e}, ε={poro_frag:.6f}")
-        print(f"    → V_solid={V_solid_frag:.3e}, V_pore={V_pore_frag:.3e}")
-    
+    V_solid_frags = [V * (1 - poro_parent) for V in fragment_volumes]
+    V_dry_frags_new = [Vs / (1 - p) for Vs, p in zip(V_solid_frags, poros_frag)]
+
+    for k, (V_old, V_new, Vs, p) in enumerate(
+            zip(fragment_volumes, V_dry_frags_new, V_solid_frags, poros_frag)):
+        print(f"  Frag {k+1}: V_dry {V_old:.3e} → {V_new:.3e}, ε={p:.6f}")
+        print(f"    → V_solid={Vs:.3e}, V_pore={V_new - Vs:.3e}")
+
     # Verify mass conservation
-    V_solid_frags_sum = sum(V * (1 - p) for V, p in zip(fragment_volumes, poros_frag))
-    V_pore_frags_sum = sum(V * p for V, p in zip(fragment_volumes, poros_frag))
-    
+    V_solid_frags_sum = sum(V_solid_frags)
+    V_pore_frags_sum = sum(V - Vs for V, Vs in zip(V_dry_frags_new, V_solid_frags))
+    rel_err = abs(V_solid_frags_sum - V_solid_parent) / V_solid_parent
+
     print(f"\nMass Conservation Check:")
     print(f"  V_solid_parent = {V_solid_parent:.3e}")
     print(f"  Σ V_solid_frags = {V_solid_frags_sum:.3e}")
-    print(f"  Error = {abs(V_solid_frags_sum - V_solid_parent) / V_solid_parent * 100:.10f}%")
-    
-    # Note: In breakage, fragment_volumes ARE the solid volumes (by definition in our API)
-    # So mass conservation is automatic if fragment_volumes sum to parent_volume
+    print(f"  Error = {rel_err * 100:.10f}%")
+
     assert abs(sum(fragment_volumes) - V_dry_parent) < V_dry_parent * 1e-14, \
         "Fragment volumes don't sum to parent!"
-    
+    assert rel_err < 1e-12, (
+        f"V_solid not conserved across breakage: parent {V_solid_parent:.6e}, "
+        f"fragments {V_solid_frags_sum:.6e} (rel. error {rel_err:.3e})")
+    # Each fragment must also be internally consistent: V_dry*(1-eps) == V_solid
+    for Vs, V_new, p in zip(V_solid_frags, V_dry_frags_new, poros_frag):
+        assert abs(V_new * (1 - p) - Vs) <= 1e-12 * Vs, \
+            "Fragment V_dry/porosity/V_solid are mutually inconsistent!"
+
     # Verify pore loss (should decrease due to new surface)
     print(f"\nPore Volume Check:")
     print(f"  V_pore_parent = {V_pore_parent:.3e}")
@@ -206,25 +236,48 @@ def test_vollkörper_handling():
     
     kernel = ConeModelKernel()
     
+    # NOTE ON THE CONTRACT: a legacy Vollkörper (ε = NaN) means "no pores", so
+    # it is mapped to ε = 0.0 -- the modern convention used across the codebase
+    # (cf. mcpbe_break.py, and compute_nucleation_porosity, which returns 0.0
+    # rather than NaN). NaN is deliberately NOT propagated.
+    #
+    # These cases used to assert NaN preservation, which the kernel never
+    # actually delivered: `max(0.0, min(1.0, nan))` is 1.0 in Python, so a
+    # pore-free body silently became "pure void" and its solid volume collapsed
+    # to zero. What matters here is therefore mass, and that is asserted below.
+
     # Case 1: Both parents Vollkörper
     print("\nCase 1: Both Vollkörper")
     V_dry, poro = kernel.compute_merged_porosity(1e-18, np.nan, 1e-18, np.nan)
-    print(f"  Result: V_dry={V_dry:.3e}, ε={poro}")
-    assert np.isnan(poro), "Should be Vollkörper!"
-    
+    V_solid = V_dry * (1.0 - poro)
+    print(f"  Result: V_dry={V_dry:.3e}, ε={poro:.6f}, V_solid={V_solid:.6e}")
+    assert not np.isnan(poro), "Porosity must be a number, not NaN!"
+    assert 0 <= poro < 1, "Invalid porosity!"
+    # Vollkörper have V_solid == V_dry, so the merged solid is the plain sum.
+    assert abs(V_solid - 2e-18) / 2e-18 < 1e-12, (
+        f"Mass not conserved: expected 2.000e-18, got {V_solid:.6e}")
+
     # Case 2: One parent Vollkörper
     print("\nCase 2: One Vollkörper, one porous")
     V_dry, poro = kernel.compute_merged_porosity(1e-18, np.nan, 1e-18, 0.4)
-    print(f"  Result: V_dry={V_dry:.3e}, ε={poro:.6f}")
+    V_solid = V_dry * (1.0 - poro)
+    expected_solid = 1e-18 + 1e-18 * (1.0 - 0.4)
+    print(f"  Result: V_dry={V_dry:.3e}, ε={poro:.6f}, V_solid={V_solid:.6e}")
     assert not np.isnan(poro), "Should have valid porosity!"
     assert 0 <= poro < 1, "Invalid porosity!"
-    
+    assert abs(V_solid - expected_solid) / expected_solid < 1e-12, (
+        f"Mass not conserved: expected {expected_solid:.6e}, got {V_solid:.6e}")
+
     # Case 3: Parent Vollkörper → fragments
     print("\nCase 3: Parent Vollkörper → breakage")
     poros = kernel.compute_fragment_porosity(np.nan, [0.5e-18, 0.5e-18], 1e-18)
     print(f"  Result: ε={poros}")
-    assert all(np.isnan(p) for p in poros), "Fragments should be Vollkörper!"
-    
+    assert not any(np.isnan(p) for p in poros), "Fragment porosity must not be NaN!"
+    assert all(0 <= p < 1 for p in poros), "Invalid fragment porosity!"
+    # A pore-free parent has no pore volume to hand down, so the fragments stay
+    # pore-free too (V_pore_new = max(0, 0 - k_break*ΔV) = 0).
+    assert all(p == 0.0 for p in poros), f"Expected pore-free fragments, got {poros}"
+
     print("✓ PASSED")
 
 

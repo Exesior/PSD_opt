@@ -16,7 +16,7 @@ Usage:
 """
 
 from typing import Type
-from ..base import PorosityGrowthKernel
+from ..base import PorosityGrowthKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .volume_mixing import VolumeMixingKernel
@@ -43,7 +43,8 @@ def get_porosity_growth_kernel(name: str, **params) -> PorosityGrowthKernel:
         Instantiated PorosityGrowthKernel
     
     Raises:
-        ValueError: If kernel name is not found
+        ValueError: If the kernel name is not found, or if `params` contains a
+                    name this kernel does not read (see `reject_unknown_params`)
     """
     if name not in POROSITY_GROWTH_KERNELS:
         available = list(POROSITY_GROWTH_KERNELS.keys())
@@ -51,7 +52,9 @@ def get_porosity_growth_kernel(name: str, **params) -> PorosityGrowthKernel:
             f"Unknown porosity growth kernel '{name}'. "
             f"Available kernels: {available}"
         )
-    return POROSITY_GROWTH_KERNELS[name](**params)
+    kernel = POROSITY_GROWTH_KERNELS[name](**params)
+    reject_unknown_params(kernel, params)
+    return kernel
 
 
 def list_porosity_growth_kernels() -> list[str]:

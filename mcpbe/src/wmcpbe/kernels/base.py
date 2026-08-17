@@ -58,25 +58,89 @@ class KernelBase(ABC):
         """
         return {}
     
+    def get_optional_params(self) -> List[str]:
+        """
+        Additional parameter names this kernel accepts beyond its defaults.
+
+        Most kernels read exactly the keys they declare in
+        :meth:`get_default_params`. A few also honour optional keys that have no
+        default because "absent" is meaningful (e.g. ``cone_model`` only seeds a
+        nucleation porosity when ``default_porosity`` is given). Those names must
+        be listed here, otherwise :func:`reject_unknown_params` rejects them.
+
+        Returns:
+            List of accepted parameter names (empty by default).
+        """
+        return []
+
     def validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate and optionally modify parameters.
-        
+
         Override in subclasses for custom validation.
-        
+
         Args:
             params: Parameter dictionary
-            
+
         Returns:
             Validated parameter dictionary
-            
+
         Raises:
             ValueError: If parameters are invalid
         """
         return params
-    
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self.name}', params={self.params})"
+
+
+def reject_unknown_params(kernel: 'KernelBase', supplied: Dict[str, Any]) -> None:
+    """
+    Raise if any supplied parameter name is not read by this kernel.
+
+    Every kernel builds its state as ``get_default_params()`` updated with the
+    caller's values. A misspelled name therefore did NOT overwrite anything --
+    it was silently added as an extra dict entry that nothing ever reads, and
+    the kernel ran on its default instead. That failure is invisible: the run
+    completes, the results look plausible, and the parameter appears to have no
+    effect no matter which value is passed.
+
+    This is not hypothetical. ``liquid_internalization`` takes ``k_int``, while
+    several Trial scripts passed ``k_intern``; every one of those runs silently
+    used the default 1e12 rather than the configured rate.
+
+    Args:
+        kernel:   Freshly constructed kernel instance
+        supplied: The parameters the caller actually passed (NOT merged with
+                  the defaults -- the merged dict cannot tell the two apart)
+
+    Raises:
+        ValueError: If `supplied` contains a name the kernel does not read.
+                    The message lists the accepted names and, where the name is
+                    close to an accepted one, names the likely intended key.
+    """
+    known = set(kernel.get_default_params()) | set(kernel.get_optional_params())
+    unknown = sorted(set(supplied) - known)
+    if not unknown:
+        return
+
+    import difflib
+
+    details = []
+    for key in unknown:
+        near = difflib.get_close_matches(key, sorted(known), n=1, cutoff=0.6)
+        if near:
+            details.append(f"'{key}' (did you mean '{near[0]}'?)")
+        else:
+            details.append(f"'{key}'")
+
+    raise ValueError(
+        f"Unknown parameter(s) for kernel '{kernel.name}': {', '.join(details)}. "
+        f"Accepted parameters: {sorted(known)}. "
+        "Unknown names are rejected instead of ignored, because an ignored name "
+        "would leave the kernel running on its default value without any sign "
+        "that the configured value never took effect."
+    )
 
 
 # =============================================================================

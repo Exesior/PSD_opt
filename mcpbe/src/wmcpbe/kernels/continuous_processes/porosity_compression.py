@@ -164,14 +164,26 @@ class PorosityCompressionKernel(CompressionKernel):
         # Only compress particles with porosity > max(0.0, eps_min)
         # This prevents porenlose Partikel (poro=0.0) from being compressed
         can_compress = clipped > self.eps_min
-        
+
         if np.any(can_compress):
             decay = np.exp(-self.k * dt)
             compressible_poro = clipped[can_compress]
             updated = self.eps_min + (compressible_poro - self.eps_min) * decay
             updated = np.maximum(self.eps_min, updated)
-            out[finite][can_compress] = updated
-        
+
+            # The mask must be carried back to FULL-array positions before the
+            # write. `can_compress` is indexed relative to `poro[finite]`, which
+            # is shorter than `out`, so it cannot address `out` directly.
+            #
+            # And the write must be a SINGLE indexing operation. The previous
+            # form `out[finite][can_compress] = updated` was a no-op: boolean
+            # indexing returns a copy, so `out[finite]` built a temporary array,
+            # the assignment landed in that temporary, and it was discarded --
+            # compression never changed a single porosity value.
+            compressible = np.zeros(poro.shape, dtype=bool)
+            compressible[finite] = can_compress
+            out[compressible] = updated
+
         # Particles with poro <= eps_min remain unchanged (already at minimum)
         # This includes poro=0.0 which should never be increased artificially!
         return out
