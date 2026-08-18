@@ -269,8 +269,17 @@ class KernelManager:
         # Compression Kernel (REMOVED)
         # ==========================================
         # Legacy compression_kernel_name parameter is deprecated.
-        # Use continuous_processes kernels instead.
-        if hasattr(self, 'compression_kernel_name') and self.compression_kernel_name is not None:
+        #
+        # This used to read `hasattr(self, 'compression_kernel_name')`, which is
+        # ALWAYS False -- the attribute is never set in __init__ and is not an
+        # __init__ parameter either. The migration hint below could therefore
+        # never reach anyone. It is now read off the solver, which is where a
+        # config file would put it (config files assign arbitrary attributes,
+        # see base_solver._load_attributes), so an old config actually gets the
+        # explanation instead of running with compression silently disabled.
+        # See docs/Audit_2026-08-17.md, B-14.
+        _legacy_compression = getattr(solver, 'compression_kernel_name', None)
+        if _legacy_compression is not None:
             import warnings
             warnings.warn(
                 "The 'compression_kernel_name' parameter and kernels/compression/ module are REMOVED. "
@@ -324,7 +333,7 @@ class KernelManager:
         
         # Porosity Compression Kernel
         # Note: Legacy compression_kernel_name is deprecated - use continuous_processes instead
-        if hasattr(self, 'porosity_compression_kernel_name') and self.porosity_compression_kernel_name is not None:
+        if self.porosity_compression_kernel_name is not None:
             try:
                 from wmcpbe.kernels.continuous_processes import get_continuous_kernel
             except ImportError:
@@ -337,7 +346,7 @@ class KernelManager:
             self.porosity_compression_kernel = None
         
         # Liquid Internalization Kernel
-        if hasattr(self, 'liquid_internalization_kernel_name') and self.liquid_internalization_kernel_name is not None:
+        if self.liquid_internalization_kernel_name is not None:
             try:
                 from wmcpbe.kernels.continuous_processes import get_continuous_kernel
             except ImportError:
@@ -411,7 +420,6 @@ class KernelManager:
         v_liq2: Optional[float] = None,
         sat1: Optional[float] = None,
         sat2: Optional[float] = None,
-        collision_energy: Optional[float] = None,
         solver = None
     ) -> tuple[float, float]:
         """Delegate porosity mixing to porosity growth kernel."""
@@ -421,7 +429,6 @@ class KernelManager:
             v_dry1, poro1, v_dry2, poro2,
             v_liq1=v_liq1, v_liq2=v_liq2,
             sat1=sat1, sat2=sat2,
-            collision_energy=collision_energy,
             solver=solver
         )
     

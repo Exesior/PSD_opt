@@ -162,6 +162,20 @@ class ContinuousProcessesHandler:
         # Update statistics
         self._total_steps += 1
     
+    def _reindex_merger(self, mask: np.ndarray) -> None:
+        """Tell the ParticleMerger which particles changed their hash key.
+
+        Cheap no-op when no merger exists or its hash index is disabled --
+        in the latter case lookups are linear scans and there is no index to
+        keep current, which is exactly why the switch exists.
+        """
+        merger = getattr(self.solver, '_particle_merger', None)
+        if merger is None or not getattr(merger, 'use_hash_index', False):
+            return
+        if mask is None or not np.any(mask):
+            return
+        merger.reindex_particles(np.flatnonzero(mask))
+
     def _apply_internalization(self, dt: float) -> None:
         """
         Apply liquid internalization to all particles.
@@ -209,6 +223,11 @@ class ContinuousProcessesHandler:
 
         saturation[mask] = saturation_new
         self._particles_internalized_total += n_active
+
+        # Saturation is part of the ParticleMerger's hash key, so the index has
+        # to follow. Only particles whose binned key actually moved are
+        # re-keyed; see ParticleMerger.reindex_particles (B-04).
+        self._reindex_merger(mask)
     
     def _internalization_fallback(
         self,
@@ -344,17 +363,28 @@ class ContinuousProcessesHandler:
             rate = self.config.compression_rate
             poro_new = min_poro + (poro_old - min_poro) * np.exp(-rate * dt)
 
-        poro_view[active] = poro_new[active]
+        # NOTE: porosity is deliberately NOT written here any more. It is
+        # written together with V_dry further down, over the *same* mask.
+        # Writing it for every `active` particle while V_dry was only written
+        # for `write_dry` changed V_solid = V_dry*(1-eps) for the difference
+        # set -- i.e. it created solid mass out of nothing whenever the volume
+        # bookkeeping was skipped (eps -> 1, non-finite V_dry).
+        # See docs/Audit_2026-08-17.md, B-07.
 
         # ------------------------------------------------------------------
         # Step 2: conserve V_solid, shrink V_pore
         # ------------------------------------------------------------------
-        V_dry_old = v_dry_view
+        # Real copy, not a view onto `v_dry_view`: everything below is derived
+        # from the pre-compression state, and `v_dry_view` is written to in this
+        # very block. Aliasing it under the name "old" was a trap waiting for
+        # the next edit (B-16).
+        V_dry_old = v_dry_view.copy()
         one_minus_new = 1.0 - poro_new
 
-        # Guards mirroring the original per-particle `continue` statements: the
-        # porosity update above still applies to these particles, only the
-        # volume/saturation bookkeeping is skipped.
+        # Guards mirroring the original per-particle `continue` statements.
+        # A particle that fails any of them is left COMPLETELY untouched this
+        # step -- porosity, V_dry and saturation all keep their old values.
+        # Updating only some of them is what broke the V_solid invariant.
         reached = (
             active
             & (V_dry_old > 0)
@@ -372,12 +402,24 @@ class ContinuousProcessesHandler:
 
             V_dry_new = V_solid + V_pore_new
             write_dry = vol_ok & (V_dry_new > 0) & np.isfinite(V_dry_new)
+            # Porosity and V_dry are written together over one and the same
+            # mask, so V_solid = V_dry*(1-eps) is invariant by construction
+            # (V_pore_new was derived from exactly this V_solid). Particles
+            # outside `write_dry` keep BOTH their old porosity and their old
+            # V_dry -- they are simply not compressed this step.
+            poro_view[write_dry] = poro_new[write_dry]
             v_dry_view[write_dry] = V_dry_new[write_dry]
+            # X is the collision diameter derived from V_dry; compression
+            # changes V_dry for the whole population, so X has to follow.
+            solver.sync_particle_diameters(write_dry)
 
             # Step 3: saturation rises as pores shrink; excess liquid becomes
             # external. `liquid_volume` (total per particle) stays untouched, so
             # total liquid is conserved by construction.
-            sat_mask = vol_ok & (V_pore_new > 0)
+            # `write_dry`, not `vol_ok`: saturation must be recomputed against
+            # the pore volume the particle ACTUALLY has now. For a particle
+            # whose V_dry was not written, V_pore_new never became reality.
+            sat_mask = write_dry & (V_pore_new > 0)
             if np.any(sat_mask):
                 V_liq_int_old = np.minimum(
                     solver.liquid_volume[:a_tot], V_pore_old * sat_view
@@ -386,6 +428,9 @@ class ContinuousProcessesHandler:
                 np.divide(V_liq_int_old, V_pore_new, out=new_sat, where=sat_mask)
                 np.minimum(new_sat, 1.0, out=new_sat)
                 sat_view[sat_mask] = new_sat[sat_mask]
+
+            # V_dry, porosity and saturation all feed the merger's hash key.
+            self._reindex_merger(write_dry)
 
         # === DEBUG COMP: NACH KOMPRESSION ===
         if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_comp', True):

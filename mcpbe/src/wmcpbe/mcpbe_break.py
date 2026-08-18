@@ -56,20 +56,15 @@ class MCPBEBreak:
 
         self._prepare_break_delta_config()
         self._break_dW_const = float(getattr(self, "_break_dW_const", 50.0))
-        
-        # Initialize particle merger for n_comp reduction
-        # Enabled by default; can be disabled via enable_particle_merging=False
-        if not hasattr(self, '_enable_particle_merging') or self._enable_particle_merging:
-            self._particle_merger = ParticleMerger(
-                self,
-                use_hash_index=True,
-                tol_rel=getattr(self, '_fragment_merge_tol', 1e-6),  # 0.0001% relative tolerance
-                tol_abs_liquid=1e-30,
-                bin_digits_volume=8,
-                bin_digits_poro=4,
-            )
-        else:
-            self._particle_merger = None
+
+        # The ParticleMerger used to be created HERE, which tied a purely
+        # numerical helper to a physical configuration choice: with
+        # process_type="agglomeration" this method never runs, so
+        # agglomeration-only and nucleation-only setups silently had no dedup
+        # at all (see docs/Audit_2026-08-17.md, B-05/B-22). It now lives in
+        # mcpbe_base._ensure_particle_merger(), called from
+        # _initialize_samplers() regardless of process_type.
+        self._ensure_particle_merger()
 
     # ------------------------------------------------------------------
     # Breakage rate (full table and single-point)
@@ -718,7 +713,6 @@ class MCPBEBreak:
                 from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
                 porosity_kernel = get_porosity_growth_kernel('volume_mixing')
 
-        breakage_energy = None
         use_deferred_poro = (hasattr(self, "porosity") and len(frags) > 1 and
                              porosity_kernel is not None and
                              hasattr(porosity_kernel, '_compute_fragment_porosity_multi'))
@@ -736,7 +730,6 @@ class MCPBEBreak:
                         parent_porosity=parent_poro,
                         fragment_volume=V_solid_frag,
                         parent_volume=parent_volume_total,
-                        breakage_energy=breakage_energy,
                         solver=self
                     ) if porosity_kernel is not None else parent_poro
 
@@ -769,7 +762,6 @@ class MCPBEBreak:
                 parent_porosity=parent_poro,
                 fragment_volumes=frag_solid_volumes,
                 parent_volume=parent_volume_solid,
-                breakage_energy=breakage_energy,
                 solver=self
             )
             # Update frag_props with final porosities and recompute V_dry
@@ -852,6 +844,15 @@ class MCPBEBreak:
                 self._append_particle_column(f_comp)
                 new_idx = self.a_tot - 1
                 self.W[new_idx] = dW
+                # V_dry MUST be written here. `_append_particle_column` left
+                # V_solid_frag in V_flat[-1]; setting the porosity below without
+                # correcting V_dry makes every later mass sum read
+                # V_solid_frag*(1 - frag_poro) instead of V_solid_frag, i.e. it
+                # DESTROYS solid mass proportional to the fragment porosity.
+                # The agglomeration fallback (mcpbe_agg._merge_pair) always did
+                # this; this branch is a drifted copy of it.
+                # See docs/Audit_2026-08-17.md, B-17.
+                self.set_particle_dry_volume(new_idx, V_dry_frag)
                 if hasattr(self, "liquid_volume"):
                     self.liquid_volume[new_idx] = liq_frag
                 if hasattr(self, "porosity"):
@@ -1224,7 +1225,17 @@ class MCPBEBreak:
         """
     
         self._ensure_break_sampler()
-    
+
+        # Reset FIRST, exactly like _do_one_agg does with _last_agg_dW.
+        # solve() adds `_last_break_dW` to real_break_events unconditionally
+        # after every call, so without this every early return (empty sampler,
+        # all candidates unbreakable, ...) re-booked the packet size of the
+        # last SUCCESSFUL event. real_break_events -- the number the
+        # agglomeration/breakage balance is read from, and which is written to
+        # real_break_events_save at every output time -- came out too high.
+        # See docs/Audit_2026-08-17.md, B-18.
+        self._last_break_dW = 0.0
+
         # DEBUG: Initialize stats EARLY (before ANY return)
         if not hasattr(self, '_break_debug_stats'):
             self._break_debug_stats = {
@@ -1252,13 +1263,24 @@ class MCPBEBreak:
             self._break_debug_stats['attempted'] += 1
     
             # Available weight represented by this compute particle
+            # Accept/reject bookkeeping, mirroring the agglomeration side
+            # (_agg_accepted_count / _agg_rejected_count, set in
+            # mcpbe_agg._select_pair when the acceptance kernel runs). Without
+            # it there was no way to tell "breakage is slow" from "breakage is
+            # attempted constantly and always rejected".
+            if not hasattr(self, '_break_accepted_count'):
+                self._break_accepted_count = 0
+                self._break_rejected_count = 0
+
             Wk0 = float(self.W[k])
             if Wk0 <= 0.0:
+                self._break_rejected_count += 1
                 self._mark_unbreakable(k)
                 continue
-    
+
             dW_total = self._compute_dW_packet(k)
             if dW_total <= 0.0:
+                self._break_rejected_count += 1
                 self._mark_unbreakable(k)
                 continue
 
@@ -1291,12 +1313,17 @@ class MCPBEBreak:
                 self._break_debug_stats['produced_fragments'] += len(frags)
 
             if status == "disable":
+                self._break_rejected_count += 1
+                self._last_break_dW = 0.0  # nothing was consumed
                 self._mark_unbreakable(k)
                 return
 
             if status == "ok":
+                self._break_accepted_count += 1
                 self._break_apply_and_maintain(k, frags, dW, Vrem_k)
             else:
+                self._break_rejected_count += 1
+                self._last_break_dW = 0.0
                 return
     
             return  # Current breakage event completed.

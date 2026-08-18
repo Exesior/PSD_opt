@@ -896,55 +896,16 @@ class MCPBEAgg:
         # Compute merged porosity and V_dry BEFORE trying to find match
         V_dry_merged, poro_merged = self._merged_porosity(i, j, Vi_dry, Vj_dry, poro_i, poro_j)
         
-        # Compute merged liquid (needed for matching)
-        sat_i = self.saturation[i] if not np.isnan(poro_i) else 0.0
-        sat_j = self.saturation[j] if not np.isnan(poro_j) else 0.0
-        
-        V_pore_i = Vi_dry * poro_i if not np.isnan(poro_i) else 0.0
-        V_pore_j = Vj_dry * poro_j if not np.isnan(poro_j) else 0.0
-        
-        V_liq_int_i = V_pore_i * sat_i if V_pore_i > 0 else 0.0
-        V_liq_int_j = V_pore_j * sat_j if V_pore_j > 0 else 0.0
-        
-        liq_i = float(self.liquid_volume[i])
-        liq_j = float(self.liquid_volume[j])
-        V_liq_ext_i = liq_i - V_liq_int_i
-        V_liq_ext_j = liq_j - V_liq_int_j
-        
-        l_e_to_i = self.kernel_manager.compute_liquid_internalization_agglomeration(
-            v_dry1=float(Vi_dry),
-            v_dry2=float(Vj_dry),
-            v_liq_ext1=float(V_liq_ext_i),
-            v_liq_ext2=float(V_liq_ext_j),
-            particle1_idx=i,
-            particle2_idx=j,
-            solver=self,
-        ) if self.kernel_manager is not None else 0.0
-        
-        if i == j:
-            V_liq_int_contrib = 2.0 * V_liq_int_i
-            V_liq_ext_contrib = 2.0 * V_liq_ext_i
-        else:
-            V_liq_int_contrib = V_liq_int_i + V_liq_int_j
-            V_liq_ext_contrib = V_liq_ext_i + V_liq_ext_j
-        
-        V_liq_int_merged = V_liq_int_contrib + l_e_to_i
-        V_liq_ext_merged = V_liq_ext_contrib - l_e_to_i
-        
-        if V_liq_ext_merged < 0.0:
-            V_liq_int_merged = V_liq_int_contrib + V_liq_ext_contrib
-            V_liq_ext_merged = 0.0
-        
-        V_pore_merged = V_dry_merged * poro_merged if not np.isnan(poro_merged) else 0.0
-        sat_merged = V_liq_int_merged / V_pore_merged if V_pore_merged > 0 else 0.0
-        
-        if sat_merged > 1.0:
-            V_liq_ext_merged += V_pore_merged * (sat_merged - 1.0)
-            V_liq_int_merged = V_pore_merged
-            sat_merged = 1.0
-        
-        liquid_merged = V_liq_int_merged + V_liq_ext_merged
-        
+        # Merged liquid and saturation. Needed BEFORE the ParticleMerger lookup,
+        # because `liquid_target` is part of the match criteria -- which is why
+        # this cannot be deferred to a post-creation helper (see B-09).
+        liquid_merged, sat_merged = compute_merged_liquid(
+            self, i, j,
+            Vi_dry=Vi_dry, Vj_dry=Vj_dry,
+            poro_i=poro_i, poro_j=poro_j,
+            V_dry_merged=V_dry_merged, poro_merged=poro_merged,
+        )
+
         # Try to find existing particle with matching properties using ParticleMerger
         if hasattr(self, '_particle_merger') and self._particle_merger is not None:
             new_idx, was_merged = self._particle_merger.find_or_create(
@@ -958,11 +919,20 @@ class MCPBEAgg:
             )
             
             if was_merged:
-                # Existing particle found: only W was updated
-                # Update saturation and liquid_volume to ensure consistency
-                # (should already match within tolerance, but be safe)
-                self.saturation[new_idx] = sat_merged
-                self.liquid_volume[new_idx] = liquid_merged
+                # Existing particle found: ONLY W was updated -- that is the
+                # ParticleMerger's contract and what makes the merge exactly
+                # mass conserving (all other properties are intensive, so
+                # adding another physical particle of the same kind does not
+                # change them).
+                #
+                # This used to additionally overwrite saturation and
+                # liquid_volume "to be safe". It was not safe: the match is
+                # only within tolerance, so the overwrite applied that
+                # difference to the target's ENTIRE existing weight, not just
+                # to the dW being added -- and it silently changed the
+                # particle's merger hash key behind the index's back. Breakage
+                # never did this; the two paths had drifted.
+                # See docs/Audit_2026-08-17.md, B-15.
                 return new_idx
             # else: new particle created, continue with initialization below
         else:
@@ -980,8 +950,8 @@ class MCPBEAgg:
         else:
             self.V_flat[:dim, new_idx] = V_flat_dim
         
-        # V_flat[-1] holds V_dry
-        self.V_flat[-1, new_idx] = V_dry_merged
+        # V_flat[-1] holds V_dry; X is derived from it and must follow.
+        self.set_particle_dry_volume(new_idx, V_dry_merged)
         
         # Set liquid and saturation
         self.saturation[new_idx] = sat_merged
@@ -1013,19 +983,12 @@ class MCPBEAgg:
         sat_i = self.saturation[i]
         sat_j = self.saturation[j]
 
-        # Simplified collision energy E ~ 0.5 m v^2 with v ~ G * d_eff.
-        rho = 1000.0  # kg/m^3, assumed granule density
-        d_eff = float(self.X[i] + self.X[j]) * 0.5
-        v_rel = float(getattr(self, "G", 1000.0)) * d_eff
-        E_coll = 0.5 * (rho * float(Vi_dry + Vj_dry)) * v_rel**2
-
         kernel = self._porosity_growth_kernel()
         return kernel.compute_merged_porosity(
             v_dry1=float(Vi_dry), poro1=poro_i,
             v_dry2=float(Vj_dry), poro2=poro_j,
             v_liq1=lv_i, v_liq2=lv_j,
             sat1=sat_i, sat2=sat_j,
-            collision_energy=E_coll,
             solver=self,
         )
 
@@ -1044,70 +1007,16 @@ class MCPBEAgg:
             self._default_porosity_kernel = kernel
         return kernel
 
-    def _merge_liquid(
-        self, i, j, new_idx, Vi_dry, Vj_dry, poro_i, poro_j, V_dry_merged
-    ) -> None:
-        """Combine the parents' liquid into the child and set its saturation.
-
-        ``liquid_volume`` is intensive (per physical particle), so the child
-        simply receives the *sum* of the parents' liquid - no ``dW/W`` scaling.
-        A self-collision (``i == j``) merges two physical particles of the same
-        computational particle, hence the factor 2.
-        """
-        sat_i = self.saturation[i] if not np.isnan(poro_i) else 0.0
-        sat_j = self.saturation[j] if not np.isnan(poro_j) else 0.0
-
-        V_pore_i = Vi_dry * poro_i if not np.isnan(poro_i) else 0.0
-        V_pore_j = Vj_dry * poro_j if not np.isnan(poro_j) else 0.0
-
-        V_liq_int_i = V_pore_i * sat_i if V_pore_i > 0 else 0.0
-        V_liq_int_j = V_pore_j * sat_j if V_pore_j > 0 else 0.0
-
-        liq_i = float(self.liquid_volume[i])
-        liq_j = float(self.liquid_volume[j])
-        V_liq_ext_i = liq_i - V_liq_int_i
-        V_liq_ext_j = liq_j - V_liq_int_j
-
-        # Braumann et al. (2007): surface liquid trapped in the newly formed
-        # contact pores. Without a configured kernel this is 0 (no transfer).
-        l_e_to_i = self.kernel_manager.compute_liquid_internalization_agglomeration(
-            v_dry1=float(Vi_dry),
-            v_dry2=float(Vj_dry),
-            v_liq_ext1=float(V_liq_ext_i),
-            v_liq_ext2=float(V_liq_ext_j),
-            particle1_idx=i,
-            particle2_idx=j,
-            solver=self,
-        )
-
-        if i == j:
-            V_liq_int_contrib = 2.0 * V_liq_int_i
-            V_liq_ext_contrib = 2.0 * V_liq_ext_i
-        else:
-            V_liq_int_contrib = V_liq_int_i + V_liq_int_j
-            V_liq_ext_contrib = V_liq_ext_i + V_liq_ext_j
-
-        V_liq_int_merged = V_liq_int_contrib + l_e_to_i
-        V_liq_ext_merged = V_liq_ext_contrib - l_e_to_i
-
-        # Cannot internalise more than the available external liquid.
-        if V_liq_ext_merged < 0.0:
-            V_liq_int_merged = V_liq_int_contrib + V_liq_ext_contrib
-            V_liq_ext_merged = 0.0
-
-        poro_new = self.porosity[new_idx]
-        V_pore_merged = V_dry_merged * poro_new if not np.isnan(poro_new) else 0.0
-
-        sat_merged = V_liq_int_merged / V_pore_merged if V_pore_merged > 0 else 0.0
-
-        # Pores cannot hold more than their volume: the excess becomes external.
-        if sat_merged > 1.0:
-            V_liq_ext_merged += V_pore_merged * (sat_merged - 1.0)
-            V_liq_int_merged = V_pore_merged
-            sat_merged = 1.0
-
-        self.saturation[new_idx] = sat_merged
-        self.liquid_volume[new_idx] = V_liq_int_merged + V_liq_ext_merged
+    # NOTE: `_merge_liquid()` used to live here. It was dead code -- the very
+    # same liquid bookkeeping is done inline in `_merge_pair` (which needs the
+    # values BEFORE the ParticleMerger lookup, to match on `liquid_target`,
+    # while `_merge_liquid` wrote them AFTER the particle existed). Two copies
+    # of one rule, one of them unreachable, is precisely the failure mode
+    # documented in Fundamentals.md section 7: a fix applied to the readable,
+    # documented method would have had no effect at all.
+    # The shared, side-effect-free computation now lives in
+    # `compute_merged_liquid()` at the bottom of this module and is called from
+    # `_merge_pair`. See docs/Audit_2026-08-17.md, B-09.
 
     def _consume_parent_weight(self, i: int, j: int, dW: float) -> None:
         """Remove ``dW`` physical particles from each parent.
@@ -1179,6 +1088,84 @@ class MCPBEAgg:
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+def compute_merged_liquid(
+    solver, i: int, j: int, *,
+    Vi_dry: float, Vj_dry: float,
+    poro_i: float, poro_j: float,
+    V_dry_merged: float, poro_merged: float,
+) -> tuple[float, float]:
+    """Liquid volume and saturation of the child of ``i`` and ``j``.
+
+    Pure computation, no state is written -- deliberately, because the caller
+    needs these values *before* the particle exists (``liquid_target`` is one of
+    the ParticleMerger's match criteria). This replaces the dead
+    ``MCPBEAgg._merge_liquid``, which held a second copy of the same rule and
+    could never run. See docs/Audit_2026-08-17.md, B-09.
+
+    ``liquid_volume`` is intensive, so the child receives the *sum* of the
+    parents' liquid -- no ``dW/W`` scaling. A self-collision (``i == j``) merges
+    two physical particles of the same computational particle, hence the
+    factor 2.
+
+    Returns ``(liquid_total, saturation)``.
+    """
+    sat_i = solver.saturation[i] if not np.isnan(poro_i) else 0.0
+    sat_j = solver.saturation[j] if not np.isnan(poro_j) else 0.0
+
+    V_pore_i = Vi_dry * poro_i if not np.isnan(poro_i) else 0.0
+    V_pore_j = Vj_dry * poro_j if not np.isnan(poro_j) else 0.0
+
+    V_liq_int_i = V_pore_i * sat_i if V_pore_i > 0 else 0.0
+    V_liq_int_j = V_pore_j * sat_j if V_pore_j > 0 else 0.0
+
+    liq_i = float(solver.liquid_volume[i])
+    liq_j = float(solver.liquid_volume[j])
+    V_liq_ext_i = liq_i - V_liq_int_i
+    V_liq_ext_j = liq_j - V_liq_int_j
+
+    # Braumann et al. (2007): surface liquid trapped in the newly formed
+    # contact pores. Without a configured kernel this is 0 (no transfer).
+    l_e_to_i = (
+        solver.kernel_manager.compute_liquid_internalization_agglomeration(
+            v_dry1=float(Vi_dry),
+            v_dry2=float(Vj_dry),
+            v_liq_ext1=float(V_liq_ext_i),
+            v_liq_ext2=float(V_liq_ext_j),
+            particle1_idx=i,
+            particle2_idx=j,
+            solver=solver,
+        )
+        if getattr(solver, "kernel_manager", None) is not None
+        else 0.0
+    )
+
+    if i == j:
+        V_liq_int_contrib = 2.0 * V_liq_int_i
+        V_liq_ext_contrib = 2.0 * V_liq_ext_i
+    else:
+        V_liq_int_contrib = V_liq_int_i + V_liq_int_j
+        V_liq_ext_contrib = V_liq_ext_i + V_liq_ext_j
+
+    V_liq_int_merged = V_liq_int_contrib + l_e_to_i
+    V_liq_ext_merged = V_liq_ext_contrib - l_e_to_i
+
+    # Cannot internalise more than the available external liquid.
+    if V_liq_ext_merged < 0.0:
+        V_liq_int_merged = V_liq_int_contrib + V_liq_ext_contrib
+        V_liq_ext_merged = 0.0
+
+    V_pore_merged = V_dry_merged * poro_merged if not np.isnan(poro_merged) else 0.0
+    sat_merged = V_liq_int_merged / V_pore_merged if V_pore_merged > 0 else 0.0
+
+    # Pores cannot hold more than their volume: the excess becomes external.
+    if sat_merged > 1.0:
+        V_liq_ext_merged += V_pore_merged * (sat_merged - 1.0)
+        V_liq_int_merged = V_pore_merged
+        sat_merged = 1.0
+
+    return V_liq_int_merged + V_liq_ext_merged, sat_merged
+
+
 def _ensure_len(arr: np.ndarray | None, size: int) -> np.ndarray:
     """Return ``arr`` if it is at least ``size`` long, else a fresh zero array."""
     if arr is None or arr.shape[0] < size:

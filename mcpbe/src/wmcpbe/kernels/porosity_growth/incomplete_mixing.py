@@ -48,10 +48,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
         trapped_pore_fraction: Fraction of smaller particle volume that
                                becomes trapped pores (default: 0.1)
                                Typical range: 0.05 - 0.3
-        energy_dependent: If True, f_trap decreases with collision energy
-                         (default: False)
-        energy_threshold: Collision energy above which f_trap decreases [J]
-                         (default: 1e-12)
     
     Example:
         >>> kernel = IncompleteMixingKernel(trapped_pore_fraction=0.15)
@@ -69,8 +65,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
     def get_default_params(self) -> dict:
         return {
             'trapped_pore_fraction': 0.1,
-            'energy_dependent': False,
-            'energy_threshold': 1e-12,
             'nucleation_porosity': 0.0,  # Start with Vollkörper (NaN), porosity grows via agglomeration
         }
     
@@ -81,16 +75,12 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
         
         # Cache values
         self.f_trap = float(self.params['trapped_pore_fraction'])
-        self.energy_dependent = bool(self.params['energy_dependent'])
-        self.e_thresh = float(self.params['energy_threshold'])
         self.nucleation_porosity = float(self.params['nucleation_porosity'])
     
     def validate_params(self, params: dict) -> dict:
         """Validate parameters."""
         if not (0 <= params['trapped_pore_fraction'] <= 1):
             raise ValueError("trapped_pore_fraction must be in [0, 1]")
-        if params['energy_threshold'] < 0:
-            raise ValueError("energy_threshold must be non-negative")
         if not (0 <= params['nucleation_porosity'] <= 0.999):
             raise ValueError("nucleation_porosity must be in [0, 0.999]")
         return params
@@ -102,7 +92,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
                                  v_liq2: float = None,
                                  sat1: float = None,
                                  sat2: float = None,
-                                 collision_energy: float = None,
                                  solver = None
                                  ) -> tuple[float, float]:
         """
@@ -115,7 +104,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
             poro2: Porosity of particle 2 (NaN for Vollkörper)
             v_liq1, v_liq2: Liquid volumes (optional, affects f_trap)
             sat1, sat2: Saturations (optional, affects coalescence)
-            collision_energy: Collision energy [J] (optional)
             solver: Not used
         
         Returns:
@@ -164,14 +152,7 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
         if not (is_vollkoerper_1 and is_vollkoerper_2):
             # Effective trapped pore fraction
             f_trap_eff = self.f_trap
-            
-            # Energy-dependent reduction (higher energy → better coalescence)
-            if self.energy_dependent and collision_energy is not None:
-                if collision_energy > self.e_thresh:
-                    # Reduce f_trap with increasing energy
-                    energy_factor = self.e_thresh / collision_energy
-                    f_trap_eff = self.f_trap * min(1.0, energy_factor)
-            
+
             # Liquid-enhanced coalescence (more liquid → better merging)
             if v_liq1 is not None and v_liq2 is not None:
                 v_liq_total = v_liq1 + v_liq2
@@ -266,7 +247,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
                                    parent_porosity: float,
                                    fragment_volume: float,
                                    parent_volume: float,
-                                   breakage_energy: float = None,
                                    solver = None
                                    ) -> float:
         """
@@ -287,7 +267,6 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
             parent_porosity: Parent particle porosity (NaN for Vollkörper)
             fragment_volume: Fragment solid volume [m³] (not used)
             parent_volume: Parent solid volume [m³] (not used)
-            breakage_energy: Breakage energy [J] (optional, affects collapse)
             solver: Not used
         
         Returns:
@@ -300,14 +279,7 @@ class IncompleteMixingKernel(PorosityGrowthKernel):
         
         # Base collapse factor (10% pore reduction by default)
         collapse_factor = 0.1
-        
-        # Energy-dependent enhancement (more energy → more collapse)
-        if breakage_energy is not None and breakage_energy > 0:
-            # Reference energy scale (tune based on material)
-            e_ref = 1e-12  # J
-            energy_factor = 1.0 + min(1.0, breakage_energy / e_ref)
-            collapse_factor *= energy_factor
-        
+
         # Clamp collapse factor
         collapse_factor = max(0.0, min(0.5, collapse_factor))  # Max 50% collapse
         

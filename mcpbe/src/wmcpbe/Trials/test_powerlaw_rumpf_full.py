@@ -49,10 +49,10 @@ class TestConfig:
     """Physical and numerical parameters for comprehensive test."""
     
     # Seed for reproducibility
-    SEED = 42
+    SEED = 205
     
     # Time settings
-    T_TOTAL = 20.0      # Total simulation time [s] - EXTENDED RUN
+    T_TOTAL = 100.0      # Total simulation time [s] - EXTENDED RUN
     T_WRITE = 0.2       # Output interval [s]
     
     # Particle properties (initial)
@@ -68,13 +68,13 @@ class TestConfig:
     VOLUMETRIC_FLOW_RATE = 3e-10       # m³/s
     NUCLEATION_DURATION = 10.0         # s
     AGG_COEFFICIENT = 4            # Constant kernel coefficient [m³/s] - HIGH for testing
-    BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?   
+    BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True
-    PL_P1 = 4e14                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
+    PL_P1 = 4e13                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
     PL_P2 = 1.0                       # Volume exponent in S = P1*G*V^P2
-    G = 5000.0                        # Shear rate [1/s]
+    G = 1000.0                        # Shear rate [1/s]
     BREAKRVAL = 4                     # Volume-based power law
     # Rumpf strength parameters
     RUMPF_K = 2.5                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
@@ -89,7 +89,7 @@ class TestConfig:
     
     # Liquid internalization parameters
     LIQ_INTERN_ENABLED = True
-    LIQ_INTERN_RATE = 1e9             # Rate constant [1/(m³·s)]
+    LIQ_INTERN_RATE = 1e12             # Rate constant [1/(m³·s)]
     
     # Liquid internalization during agglomeration
     LIQ_INTERN_AGG_ENABLED = True
@@ -97,8 +97,8 @@ class TestConfig:
     # Agglomeration acceptance (Stokes criterion)
     STOKES_ENABLED = True
     BINDER_VISCOSITY = 0.1            # Pa·s
-    COLLISION_VELOCITY = 0.01          # m/s
-    H_A = 500e-15                      # m (half-distance of closest approach)
+    COLLISION_VELOCITY = 0.5          # m/s
+    H_A = 500e-9                      # m (half-distance of closest approach)
     
     # Numerical settings
     INITIAL_PARTICLES = 2000          # Computational particles
@@ -109,6 +109,11 @@ class TestConfig:
     MERGER_TOLERANCE = 1e-4               # Relative tolerance for matching (0.0001%)
     USE_HASH_INDEX = True    
     
+    #Solver parameters
+    AGG_DW_MIN = 1.0
+    AGG_DW_MAX = 20.0
+    BREAK_DW_MAX = 50.0
+    SIZEEVAL = 0
 
 
 # =============================================================================
@@ -305,6 +310,13 @@ def run_comprehensive_test() -> Dict[str, Any]:
     # Configure process type
     solver.process_type = "mix"  # Agglomeration + Breakage
     solver.recon_enable = False
+
+    # MC packet sizes -- must be set before _initialize_samplers() reads them.
+    # See TestConfig.AGG_DW_MIN/_MAX/BREAK_DW_MAX above (B-06).
+    solver.agg_dW_min = cfg.AGG_DW_MIN
+    solver.agg_dW_max = cfg.AGG_DW_MAX
+    solver.break_dW_max = cfg.BREAK_DW_MAX
+    solver.SIZEEVAL = cfg.SIZEEVAL
     
     # Initialize particles with custom properties
     # IMPORTANT: V_flat structure for dim=1:

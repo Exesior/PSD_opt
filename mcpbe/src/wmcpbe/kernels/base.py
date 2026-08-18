@@ -318,7 +318,6 @@ class PorosityGrowthKernel(KernelBase):
                                  v_liq2: Optional[float] = None,
                                  sat1: Optional[float] = None,
                                  sat2: Optional[float] = None,
-                                 collision_energy: Optional[float] = None,
                                  solver: Optional[Any] = None
                                  ) -> tuple[float, float]:
         """
@@ -333,7 +332,6 @@ class PorosityGrowthKernel(KernelBase):
             v_liq2: Liquid volume of particle 2 [m³] (optional)
             sat1: Saturation of particle 1 (optional)
             sat2: Saturation of particle 2 (optional)
-            collision_energy: Estimated collision energy [J] (optional)
             solver: Reference to solver (optional)
         
         Returns:
@@ -376,7 +374,6 @@ class PorosityGrowthKernel(KernelBase):
                                    parent_porosity: float,
                                    fragment_volume: float,
                                    parent_volume: float,
-                                   breakage_energy: Optional[float] = None,
                                    solver: Optional[Any] = None
                                    ) -> float:
         """
@@ -389,7 +386,6 @@ class PorosityGrowthKernel(KernelBase):
             parent_porosity: Parent particle porosity (NaN for Vollkörper)
             fragment_volume: Fragment solid volume [m³]
             parent_volume: Parent solid volume [m³]
-            breakage_energy: Estimated breakage energy [J] (optional)
             solver: Reference to solver (optional)
         
         Returns:

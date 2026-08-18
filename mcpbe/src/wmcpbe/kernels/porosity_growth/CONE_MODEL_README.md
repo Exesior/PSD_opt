@@ -211,7 +211,6 @@ V_dry_merged, poro_merged = porosity_kernel.compute_merged_porosity(
     v_dry2=float(Vj_dry), poro2=poro_j,
     v_liq1=lv_i, v_liq2=lv_j,
     sat1=sat_i, sat2=sat_j,
-    collision_energy=E_coll,
     solver=self
 )
 
@@ -234,7 +233,6 @@ frag_poro = porosity_kernel.compute_fragment_porosity(
     parent_porosity=parent_poro,
     fragment_volume=V_solid_frag,  # ← Einzelnes Fragment
     parent_volume=float(np.sum(self.V_flat[:self.dim, k])),
-    breakage_energy=breakage_energy,
     solver=self
 )
 ```
@@ -249,7 +247,6 @@ poros_all = porosity_kernel.compute_fragment_porosity(
     parent_porosity=parent_poro,
     fragment_volumes=fragment_volumes,  # ← Liste!
     parent_volume=parent_volume,
-    breakage_energy=breakage_energy,
     solver=self
 )
 
@@ -332,7 +329,6 @@ UserWarning: Fragment volumes (2.9e-18) don't sum to parent volume
 
 - **Andere Topologien:** Stern-Graph, Complete Graph statt linearer Kette
 - **Größenabhängigkeit:** k_agg(r), k_break(r) statt konstant
-- **Energieabhängigkeit:** ΔV(E_coll) für stress-sensitive Modelle
 
 ---
 

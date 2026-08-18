@@ -238,8 +238,6 @@ v_dry = v_solid / (1.0 - 0.4)
 ```python
 kernel = get_porosity_growth_kernel('incomplete_mixing',
     trapped_pore_fraction=0.1,   # 10% zusätzliche Poren
-    energy_dependent=False,      # Optional: Energieabhängigkeit
-    energy_threshold=1e-12,      # J
     collapse_factor=0.1          # 10% Porenkollaps beim Bruch
 )
 ```

@@ -428,45 +428,7 @@ class ExampleAggregationKernel(AggregationKernel):
     # -------------------------------------------------------------------------
     # OPTIONAL: Helper Methods
     # -------------------------------------------------------------------------
-    
-    def _compute_collision_energy(
-        self,
-        r1: float,
-        r2: float,
-        solver: Optional[Any] = None
-    ) -> float:
-        """
-        Estimate collision energy (helper method, optional).
-        
-        Useful for energy-dependent kernels (e.g., breakage, coalescence efficiency).
-        
-        Formula: E_coll ≈ 0.5 × m × v²
-        
-        Args:
-            r1, r2: Particle radii [m]
-            solver: Solver instance (for shear rate G)
-        
-        Returns:
-            Collision energy [J]
-        """
-        # Effective radius
-        r_eff = (r1 + r2) / 2.0
-        
-        # Assume particle density
-        rho = 1000.0  # kg/m³
-        
-        # Particle mass
-        m = (4.0 / 3.0) * np.pi * r_eff**3 * rho
-        
-        # Relative velocity (from shear)
-        g = self.g if solver is None else getattr(solver, 'G', 1000.0)
-        v_rel = g * (2 * r_eff)
-        
-        # Collision energy
-        e_coll = 0.5 * m * v_rel**2
-        
-        return e_coll
-    
+
     def _compute_stokes_number(
         self,
         r: float,

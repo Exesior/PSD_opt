@@ -333,7 +333,6 @@ class ConeModelKernel(PorosityGrowthKernel):
                                  v_liq2: float = None,
                                  sat1: float = None,
                                  sat2: float = None,
-                                 collision_energy: float = None,
                                  solver = None
                                  ) -> tuple[float, float]:
         """
@@ -357,7 +356,6 @@ class ConeModelKernel(PorosityGrowthKernel):
             poro2: Porosity of particle 2 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_liq1, v_liq2: Liquid volumes (not used in this model)
             sat1, sat2: Saturations (not used in this model)
-            collision_energy: Not used in this model
             solver: Not used
         
         Returns:
@@ -536,7 +534,6 @@ class ConeModelKernel(PorosityGrowthKernel):
                                    parent_porosity: float,
                                    fragment_volume: Union[float, List[float], np.ndarray],
                                    parent_volume: float,
-                                   breakage_energy: float = None,
                                    solver = None
                                    ) -> Union[float, List[float]]:
         """
@@ -562,7 +559,6 @@ class ConeModelKernel(PorosityGrowthKernel):
             fragment_volumes: List/array of fragment dry volumes [m³]
                              OR single fragment volume for backward compatibility
             parent_volume: Dry volume of parent particle [m³]
-            breakage_energy: Not used in this model
             solver: Not used
         
         Returns:
@@ -584,7 +580,7 @@ class ConeModelKernel(PorosityGrowthKernel):
         # ==========================================
         if isinstance(fragment_volume, (int, float)):
             result = self._compute_fragment_porosity_multi(
-                parent_porosity, [fragment_volume], parent_volume, breakage_energy, solver
+                parent_porosity, [fragment_volume], parent_volume, solver
             )
             return result[0] if result else parent_porosity
         
@@ -593,14 +589,13 @@ class ConeModelKernel(PorosityGrowthKernel):
             fragment_volume = fragment_volume.tolist()
         
         return self._compute_fragment_porosity_multi(
-            parent_porosity, fragment_volume, parent_volume, breakage_energy, solver
+            parent_porosity, fragment_volume, parent_volume, solver
         )
     
     def _compute_fragment_porosity_multi(self,
                                           parent_porosity: float,
                                           fragment_volumes: List[float],
                                           parent_volume: float,
-                                          breakage_energy: float = None,
                                           solver = None
                                           ) -> List[float]:
         """

@@ -109,12 +109,12 @@ class _FakeExternalizingPorosityKernel:
         self.fixed_porosities = list(fixed_porosities)
 
     def _compute_fragment_porosity_multi(self, parent_porosity, fragment_volumes,
-                                          parent_volume, breakage_energy=None, solver=None):
+                                          parent_volume, solver=None):
         assert len(fragment_volumes) == len(self.fixed_porosities)
         return list(self.fixed_porosities)
 
     def compute_fragment_porosity(self, parent_porosity, fragment_volume,
-                                   parent_volume, breakage_energy=None, solver=None):
+                                   parent_volume, solver=None):
         # Not expected to be called (2 fragments -> deferred multi path),
         # kept only for interface completeness.
         return self.fixed_porosities[0]

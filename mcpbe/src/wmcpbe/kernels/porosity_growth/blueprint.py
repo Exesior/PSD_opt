@@ -147,7 +147,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
         v_dry, poro = kernel.compute_merged_porosity(
             v_dry1=1e-18, poro1=0.4,
             v_dry2=2e-18, poro2=0.5,
-            collision_energy=1e-12
         )
         
         # Breakage
@@ -155,7 +154,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             parent_porosity=0.4,
             fragment_volume=5e-19,
             parent_volume=1e-18,
-            breakage_energy=1e-12
         )
         
         # Nucleation
@@ -326,7 +324,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
         v_liq2: float = None,
         sat1: float = None,
         sat2: float = None,
-        collision_energy: float = None,
         solver: Optional[Any] = None
     ) -> Tuple[float, float]:
         """
@@ -369,10 +366,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             
             sat2: Saturation of particle 2 (optional)
                 Type: float or None
-            
-            collision_energy: Collision energy [J] (optional)
-                Type: float or None
-                Purpose: For energy-dependent porosity models
             
             solver: Solver instance (optional)
                 Type: MCPBESolver or None
@@ -428,28 +421,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             
             return v_dry_merged, poro_merged
         
-        Example (Energy-Dependent Pore Creation):
-            # Base: volume mixing
-            V_solid_1 = v_dry1 * (1.0 - poro1) if not np.isnan(poro1) else v_dry1
-            V_solid_2 = v_dry2 * (1.0 - poro2) if not np.isnan(poro2) else v_dry2
-            V_pore_1 = v_dry1 * poro1 if not np.isnan(poro1) else 0.0
-            V_pore_2 = v_dry2 * poro2 if not np.isnan(poro2) else 0.0
-            
-            # Energy-dependent trapped pores
-            if collision_energy is not None and collision_energy > 0:
-                # Higher energy → more trapped pores
-                e_ref = self.your_param_2  # Reference energy
-                energy_factor = 1.0 + self.your_param_1 * (collision_energy / e_ref)
-                V_pore_trapped = energy_factor * min(V_pore_1, V_pore_2)
-            else:
-                V_pore_trapped = 0.0
-            
-            V_pore_merged = V_pore_1 + V_pore_2 + V_pore_trapped
-            V_solid_merged = V_solid_1 + V_solid_2
-            v_dry_merged = V_solid_merged + V_pore_merged
-            poro_merged = V_pore_merged / v_dry_merged if v_dry_merged > 0 else np.nan
-            
-            return v_dry_merged, poro_merged
         """
         # =====================================================================
         # STEP 1: Extract solid and pore volumes from parents
@@ -490,12 +461,7 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
         # V_pore_trapped = self.your_param_1 * min(v_dry1, v_dry2)
         # V_pore_merged += V_pore_trapped
         
-        # Example B: Energy-dependent pore creation
-        # if collision_energy is not None and collision_energy > self.your_param_2:
-        #     V_pore_created = self.your_param_1 * (collision_energy - self.your_param_2)
-        #     V_pore_merged += V_pore_created
-        
-        # Example C: Liquid-assisted pore collapse
+        # Example B: Liquid-assisted pore collapse
         # if sat1 is not None and sat2 is not None:
         #     sat_avg = (sat1 + sat2) / 2.0
         #     collapse_factor = 1.0 - self.your_param_1 * sat_avg
@@ -531,7 +497,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
         parent_porosity: float,
         fragment_volume: float,
         parent_volume: float,
-        breakage_energy: float = None,
         solver: Optional[Any] = None
     ) -> float:
         """
@@ -557,10 +522,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
                 Range: > 0
                 Note: Total solid volume before breakage
             
-            breakage_energy: Breakage energy [J] (optional)
-                Type: float or None
-                Purpose: For energy-dependent pore collapse
-            
             solver: Solver instance (optional)
                 Type: MCPBESolver or None
         
@@ -580,12 +541,7 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             # TODO: Add your physics here!
             # Examples:
             
-            # Example A: Pore collapse from mechanical stress
-            # if breakage_energy is not None and breakage_energy > 0:
-            #     collapse_factor = 1.0 - self.your_param_1 * (breakage_energy / e_ref)
-            #     frag_porosity = parent_porosity * collapse_factor
-            
-            # Example B: Size-dependent porosity (smaller = denser)
+            # Example A: Size-dependent porosity (smaller = denser)
             # size_ratio = fragment_volume / parent_volume
             # frag_porosity = parent_porosity * size_ratio ** self.your_param_1
             
@@ -595,20 +551,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             # Fragments inherit parent porosity (equal splitting of solid and pores)
             return parent_porosity
         
-        Example (Stress-Dependent Pore Collapse):
-            if np.isnan(parent_porosity):
-                return np.nan
-            
-            # Higher breakage energy → more pore collapse
-            if breakage_energy is not None and breakage_energy > 0:
-                e_ref = self.your_param_2  # Reference energy
-                collapse = self.your_param_1 * (breakage_energy / e_ref)
-                collapse = min(collapse, 0.5)  # Max 50% collapse
-                frag_porosity = parent_porosity * (1.0 - collapse)
-            else:
-                frag_porosity = parent_porosity
-            
-            return frag_porosity
         """
         # =====================================================================
         # STEP 1: Handle Vollkörper case
@@ -632,14 +574,7 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
         # collapse_factor = self.your_param_1  # e.g., 0.1 = 10% collapse
         # frag_porosity = parent_porosity * (1.0 - collapse_factor)
         
-        # Example B: Energy-dependent collapse
-        # if breakage_energy is not None and breakage_energy > self.your_param_2:
-        #     excess_energy = breakage_energy - self.your_param_2
-        #     collapse = self.your_param_1 * excess_energy
-        #     collapse = min(collapse, 0.5)  # Cap at 50%
-        #     frag_porosity = parent_porosity * (1.0 - collapse)
-        
-        # Example C: Size-dependent (smaller fragments are denser)
+        # Example B: Size-dependent (smaller fragments are denser)
         # size_ratio = fragment_volume / parent_volume
         # frag_porosity = parent_porosity * (size_ratio ** self.your_param_1)
         
@@ -808,30 +743,6 @@ class ExamplePorosityKernel(PorosityGrowthKernel):
             return v_dry
         return v_dry * (1.0 - porosity)
     
-    def _estimate_collision_energy(
-        self,
-        v_dry1: float,
-        v_dry2: float,
-        shear_rate: float = 1000.0
-    ) -> float:
-        """
-        Estimate collision energy (helper, optional).
-        
-        Formula: E_coll ≈ 0.5 × m × v²
-        
-        Args:
-            v_dry1, v_dry2: Dry volumes [m³]
-            shear_rate: Shear rate [1/s]
-        
-        Returns:
-            Estimated collision energy [J]
-        """
-        rho = 1000.0  # kg/m³ (assume density)
-        m = rho * (v_dry1 + v_dry2)
-        d_eff = (6 * (v_dry1 + v_dry2) / np.pi) ** (1/3)
-        v_rel = shear_rate * d_eff
-        e_coll = 0.5 * m * v_rel**2
-        return e_coll
 
 
 # =============================================================================

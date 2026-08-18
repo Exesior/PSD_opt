@@ -1285,9 +1285,61 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         return V_init, w_rep
 
 
+    def _ensure_particle_merger(self):
+        """Create the :class:`ParticleMerger`, unless one already exists.
+
+        The merger is a purely numerical device: it keeps ``n_comp`` down by
+        adding weight to an existing particle instead of appending a duplicate.
+        It is therefore independent of which physics is switched on, and is
+        created for every ``process_type`` -- agglomeration-only, breakage-only
+        and mix alike. (It used to be created inside
+        ``mcpbe_break._prepare_break_config``, so an agglomeration-only run had
+        no dedup at all, neither for merge children nor for nucleation.)
+
+        Knobs, both read from the solver so scripts can set them before
+        ``_initialize_samplers()``:
+
+        ``_enable_particle_merging``
+            ``False`` disables the merger entirely; every new particle gets its
+            own column. Nothing is maintained in that case.
+        ``_merger_use_hash_index``
+            ``False`` keeps the merger but replaces the O(1) hash lookup with a
+            linear scan over the active slice. Worth it while ``n_comp`` stays
+            small: the scan is vectorised NumPy, whereas the hash path pays key
+            computation plus dict traffic per lookup AND per property change.
+        ``_fragment_merge_tol``
+            Relative matching tolerance (default 1e-6).
+        """
+        # Disable check comes FIRST so that setting the flag after a merger was
+        # already built (scripts that flip it between _initialize_samplers()
+        # calls) actually takes effect instead of silently doing nothing.
+        if not getattr(self, "_enable_particle_merging", True):
+            self._particle_merger = None
+            return None
+
+        if getattr(self, "_particle_merger", None) is not None:
+            return self._particle_merger
+
+        from .particle_merger import ParticleMerger
+
+        self._particle_merger = ParticleMerger(
+            self,
+            use_hash_index=bool(getattr(self, "_merger_use_hash_index", True)),
+            tol_rel=float(getattr(self, "_fragment_merge_tol", 1e-6)),
+            tol_abs_liquid=1e-30,
+            bin_digits_volume=8,
+            bin_digits_poro=4,
+        )
+        # Seed the index with the particles that already exist. Without this
+        # the whole initial population is invisible to the very first lookup.
+        self._particle_merger.rebuild_hash_index()
+        return self._particle_merger
+
     def _initialize_samplers(self):
         """Build (or resize) samplers for agglomeration/breakage based on process_type."""
         pt = getattr(self, "process_type", "agglomeration")
+        # Numerical helper, not physics: needed for every process_type.
+        self._ensure_particle_merger()
 
         # Agglomeration
         if pt in ("agglomeration", "mix"):
@@ -1398,9 +1450,9 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         """Ensure room for ``a_tot + extra`` active columns.
 
         Grows every per-particle array together (see ``_PARTICLE_ARRAY_NAMES``)
-        with a factor in [1.1, 2.0]. Arrays that do not exist yet are skipped;
-        ``porosity`` is padded with NaN rather than 0.0 so that fresh slots read
-        as "no porosity assigned" (Vollkoerper).
+        with a factor in [1.1, 2.0]. Arrays that do not exist yet are skipped.
+        Fresh slots are filled from ``_RELEASED_SLOT_FILL`` (0.0 throughout), so
+        a new slot reads the same regardless of where it came from.
         """
         import time as time_module
         
@@ -1536,82 +1588,51 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # and should NOT be duplicated. Only weights W are doubled to represent more particles.
         self.Vc *= 2.0
         V_active = self.V_flat[:, :self.a_tot]
-        X_active = self.X[:self.a_tot]
-        W_active = self.W[:self.a_tot]
-        lv_active = self.liquid_volume[:self.a_tot]
-        por_active = self.porosity[:self.a_tot]
-        sat_active = self.saturation[:self.a_tot]
         V_dup = np.concatenate((V_active, V_active), axis=1)
-        X_dup = np.concatenate((X_active, X_active))
-        W_dup = np.concatenate((W_active, W_active))
-        # DO NOT duplicate intensive properties - keep them as-is!
-        # Each computational particle still represents physical particles with same properties.
-        # Only the total number of represented particles changes (via doubled W).
+        # Snapshot every 1-D per-particle array BEFORE anything is resized.
+        # Duplicating the active slice is the whole operation: the second half
+        # describes the same physical particles as the first, which is why the
+        # INTENSIVE properties are copied verbatim and only the represented
+        # count changes (through the doubled sum of W).
+        dup_1d = {
+            name: np.concatenate((arr[:old_a], arr[:old_a]))
+            for name in self._PARTICLE_ARRAY_NAMES
+            if (arr := getattr(self, name, None)) is not None
+        }
+
         self.a_tot = V_dup.shape[1]
 
-        # Ensure capacity and write back
+        # Grow capacity if needed. This walks _PARTICLE_ARRAY_NAMES rather than
+        # naming the arrays one by one, so a newly added state array is carried
+        # through control-volume doubling automatically -- exactly like in
+        # _ensure_capacity_for. The old hand-written list here was complete, but
+        # it silently opted out of that guarantee (B-11).
         if self._cap < self.a_tot:
             self._cap = int(self.a_tot * 1.2) + 8
             V_new = np.zeros((self.dim + 1, self._cap), dtype=float)
-            X_new = np.zeros(self._cap, dtype=float)
-            W_new = np.zeros(self._cap, dtype=float)
-            lv_new = np.zeros(self._cap, dtype=float)
-            por_new = np.zeros(self._cap, dtype=float)
-            sat_new = np.zeros(self._cap, dtype=float)
             V_new[:, :self.a_tot] = V_dup
-            X_new[:self.a_tot] = X_dup
-            W_new[:self.a_tot] = W_dup
-            # IMPORTANT: Do NOT duplicate intensive properties!
-            # After Vc doubling, we have 2× the computational particles,
-            # but they represent the SAME physical particles (just with doubled W).
-            # So liquid_volume, porosity, saturation stay the same for each original particle.
-            # The duplicated slots (indices old_a to a_tot-1) get copies of the originals.
-            lv_new[:old_a] = lv_active
-            lv_new[old_a:self.a_tot] = lv_active  # Duplicate for new computational particles
-            por_new[:old_a] = por_active
-            por_new[old_a:self.a_tot] = por_active
-            sat_new[:old_a] = sat_active
-            sat_new[old_a:self.a_tot] = sat_active
             self.V_flat = V_new
-            self.X = X_new
-            self.W = W_new
-            self.liquid_volume = lv_new
-            self.porosity = por_new
-            self.saturation = sat_new
-
-            if hasattr(self, "_r_agg") and self._r_agg is not None:
-                r_new = np.zeros(self._cap, dtype=float)
-                r_new[:old_a] = self._r_agg[:old_a]
-                self._r_agg = r_new
-            if hasattr(self, "_break_rate") and self._break_rate is not None:
-                b_new = np.zeros(self._cap, dtype=float)
-                b_new[:old_a] = self._break_rate[:old_a]
-                self._break_rate = b_new
-            if hasattr(self, "_delta_agg") and self._delta_agg is not None:
-                d_new = np.zeros(self._cap, dtype=float)
-                d_new[:old_a] = self._delta_agg[:old_a]
-                self._delta_agg = d_new
-            if hasattr(self, "_delta_break") and self._delta_break is not None:
-                d_new = np.zeros(self._cap, dtype=float)
-                d_new[:old_a] = self._delta_break[:old_a]
-                self._delta_break = d_new
+            for name in self._PARTICLE_ARRAY_NAMES:
+                if name not in dup_1d:
+                    continue
+                fill = self._RELEASED_SLOT_FILL.get(name, 0.0)
+                grown = np.full(self._cap, fill, dtype=float)
+                grown[: self.a_tot] = dup_1d[name]
+                setattr(self, name, grown)
         else:
-            self.V_flat[:, :self.a_tot] = V_dup
-            self.X[:self.a_tot] = X_dup
-            self.W[:self.a_tot] = W_dup
-            if hasattr(self, "_delta_agg") and self._delta_agg is not None:
-                self._delta_agg[:self.a_tot] = np.concatenate((self._delta_agg[:old_a], self._delta_agg[:old_a]))
-            if hasattr(self, "_delta_break") and self._delta_break is not None:
-                self._delta_break[:self.a_tot] = np.concatenate((self._delta_break[:old_a], self._delta_break[:old_a]))
-            # Intensive properties: copy to both halves (same values for duplicated particles)
-            self.liquid_volume[:old_a] = lv_active
-            self.liquid_volume[old_a:self.a_tot] = lv_active
-            self.porosity[:old_a] = por_active
-            self.porosity[old_a:self.a_tot] = por_active
-            self.saturation[:old_a] = sat_active
-            self.saturation[old_a:self.a_tot] = sat_active
+            self.V_flat[:, : self.a_tot] = V_dup
+            for name, values in dup_1d.items():
+                getattr(self, name)[: self.a_tot] = values
 
         self._invalidate_particle_array_cache()
+
+        # Every index in the merger's hash index now means something different:
+        # the population was duplicated, so the second half is unregistered and
+        # slots may have been reallocated. Rebuilding is O(n) and happens only
+        # on a doubling event, which is rare by construction (B-12).
+        merger = getattr(self, "_particle_merger", None)
+        if merger is not None:
+            merger.rebuild_hash_index()
 
         if hasattr(self, "W0") and isinstance(self.W0, np.ndarray):
             # Keep the original initial support fixed; control-volume doubling
@@ -2074,10 +2095,25 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
 
         # Handlers cannot be attached while solve() is running, so resolve them
         # once instead of doing three hasattr() lookups per Monte-Carlo event.
-        compression = getattr(self, "compression", None)
+        # NOTE: there is no separate `compression` handler any more. It was
+        # merged into ContinuousProcessesHandler when that was introduced, so
+        # the old `if self.compression is not None: compression.step(...)`
+        # branch was unreachable and only suggested a second compression path
+        # that does not exist. Removed (B-13).
         continuous_processes = getattr(self, "continuous_processes", None)
         nucleation = getattr(self, "nucleation", None)
         double_control_volume = bool(self.maybe_double_control_volume)
+
+        # Resolved once: an attribute lookup plus two guards per MC event is
+        # pure overhead when there is no merger or its hash index is off.
+        _merger = getattr(self, "_particle_merger", None)
+        merger_reindex = (
+            _merger.reindex_all
+            if (_merger is not None
+                and getattr(_merger, "use_hash_index", False)
+                and getattr(self, "_merger_full_reindex", True))
+            else None
+        )
 
         cancel_flag = getattr(self, "cancel_flag", None)
         while current_time <= float(self.t_vec[-1]) and count < maxiter:
@@ -2282,9 +2318,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # affect this event's timing.
             dt_event = elapsed_time - t_prev  # time since the previous MC event
 
-            if compression is not None:
-                compression.step(current_time, float(dt_event))
-
             # Liquid internalization and/or porosity compression via kernels.
             if continuous_processes is not None:
                 continuous_processes.step(current_time, float(dt_event))
@@ -2333,6 +2366,17 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                         self._break_sampler = rebuild_sampler(
                             self._break_sampler, self._break_rate[: self.a_tot]
                         )
+
+            # Keep the ParticleMerger's hash index current. Its key is built
+            # from V_dry/liquid/porosity/saturation, and several sites above
+            # rewrite those. A stale key does not corrupt anything (candidates
+            # are re-verified in _matches_exact), but it makes the lookup miss
+            # particles that are actually there -- i.e. the merger stops
+            # merging, which is the whole point of having it.
+            # Only particles whose binned key really moved touch a bucket.
+            # See docs/Audit_2026-08-17.md, B-04.
+            if merger_reindex is not None:
+                merger_reindex()
 
             # Agglomeration-dominated safety: duplicate the control volume once
             # the population has halved (DSMC).
@@ -3096,11 +3140,18 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         "_delta_break",
     )
 
-    #: Value written into a released slot, per array. ``porosity`` uses NaN
-    #: because that is its "no porosity assigned yet" sentinel (Vollkoerper) -
-    #: resetting it to 0.0 would silently turn a released slot into a
-    #: zero-porosity particle if a later append forgot to set it.
-    _RELEASED_SLOT_FILL = {"porosity": np.nan}
+    #: Value written into a released slot, per array.
+    #:
+    #: ``porosity`` used to be filled with NaN here while
+    #: ``_initialize_particles`` filled the *initial* spare slots with 0.0. A
+    #: freshly appended particle therefore started at 0.0 or NaN purely
+    #: depending on whether its slot came from the original allocation or from
+    #: a later growth/release -- and since ``get_V_solid`` reads NaN porosity as
+    #: "V_solid == V_dry", a forgotten assignment would have CREATED mass
+    #: instead of failing. One default now, everywhere: 0.0 (poreless), which
+    #: is the modern convention and matches ``_initialize_particles``.
+    #: See docs/Audit_2026-08-17.md, B-10.
+    _RELEASED_SLOT_FILL: dict[str, float] = {}
 
     def _particle_arrays(self) -> list[tuple[np.ndarray, float]]:
         """Currently allocated per-particle 1-D arrays and their release value.
@@ -3139,16 +3190,19 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         last = a - 1
         arrays = self._particle_arrays()
 
-        if j != last:
-            # Re-key the ParticleMerger's hash index BEFORE moving the data:
-            # the particle currently at `last` will live at `j` afterwards,
-            # and a stale index entry could later cause find_or_create() to
-            # merge weight into whatever unrelated particle ends up reusing
-            # the freed `last` slot (see particle_merger.py::notify_index_swap).
-            merger = getattr(self, "_particle_merger", None)
-            if merger is not None:
+        # Single choke point for the ParticleMerger's hash index. Doing this
+        # here rather than in each caller means a new removal site cannot
+        # forget it: the particle at `j` disappears, so its index entry must
+        # go, and the particle currently at `last` moves to `j`, so its entry
+        # must be re-keyed. Both are idempotent, so the existing explicit
+        # remove_from_hash_index() calls in mcpbe_agg/mcpbe_break stay valid.
+        merger = getattr(self, "_particle_merger", None)
+        if merger is not None:
+            merger.remove_from_hash_index(j)
+            if j != last:
                 merger.notify_index_swap(last, j)
 
+        if j != last:
             tmp = self.V_flat[:, j].copy()
             self.V_flat[:, j] = self.V_flat[:, last]
             self.V_flat[:, last] = tmp
@@ -3166,6 +3220,50 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             self._agg_sampler.remove(j)
         if self._break_sampler is not None:
             self._break_sampler.remove(j)
+
+    def set_particle_dry_volume(self, idx: int, v_dry: float) -> None:
+        """Write ``V_dry`` for particle ``idx`` and keep ``X`` in sync.
+
+        ``X`` is the *collision* diameter: it feeds ``_agg_radii`` (and thus
+        every ``beta(r_i, r_j)``), the agglomeration acceptance kernel, the
+        collision energy of the porosity growth kernel and the nucleation
+        collision velocity. It is defined as the diameter of ``V_flat[-1]``
+        (V_dry), not of the solid volume.
+
+        Every site that changes ``V_dry`` must go through here.
+        ``_append_particle_column`` can only ever set the *solid* volume,
+        because the caller computes the real ``V_dry`` afterwards from the
+        porosity kernel -- so leaving ``X`` to that method meant every merged
+        particle, every fragment and every nucleation child carried
+        ``d(V_solid)`` instead of ``d(V_dry)``, i.e. a radius too small by
+        ``(1 - porosity)**(1/3)`` and a ``beta`` too small by ``(1 - porosity)``.
+        See docs/Audit_2026-08-17.md, B-01.
+        """
+        self.V_flat[-1, idx] = v_dry
+        self.X[idx] = float(self._vol2diam(v_dry))
+
+    def sync_particle_diameters(self, mask: np.ndarray | None = None) -> None:
+        """Recompute ``X`` from ``V_flat[-1]`` over the active slice.
+
+        Vectorised counterpart of :meth:`set_particle_dry_volume` for the bulk
+        writers (porosity compression touches every particle at once).
+        ``mask`` is a boolean array over the active slice; ``None`` means all.
+        """
+        a = self.a_tot
+        if a <= 0:
+            return
+        v_dry = self.V_flat[-1, :a]
+        if mask is None:
+            self.X[:a] = self._vol2diam(v_dry)
+            return
+        if not np.any(mask):
+            return
+        # Explicit integer indices rather than `self.X[:a][mask] = ...`.
+        # The chained form happens to work here (basic slicing yields a view),
+        # but it is one refactor away from the copy-assignment no-op that made
+        # porosity compression silently ineffective. Not worth the risk.
+        sel = np.flatnonzero(mask)
+        self.X[sel] = self._vol2diam(v_dry[sel])
 
     def _append_particle_column(self, frag_vols: np.ndarray):
         """Append one particle from per-component volumes.

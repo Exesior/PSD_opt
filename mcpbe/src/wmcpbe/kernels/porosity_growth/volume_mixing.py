@@ -67,7 +67,6 @@ class VolumeMixingKernel(PorosityGrowthKernel):
                                  v_liq2: float = None,
                                  sat1: float = None,
                                  sat2: float = None,
-                                 collision_energy: float = None,
                                  solver = None
                                  ) -> tuple[float, float]:
         """
@@ -80,7 +79,6 @@ class VolumeMixingKernel(PorosityGrowthKernel):
             poro2: Porosity of particle 2 (NaN for legacy Vollkörper, 0.0 for poreless)
             v_liq1, v_liq2: Liquid volumes (not used in this model)
             sat1, sat2: Saturations (not used in this model)
-            collision_energy: Collision energy (not used in this model)
             solver: Not used
         
         Returns:
@@ -181,7 +179,6 @@ class VolumeMixingKernel(PorosityGrowthKernel):
                                    parent_porosity: float,
                                    fragment_volume: float,
                                    parent_volume: float,
-                                   breakage_energy: float = None,
                                    solver = None
                                    ) -> float:
         """
@@ -198,7 +195,6 @@ class VolumeMixingKernel(PorosityGrowthKernel):
                             0.0 for poreless, >0.0 for porous)
             fragment_volume: Fragment solid volume [m³] (not used, kept for API consistency)
             parent_volume: Parent solid volume [m³] (not used, kept for API consistency)
-            breakage_energy: Not used in this model
             solver: Not used
         
         Returns:

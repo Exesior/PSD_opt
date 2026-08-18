@@ -203,6 +203,26 @@ Ablauf pro Event (`_do_one_agg`):
    `agg_propensity_mode = "moment"`, empfohlen; O(n²) im `"pairwise"`-Modus, nur für
    Referenz/kleine Systeme).
 
+> **`SIZEEVAL` existiert, ist für WMCPBE-Nassgranulation aber nicht relevant
+> (Stand 18.08.2026, Ruecksprache mit dem Betreuer).** Der Schalter steuert eine
+> zusaetzliche, empirische Groessenabhaengigkeit der Kollisionseffizienz α und
+> wurde vom Betreuer fuer Trockenagglomeration geschrieben, wo er eine
+> Gleichgewichtsgroesse zwischen Wachstum und Scherabbruch modelliert (Ersatz
+> fuer einen fehlenden expliziten Bruchmechanismus). WMCPBE hat mit
+> `powerlaw_rumpf` (Bruch) und `stokes_krit` (Haftkriterium, Braumann 2007)
+> bereits beide Effekte physikalisch abgedeckt -- der Filter ist hier ueberfluessig.
+>
+> **Zusaetzlich weicht die WMCPBE-Implementierung vom Projektstandard ab:**
+> `pbe-core`/`dpbe`/`mcpbe` pruefen `SIZEEVAL == 1` (aus, Default) vs.
+> `SIZEEVAL == 2` (Soos2007-Modell). `mcpbe_agg.py::_accept_sizeeval` prueft
+> stattdessen `SIZEEVAL == 0`, mit einer Gauß-Glocke ueber dem Partikelvolumen
+> statt der Soos2007-Formel -- der Filter ist damit bei `SIZEEVAL = 1` (dem
+> Default!) unbeabsichtigt AKTIV. **Abschalten: `solver.SIZEEVAL = 0`** (nicht
+> `1`, wie die Konvention nahelegen wuerde). `Trials/test_powerlaw_rumpf_full.py`
+> setzt das seit dem 18.08.2026 explizit. Vollstaendige Herleitung inkl.
+> Formelvergleich und gemessener Wirkung:
+> [`Audit_2026-08-17.md`, Befund B-03](../docs/Audit_2026-08-17.md#b-03).
+
 ### 3.2 Breakage (`mcpbe_break.py`)
 
 `_do_one_break()`: Partikel `k` proportional zu `W_k · S_k` wählen (`S` = Breakage-Rate

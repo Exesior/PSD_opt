@@ -138,6 +138,20 @@ class ParticleMerger:
         # Hash index: key = (V_dry_bin, liquid_bin, poro_bin, sat_bin), value = Set[idx]
         # Only used if use_hash_index=True
         self._hash_index: Optional[Dict[tuple, Set[int]]] = {} if use_hash_index else None
+
+        # Reverse map idx -> key the particle was REGISTERED under.
+        #
+        # Why this is not optional: the key is derived from V_dry, liquid,
+        # porosity and saturation, and ContinuousProcessesHandler rewrites
+        # exactly those for the whole population after every MC event.
+        # Recomputing the key at removal time (which is what the code used to
+        # do) then yields a *different* key than the one the entry sits under,
+        # so the removal silently does nothing: the index fills up with stale
+        # entries and lookups miss the particles that are actually there.
+        # Measured at eps_0 = 0.6: merge rate 99.4 % -> 10.9 %, and 99.8 % of
+        # all entries under a key that no longer matched the particle.
+        # See docs/Audit_2026-08-17.md, B-04.
+        self._key_of: Dict[int, tuple] = {} if use_hash_index else None
         
         # Statistics (for debugging/profiling)
         self._stats_merges = 0
@@ -688,7 +702,10 @@ class ParticleMerger:
         
         # Initialize properties
         solver.W[new_idx] = weight
-        solver.V_flat[-1, new_idx] = V_dry  # V_dry (not V_solid!)
+        # V_dry (not V_solid!) -- and X has to follow, see mcpbe_base.
+        # set_particle_dry_volume. _append_particle_column could only set X from
+        # the solid volume it was handed.
+        solver.set_particle_dry_volume(new_idx, V_dry)
         
         if hasattr(solver, 'liquid_volume'):
             solver.liquid_volume[new_idx] = float(liquid)
@@ -763,37 +780,42 @@ class ParticleMerger:
         sat = solver.saturation[idx] if hasattr(solver, 'saturation') else np.nan
 
         key = self._compute_hash_key(V_dry, liquid, poro, sat)
+        # Drop any previous registration of this slot first: slots are recycled
+        # by swap-with-last removal, so `idx` may still be listed under the key
+        # of a completely unrelated particle.
+        self._unlink(idx)
         if key not in self._hash_index:
             self._hash_index[key] = set()
         self._hash_index[key].add(idx)
+        self._key_of[idx] = key
+
+    def _unlink(self, idx: int) -> None:
+        """Drop ``idx`` from the bucket it is currently registered under.
+
+        Uses the recorded key, never a recomputed one -- see ``_key_of``.
+        """
+        if not self.use_hash_index or self._hash_index is None:
+            return
+        key = self._key_of.pop(idx, None)
+        if key is None:
+            return
+        bucket = self._hash_index.get(key)
+        if bucket is None:
+            return
+        bucket.discard(idx)
+        if not bucket:
+            del self._hash_index[key]
 
     def remove_from_hash_index(self, idx: int):
         """
         Remove a particle from the hash index (called when particle is deleted).
-        
+
         Parameters
         ----------
         idx : int
             Index of particle to remove
         """
-        if not self.use_hash_index or self._hash_index is None:
-            return
-        
-        solver = self.solver
-        if idx < 0 or idx >= solver.a_tot:
-            return
-        
-        # Compute key and remove from set
-        V_dry = solver.V_flat[-1, idx]
-        liquid = solver.liquid_volume[idx] if hasattr(solver, 'liquid_volume') else 0.0
-        poro = solver.porosity[idx] if hasattr(solver, 'porosity') else np.nan
-        sat = solver.saturation[idx] if hasattr(solver, 'saturation') else np.nan
-        
-        key = self._compute_hash_key(V_dry, liquid, poro, sat)
-        if key in self._hash_index:
-            self._hash_index[key].discard(idx)
-            if not self._hash_index[key]:
-                del self._hash_index[key]
+        self._unlink(idx)
 
     def notify_index_swap(self, old_idx: int, new_idx: int) -> None:
         """
@@ -821,20 +843,24 @@ class ParticleMerger:
         if not self.use_hash_index or self._hash_index is None:
             return
 
-        solver = self.solver
-        if old_idx < 0 or old_idx >= solver.a_tot:
+        # The slot `new_idx` is being freed: whatever used to live there is
+        # gone, so its registration must go too, or it would survive as a
+        # stale entry pointing at the particle that moves in.
+        self._unlink(new_idx)
+
+        # Re-key by the RECORDED key, not a recomputed one: the particle's
+        # properties may have changed since registration (compression,
+        # internalization), in which case a recomputed key would not find the
+        # entry and the move would silently be lost. See B-04.
+        key = self._key_of.pop(old_idx, None)
+        if key is None:
             return
-
-        V_dry = solver.V_flat[-1, old_idx]
-        liquid = solver.liquid_volume[old_idx] if hasattr(solver, 'liquid_volume') else 0.0
-        poro = solver.porosity[old_idx] if hasattr(solver, 'porosity') else np.nan
-        sat = solver.saturation[old_idx] if hasattr(solver, 'saturation') else np.nan
-
-        key = self._compute_hash_key(V_dry, liquid, poro, sat)
         bucket = self._hash_index.get(key)
-        if bucket is not None and old_idx in bucket:
-            bucket.discard(old_idx)
-            bucket.add(new_idx)
+        if bucket is None:
+            return
+        bucket.discard(old_idx)
+        bucket.add(new_idx)
+        self._key_of[new_idx] = key
 
     def rebuild_hash_index(self):
         """
@@ -850,23 +876,101 @@ class ParticleMerger:
         """
         if not self.use_hash_index:
             return
-        
+
         self._hash_index = {}
+        self._key_of = {}
         solver = self.solver
-        
+
         for idx in range(solver.a_tot):
             if solver.W[idx] <= 0:
                 continue
-            
+
             V_dry = solver.V_flat[-1, idx]
             liquid = solver.liquid_volume[idx] if hasattr(solver, 'liquid_volume') else 0.0
             poro = solver.porosity[idx] if hasattr(solver, 'porosity') else np.nan
             sat = solver.saturation[idx] if hasattr(solver, 'saturation') else np.nan
-            
+
             key = self._compute_hash_key(V_dry, liquid, poro, sat)
             if key not in self._hash_index:
                 self._hash_index[key] = set()
             self._hash_index[key].add(idx)
+            self._key_of[idx] = key
+
+    def reindex_all(self) -> int:
+        """Re-key every registered particle whose hash key has drifted.
+
+        Belt-and-braces counterpart to :meth:`reindex_particles`: instead of
+        trusting each write site to report what it changed, this checks the
+        whole active slice. Entries whose key is unchanged -- the vast majority
+        -- cost one key computation and one dict lookup and are left alone, so
+        no bucket is touched unless it has to be.
+
+        Called once per MC event from ``solve()``. Disable with
+        ``solver._merger_full_reindex = False`` if profiling shows it matters;
+        the targeted ``reindex_particles`` calls from the continuous processes
+        then still cover the bulk writers.
+
+        Returns the number of particles that actually moved.
+        """
+        if not self.use_hash_index or self._hash_index is None:
+            return 0
+        if not self._key_of:
+            return 0
+        return self.reindex_particles(list(self._key_of.keys()))
+
+    def reindex_particles(self, indices) -> int:
+        """Re-key particles whose intensive properties have changed.
+
+        The continuous processes (compression, internalization) rewrite
+        ``V_dry``, ``porosity`` and ``saturation`` in bulk, which changes the
+        hash key. Without this call the entries stay under their old key and
+        the index degenerates -- see ``_key_of`` and B-04.
+
+        Cost is O(k) for k changed particles, with a dict update each. That is
+        the same order as the propensity rebuild that already runs once per
+        MC event, and it only touches particles that actually moved: entries
+        whose recomputed key is unchanged are skipped without touching the
+        buckets.
+
+        No-op when the hash index is disabled -- then ``find_similar`` does a
+        linear scan and there is no index to maintain.
+        """
+        if not self.use_hash_index or self._hash_index is None:
+            return 0
+
+        solver = self.solver
+        a_tot = solver.a_tot
+        has_liquid = hasattr(solver, 'liquid_volume')
+        has_poro = hasattr(solver, 'porosity')
+        has_sat = hasattr(solver, 'saturation')
+        moved = 0
+
+        for idx in indices:
+            idx = int(idx)
+            if idx < 0 or idx >= a_tot:
+                # Slot no longer active: drop the registration outright.
+                self._unlink(idx)
+                continue
+            old_key = self._key_of.get(idx)
+            if old_key is None:
+                continue  # not registered -- nothing to move
+            new_key = self._compute_hash_key(
+                solver.V_flat[-1, idx],
+                solver.liquid_volume[idx] if has_liquid else 0.0,
+                solver.porosity[idx] if has_poro else np.nan,
+                solver.saturation[idx] if has_sat else np.nan,
+            )
+            if new_key == old_key:
+                continue
+            bucket = self._hash_index.get(old_key)
+            if bucket is not None:
+                bucket.discard(idx)
+                if not bucket:
+                    del self._hash_index[old_key]
+            self._hash_index.setdefault(new_key, set()).add(idx)
+            self._key_of[idx] = new_key
+            moved += 1
+        return moved
     
     def get_statistics(self) -> dict:
         """

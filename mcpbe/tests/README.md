@@ -49,7 +49,7 @@ python -m tests.bench.golden_reference record --out tests/golden_reference.json
 ```
 
 > Das ist ein bewusster Schritt. Vorher klären, **warum** sich Ergebnisse ändern,
-> und den Grund in `docs/REFACTORING_FINDINGS.md` festhalten.
+> und den Grund in `docs/old/REFACTORING_FINDINGS.md` festhalten.
 
 ---
 

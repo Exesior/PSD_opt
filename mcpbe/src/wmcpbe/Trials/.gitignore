@@ -1,0 +1,62 @@
+# Trials/.gitignore
+#
+# Hides one-off debug-session scripts and generated output from `git add`,
+# so they don't get swept into a commit by accident. This file only affects
+# UNTRACKED items -- anything already committed (check_frac_*.py,
+# stufe3_*.py, verify_jit_kernels.py, run_conservation.py, ...) is not
+# touched by it; removing those from the repo is a separate, deliberate
+# decision (`git rm`), not something a .gitignore can or should do silently.
+#
+# Nothing on disk is deleted by this file. To commit an ignored file anyway,
+# `git add -f <path>`.
+
+# ---------------------------------------------------------------------------
+# Generated output: data, logs, cache. Never source, always regenerable.
+# ---------------------------------------------------------------------------
+Results/
+debug_logs/
+__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------------------
+# One-off debug-session scripts.
+#
+# Each of these was written to investigate or patch ONE specific historical
+# issue and says so in its own docstring. They are not general-purpose tests
+# and are not meant to be re-run going forward -- keeping them out of commits
+# avoids the repo silently accumulating one bugfix's throwaway tooling per
+# session. If one of these turns out to still be useful, `git add -f` it and
+# remove its line here.
+# ---------------------------------------------------------------------------
+cleanup_and_run.py
+rerun_bcd.py
+validate_sensitivity_fix.py
+
+# Regenerates test_droplet_10um_stable.py / test_droplet_20um_instable.py
+# from test_powerlaw_rumpf_full.py (regex on DROPLET_DIAMETER) for one
+# specific mass-conservation investigation (see Fundamentals.md). The
+# generated copies below are stale the moment test_powerlaw_rumpf_full.py
+# changes (they do not carry the SIZEEVAL/dW fixes from B-03/B-06); rerun
+# this generator instead of hand-editing or committing its output.
+test_runner_mass_debug.py
+test_droplet_10um_stable.py
+test_droplet_20um_instable.py
+
+# ---------------------------------------------------------------------------
+# Audit probe scripts (2026-08-17/18 nucleation/mass-conservation review).
+#
+# Kept on disk -- they reproduce every measured number in
+# docs/Audit_2026-08-17.md and docs/Audit_Umsetzung.md, so they're worth
+# having locally to rerun a check. Not committed: the supervisor only needs
+# code and documentation, not the throwaway verification harness that
+# produced the numbers in that documentation.
+# ---------------------------------------------------------------------------
+audit/
+
+# ---------------------------------------------------------------------------
+# Everything else in this directory (test_all_kernels.py,
+# test_breakage_rate_coleval_parity.py, test_initial_liquid_behavior.py,
+# test_sensitivity.py, ...) is intentionally NOT listed here -- these are
+# documented, general-purpose test/verification scripts, not session debris
+# or audit-specific tooling. Review and commit them normally.
+# ---------------------------------------------------------------------------

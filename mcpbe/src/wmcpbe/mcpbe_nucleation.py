@@ -376,11 +376,6 @@ class NucleationHandler:
         # Internal state
         self._current_time = 0.0
         
-        # Adaptive wt% checking (for performance)
-        self._last_wt_check_time = -1.0
-        self._last_wt_value = None
-        self._wt_check_interval = 0.01
-        
         # Statistics with Vc normalization for DSMC consistency
         self._Vc_reference = solver.Vc
         self._droplets_added_total = 0
@@ -693,8 +688,6 @@ class NucleationHandler:
                 self._liquid_remainder -= v_physical_distributed
                 
                 self._log(f"Distributed fractional droplet: {v_physical_distributed:.3e} m^3 (dW={dW:.4f}, effective_dW={effective_dW:.4f})", "DEBUG")
-                
-                self._log(f"Distributed fractional droplet: {v_physical_distributed:.3e} m^3 (dW={dW:.2f}, effective_dW={effective_dW:.2f})", "DEBUG")
             else:
                 self._log("WARNING: Failed to distribute fractional droplet", "WARNING")
         
@@ -726,7 +719,6 @@ class NucleationHandler:
         See Also
         --------
         _distribute_liquid_volume : Verteilt berechnetes Volumen
-        has_reached_target_wt : Prueft Ziel-wt% fuer Early Stop
         """
         if not self.config.enabled:
             return
@@ -754,11 +746,6 @@ class NucleationHandler:
         # Early return if no overlap
         if dt_overlap <= 0.0:
             return
-        
-        # Check target wt% for early stop (if configured)
-        if self.config.target_wt_percent is not None:
-            if self._should_check_wt(current_time) and self.has_reached_target_wt():
-                return
         
         # Ensure sampler is ready
         self._ensure_samplers()
@@ -1170,12 +1157,6 @@ class NucleationHandler:
         # Ensure sampler is built
         self._ensure_samplers()
         
-        # DSMC scale factor for converting computational weight to physical droplets
-        vc_scale = self._Vc_reference / self.solver.Vc
-        
-        # Ensure sampler is built
-        self._ensure_samplers()
-        
         # Distribute droplets with DSMC weight handling.
         # Track accumulated liquid VOLUME (not droplet count) to avoid floating-point
         # accumulation errors. Compute target volume from integer droplet count.
@@ -1447,7 +1428,15 @@ class NucleationHandler:
         
         while V_dry_sum < new_liquid and attempts < max_attempts:
             j = self._select_particle_uniform_physical()
-            if j < 0 or j >= a_tot:
+            # solver.a_tot, NICHT das oben eingefrorene a_tot: diese Schleife
+            # agglomeriert und veraendert dabei selbst die Partikelzahl
+            # (Eltern werden entfernt, Kinder angelegt). Gegen den alten Wert
+            # geprueft war die Schranke je nach Richtung zu streng (gueltige
+            # neue Partikel verworfen, Sammelschleife bricht vorzeitig ab)
+            # oder zu grosszuegig (ungueltiger Index, bisher nur durch den
+            # Eingangs-Guard in _manual_agglomerate_particles abgefangen).
+            # Siehe docs/Audit_2026-08-17.md, N-01.
+            if j < 0 or j >= solver.a_tot:
                 break
             
             # Manuelles Agglomerieren (mit PorosityGrowthKernel!)
@@ -1915,8 +1904,9 @@ class NucleationHandler:
         solver._append_particle_column(V_solid_src)
         new_idx = solver.a_tot - 1
 
-        # Set properties
-        solver.V_flat[-1, new_idx] = v_dry  # ← V_dry from kernel!
+        # Set properties. V_dry from the kernel -- and X, the collision
+        # diameter derived from it (see mcpbe_base.set_particle_dry_volume).
+        solver.set_particle_dry_volume(new_idx, v_dry)
         solver.W[new_idx] = dW
 
         if hasattr(solver, 'liquid_volume'):
@@ -2117,15 +2107,6 @@ class NucleationHandler:
             from wmcpbe.kernels.porosity_growth import get_porosity_growth_kernel
             porosity_kernel = get_porosity_growth_kernel('volume_mixing')
         
-        # Estimate collision energy for kernel (simplified)
-        rho = 1000.0  # kg/m^3
-        d_eff = float(solver.X[i] + solver.X[j]) * 0.5
-        g = float(getattr(solver, 'G', 1000.0))
-        v_rel = g * d_eff
-        v_particle = float(V_dry_i + V_dry_j)
-        m = rho * v_particle
-        E_coll = 0.5 * m * v_rel ** 2
-        
         # === FIX: MASS CONSERVATION ===
         # Compute V_solid_merged FIRST by summing parent solid volumes (EXACT conservation!)
         # This follows the pattern in mcpbe_agg.py::_merge_pair()
@@ -2140,7 +2121,6 @@ class NucleationHandler:
             v_liq1=liq_i, v_liq2=liq_j,
             sat1=solver.saturation[i],
             sat2=solver.saturation[j],
-            collision_energy=E_coll,
             solver=solver
         )
         # Note: V_dry_merged is used for solver.V_flat[-1], but V_solid_merged
@@ -2229,8 +2209,10 @@ class NucleationHandler:
         solver._append_particle_column(V_merged_solid)
         new_idx = solver.a_tot - 1
         
-        # Overwrite V_flat[-1] with dry volume (includes pores)
-        solver.V_flat[-1, new_idx] = V_dry_merged
+        # Overwrite V_flat[-1] with dry volume (includes pores). X is the
+        # collision diameter derived from V_dry and has to follow -- see
+        # mcpbe_base.set_particle_dry_volume.
+        solver.set_particle_dry_volume(new_idx, V_dry_merged)
         solver.W[new_idx] = dW  # DSMC: child gets dW, not Wi+Wj!
         
         if hasattr(solver, 'liquid_volume'):
@@ -2346,174 +2328,27 @@ class NucleationHandler:
         
         return child_current_idx  # Return actual child index!
     
-    def get_current_wt_percent(self) -> float:
-        """
-        Calculate current liquid/solid weight percent (dry basis).
-        
-        wt% = (mass_liquid / mass_solid) × 100
-            = (V_liquid × rho_liquid) / (V_solid × rho_solid) × 100
-        
-        Returns:
-            Current wt% value, or 0.0 if no particles exist or densities not available
-        """
-        solver = self.solver
-        n_active = solver.a_tot
-        
-        if n_active <= 0:
-            return 0.0
-        
-        # Check if densities are available (required for wt% calculation)
-        if self.config.rho_solid is None or self.config.rho_liquid is None:
-            return 0.0
-        
-        # Calculate weighted total volumes (DSMC-consistent)
-        # IMPORTANT: liquid_volume is INTENSIVE (per physical particle).
-        # Total liquid = Sum(liquid_volume[k] × W[k]) - NO division by Vc!
-        # Same for solid volume: V_solid is per particle, total = Sum(V_solid[k] × W[k])
-        V_solid_total = 0.0
-        V_liquid_total = 0.0
-        
-        for k in range(n_active):
-            W_k = float(solver.W[k])
-            V_solid_k = float(np.sum(solver.V_flat[:solver.dim, k]))
-            V_liquid_k = float(solver.liquid_volume[k]) if hasattr(solver, 'liquid_volume') else 0.0
-            
-            # NO division by Vc - these are extensive quantities (total volume of ensemble)
-            V_solid_total += V_solid_k * W_k
-            V_liquid_total += V_liquid_k * W_k
-        
-        # Convert to masses
-        mass_solid = V_solid_total * self.config.rho_solid
-        mass_liquid = V_liquid_total * self.config.rho_liquid
-        
-        if mass_solid <= 0:
-            return 0.0
-        
-        # Dry basis: liquid / solid
-        wt_percent = (mass_liquid / mass_solid) * 100.0
-        return wt_percent
-    
-    def _should_check_wt(self, current_time: float) -> bool:
-        """
-        Determine if wt% should be checked now using adaptive timing.
-        
-        Strategy:
-        - First check: immediately
-        - If no liquid added yet: check frequently (every 10ms)
-        - If approaching target: extrapolate with safety factor (50%)
-        - Caps: min 10ms, max 500ms between checks
-        
-        Args:
-            current_time: Current simulation time [s]
-            
-        Returns:
-            True if wt% should be checked now
-        """
-        # First check: always
-        if self._last_wt_check_time < 0:
-            return True
-        
-        # Time since last check
-        dt_since_last = current_time - self._last_wt_check_time
-        
-        # If no previous wt% value, use fixed interval
-        if self._last_wt_value is None:
-            return dt_since_last >= self._wt_check_interval
-        
-        # Calculate rate of change
-        current_wt = self.get_current_wt_percent()
-        dw = current_wt - self._last_wt_value
-        
-        if dw <= 0 or dt_since_last <= 0:
-            # No progress: check soon
-            return dt_since_last >= 0.01
-        
-        # Rate of wt% increase
-        rate = dw / dt_since_last  # wt% per second
-        
-        # Time to reach target at current rate
-        remaining = self.config.target_wt_percent - current_wt
-        
-        if remaining <= 0:
-            # Already at or above target: check immediately
-            return True
-        
-        time_to_target = remaining / rate
-        
-        # SAFETY FACTOR: Check at 50% of predicted time (conservative!)
-        # Better to check too early than overshoot!
-        safety_factor = 0.5
-        next_check_delay = time_to_target * safety_factor
-        
-        # Cap intervals
-        max_interval = 0.5  # Max 500ms
-        min_interval = 0.01  # Min 10ms
-        
-        next_check_delay = np.clip(next_check_delay, min_interval, max_interval)
-        
-        return dt_since_last >= next_check_delay
-    
-    def _update_wt_check(self, current_time: float, current_wt: float) -> None:
-        """
-        Aktualisiert internen Zustand nach wt%-Pruefung.
-        
-        Wird nach has_reached_target_wt() aufgerufen um Vorhersage zu aktualisieren.
-        Passt Pruefintervall basierend auf Zielnaehe an:
-        - >80% Ziel: Alle 10ms pruefen (konservativ)
-        - >50% Ziel: Alle 50ms pruefen
-        - <50% Ziel: Alle 100ms pruefen
-        
-        Parameter
-        ---------
-        current_time : float
-            Aktuelle Simulationszeit [s]
-        current_wt : float
-            Aktueller wt%-Wert
-        
-        See Also
-        --------
-        has_reached_target_wt : Prueft Zielerreichung
-        _should_check_wt : Bestimmt naechstes Pruefintervall
-        """
-        self._last_wt_check_time = current_time
-        self._last_wt_value = current_wt
-        
-        # Adjust interval based on proximity to target
-        if self.config.target_wt_percent is not None:
-            fraction = current_wt / self.config.target_wt_percent
-            if fraction > 0.8:
-                # Close to target: check more often
-                self._wt_check_interval = 0.01
-            elif fraction > 0.5:
-                self._wt_check_interval = 0.05
-            else:
-                # Far from target: can wait longer
-                self._wt_check_interval = 0.1
-    
-    def has_reached_target_wt(self) -> bool:
-        """
-        Prueft ob Ziel-wt% erreicht wurde (falls konfiguriert).
-        
-        Returns
-        -------
-        bool
-            True wenn target_wt_percent gesetzt und erreicht, sonst False
-        
-        See Also
-        --------
-        get_current_wt_percent : Berechnet aktuellen wt%-Wert
-        _update_wt_check : Aktualisiert Praediktion nach Pruefung
-        """
-        if self.config.target_wt_percent is None:
-            return False
-        
-        current_wt = self.get_current_wt_percent()
-        
-        # Update internal state for adaptive checking
-        self._update_wt_check(self._current_time, current_wt)
-        
-        return current_wt >= self.config.target_wt_percent
-    
+    # Die wt%-Laufzeitueberwachung ist hier entfernt worden
+    # (get_current_wt_percent / _should_check_wt / _update_wt_check /
+    # has_reached_target_wt).
+    #
+    # Sie stammte aus einem verworfenen Teilprojekt: waehrend des Laufs wurde
+    # laufend der aktuelle Fluessigkeitsanteil berechnet, um die Zugabe
+    # vorzeitig abzubrechen, sobald target_wt_percent erreicht war. Die
+    # "adaptive Drosselung" davor rief zur Entscheidung, ob die teure Pruefung
+    # noetig sei, genau diese teure Pruefung auf -- eine O(n)-Python-Schleife
+    # ueber alle Partikel -- und has_reached_target_wt() danach ein zweites
+    # Mal. Gemessen: 1,93 Durchlaeufe pro Drosselungs-Check, also kein
+    # eingesparter, sondern ein verdoppelter Aufwand.
+    # Siehe docs/Audit_2026-08-17.md, N-03.
+    #
+    # NICHT entfernt: `target_wt_percent` als KONFIGURATIONS-Parameter. Er
+    # dient weiterhin dazu, aus wt% + solid_mass_in_mixer + Dichten die
+    # Zugabedauer auszurechnen (NucleationConfig.__post_init__, Fall 2) --
+    # also die Angabe "gib 53 wt% Wasser zu" in eine Fensterlaenge zu
+    # uebersetzen. Das ist die Formulierung, in der die Prozessvorgabe
+    # tatsaechlich vorliegt, und bleibt erhalten.
+
     def get_statistics(self) -> dict:
         """
         Liefert Nukleations-Statistiken.
@@ -2525,9 +2360,7 @@ class NucleationHandler:
             - current_time: Aktuelle Simulationszeit [s]
             - droplets_added_total: Gesamtzahl physikalischer Tropfen
             - liquid_volume_added_total: Gesamtes Fluessigkeitsvolumen [m^3]
-            - current_wt_percent: Aktueller Fluessigkeitsanteil [%]
-            - target_wt_percent: Ziel-wt% (oder None)
-            - target_reached: Boolean ob Ziel erreicht
+            - target_wt_percent: Ziel-wt% aus der Konfiguration (oder None)
             - in_addition_window: Boolean ob im Zeitfenster
         
         See Also
@@ -2539,9 +2372,7 @@ class NucleationHandler:
             'next_nucleation_time': self._next_nucleation_time,
             'droplets_added_total': self._droplets_added_total,
             'liquid_volume_added_total': self._liquid_volume_added_total,
-            'current_wt_percent': self.get_current_wt_percent(),
             'target_wt_percent': self.config.target_wt_percent,
-            'target_reached': self.has_reached_target_wt(),
             'liquid_addition_start': self.config.liquid_addition_start,
             'liquid_addition_duration': self.config.liquid_addition_duration,
             'liquid_addition_end': self.config.liquid_addition_end,
@@ -2579,11 +2410,6 @@ class NucleationHandler:
         self._had_events_in_window = False
         self._manual_trigger_done = False
         self._liquid_remainder = 0.0
-        
-        # Reset adaptive wt% checking
-        self._last_wt_check_time = -1.0
-        self._last_wt_value = None
-        self._wt_check_interval = 0.01
         
         # Reset sampler
         self._weight_sampler = None
