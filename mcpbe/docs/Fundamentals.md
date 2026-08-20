@@ -73,7 +73,7 @@ Handler-Objekte (Komposition statt Vererbung, siehe 1.3).
 | `mcpbe_time_helper.py` | Zeitschritt-/Event-Zeitmanagement |
 | `lmc_adapter.py` | Lattice-Monte-Carlo-Adapter für Fragmentverteilungen (Breakage) |
 | `mlp_breakage_adapter.py` | MLP-Modell für Breakage-Raten (ML-Alternative zu Kernel-Formeln) |
-| `helpers.py` | Convenience-Funktionen: `create_dry_agglomeration_solver`, `create_wet_granulation_solver`, `setup_initial_particles`, `compute_moments`, `validate_mass_conservation` |
+| `helpers.py` | Convenience-Funktionen: `setup_initial_particles`, `compute_moments`, `validate_mass_conservation` (die `create_*_solver`-Templates wurden am 20.08.2026 entfernt) |
 | `kernels/` | Modulare Physik-Kernel, s. Abschnitt 5 |
 | `Trials/` | Tests, Debug-Skripte, `debug_logs/` |
 | `docs/` | Modul-eigene Doku inkl. Masseerhaltungs-Debug-Historie (MASSE_*.md) |
@@ -329,11 +329,11 @@ zugewiesen."*
 
 | Slot | Zweck | Verzeichnis | Beispiel-Implementierungen |
 |---|---|---|---|
-| `agg_kernel` | Kollisionsrate β(r1,r2) | `kernels/aggregation/` | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum_kernel`, `liquid_bridge` |
+| `agg_kernel` | Kollisionsrate β(r1,r2) | `kernels/aggregation/` | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005` |
 | `break_kernel` | Breakage-Rate S(V) | `kernels/breakage/` | `power_law`, `powerlaw_rumpf` |
 | `porosity_growth_kernel` | Porosität bei Merge/Nucleation/Breakage | `kernels/porosity_growth/` | `volume_mixing` (additiv, kein Pore-Collapse), `cone_model` (geometrisch, Kegelpillen-Modell), `incomplete_mixing` |
 | `agglomeration_acceptance_kernel` | Physikalische Akzeptanz (Kollision "klebt"?) | `kernels/agglomeration_acceptance/` | `stokes_krit` (Braumann 2007), `fittable` |
-| `liquid_dist_kernel` | Partikelauswahl für Nucleation | `kernels/liquid_distribution/` | `uniform_weighted`, `surface_weighted`, `saturation_preferential` |
+| `liquid_dist_kernel` | Partikelauswahl für Nucleation | `kernels/liquid_distribution/` | `uniform_weighted` |
 | `porosity_compression_kernel` | Kontinuierliche Kompression | `kernels/continuous_processes/` | `porosity_compression` |
 | `liquid_internalization_kernel` | Kontinuierliche Internalisierung | `kernels/continuous_processes/` | `liquid_internalization` |
 | `liq_internalisation_agglomeration_kernel` | Event-basierte Internalisierung bei Kollision | `kernels/continuous_processes/` | `liq_internalisation_agglomeration` |
