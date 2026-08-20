@@ -145,7 +145,7 @@ class KernelManager:
         Initialize all kernels based on configuration.
         
         Priority:
-        1. Explicit kernel name (e.g., agg_kernel_name='liquid_bridge')
+        1. Explicit kernel name (e.g., agg_kernel_name='eke_darelius2005')
         2. Legacy COLEVAL/BREAKRVAL mapping
         3. Default kernels
         
@@ -372,7 +372,33 @@ class KernelManager:
         else:
             # Optional kernel - None means no internalization during agglomeration (fallback)
             self.liq_internalisation_agglomeration_kernel = None
-    
+
+        # ==========================================
+        # Cross-kernel consistency: mixer speed
+        # ==========================================
+        # Every mixer-speed-driven kernel describes the SAME machine, so they
+        # must agree on how fast it turns. Unlike the shear-rate check further
+        # up (which only warns, because there `solver.G` has a documented
+        # owner and precedence), two different `n_mixer` values have no
+        # sensible interpretation at all: the run's collision frequency,
+        # collision severity and breakage rate would belong to three different
+        # mixers, and nothing in the results would reveal it. Hence a hard
+        # error, raised once here where the whole kernel set is visible.
+        try:
+            from wmcpbe.kernels.mixer_speed import assert_consistent_mixer_speed
+        except ImportError:
+            from .kernels.mixer_speed import assert_consistent_mixer_speed
+
+        assert_consistent_mixer_speed([
+            ('aggregation', self.agg_kernel),
+            ('breakage', self.break_kernel),
+            ('agglomeration_acceptance', self.agglomeration_acceptance_kernel),
+            ('porosity_growth', self.porosity_growth_kernel),
+            ('porosity_compression', self.porosity_compression_kernel),
+            ('liquid_internalization', self.liquid_internalization_kernel),
+            ('liquid_distribution', self.liquid_dist_kernel),
+        ])
+
     # ==========================================
     # Delegation methods
     # ==========================================

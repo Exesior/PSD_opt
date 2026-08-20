@@ -126,7 +126,8 @@ SHEAR = {"corr_beta": 1e-3, "g": 1000.0}
 # covered by the unit tests, not by the benchmark.
 # NOTE: pl_v / pl_q are breakage FUNCTION parameters (fragment size
 # distribution) and are rejected by the rate kernels -- the rate's volume
-# exponent is p2. See kernels/breakage/_base_rate.py.
+# exponent is p2. Der BREAKRVAL-Schalter steckt seit 20.08.2026 in jedem
+# Bruchkernel selbst (kein gemeinsames Modul mehr), siehe power_law.py.
 POWER_LAW = {"p1": 1e-2, "p2": 1.0, "g": 1000.0, "breakrval": 1}
 # BREAKFVAL selects the fragment-count model in _compute_frag_num(); pin it so
 # scenarios do not silently inherit the BaseSolver default.
@@ -183,17 +184,6 @@ SCENARIOS: Dict[str, Scenario] = {
             maxiter=400,
             agg_kernel_name="brownian_tsouris1995",
             agg_kernel_params={"corr_beta": 1e-3},
-        ),
-        Scenario(
-            name="agg_liquid_bridge_1d",
-            dim=1,
-            process_type="agglomeration",
-            a0=150,
-            t_end=120.0,
-            maxiter=40,
-            agg_kernel_name="liquid_bridge",
-            agg_kernel_params={"corr_beta": 1e-3, "g": 1000.0},
-            notes="Hits the non-JIT fallback: O(n^2) Python kernel calls per event.",
         ),
         Scenario(
             name="agg_shear_2d",

@@ -6,7 +6,9 @@ Available kernels:
     - brownian_tsouris1995: Brownian diffusion (Tsouris et al. 1995)
     - constant: Constant collision frequency
     - sum: Sum kernel (for validation)
-    - liquid_bridge: Shear with liquid bridge enhancement (NEW)
+    - eke_darelius2005: Equipartition of Kinetic Energy, mixer-speed driven
+                        (dry mixing, no shear rate needed)
+    - etm_darelius2005: Equipartition of Translational Momentum (dry mixing)
 
 Usage:
     >>> from wmcpbe.kernels.aggregation import get_aggregation_kernel
@@ -22,7 +24,8 @@ from .shear_chin1998 import ShearChinKernel
 from .brownian_tsouris1995 import BrownianKernel
 from .constant import ConstantKernel
 from .sum_kernel import SumKernel
-from .liquid_bridge import LiquidBridgeKernel
+from .eke_darelius2005 import EKEDareliusKernel
+from .etm_darelius2005 import ETMDareliusKernel
 
 # Registry of available kernels
 AGG_KERNELS: dict[str, Type[AggregationKernel]] = {
@@ -30,7 +33,8 @@ AGG_KERNELS: dict[str, Type[AggregationKernel]] = {
     'brownian_tsouris1995': BrownianKernel,
     'constant': ConstantKernel,
     'sum': SumKernel,
-    'liquid_bridge': LiquidBridgeKernel,
+    'eke_darelius2005': EKEDareliusKernel,
+    'etm_darelius2005': ETMDareliusKernel,
 }
 
 
@@ -80,5 +84,6 @@ __all__ = [
     'BrownianKernel',
     'ConstantKernel',
     'SumKernel',
-    'LiquidBridgeKernel',
+    'EKEDareliusKernel',
+    'ETMDareliusKernel',
 ]

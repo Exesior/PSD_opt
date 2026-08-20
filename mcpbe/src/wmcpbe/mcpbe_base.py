@@ -118,7 +118,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         recon_enable : bool, default=False
             Enable reconstruction (particle reduction) to limit computational cost.
         agg_kernel_name : str, optional
-            Aggregation kernel name (e.g., 'shear_chin1998', 'liquid_bridge').
+            Aggregation kernel name (e.g., 'shear_chin1998', 'eke_darelius2005').
         agg_kernel_params : dict, optional
             Parameters for aggregation kernel (kernel-specific).
         break_kernel_name : str, optional
@@ -183,7 +183,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         ...     dim=1,
         ...     t_total=300.0,
         ...     load_attr=False,
-        ...     agg_kernel_name='liquid_bridge',
+        ...     agg_kernel_name='eke_darelius2005',
         ...     break_kernel_name='powerlaw_rumpf',
         ...     porosity_growth_kernel_name='cone_model',
         ...     porosity_compression_kernel_name='porosity_compression',
@@ -338,7 +338,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         
         Example:
             >>> solver = MCPBEBase(
-            ...     agg_kernel_name='liquid_bridge',
+            ...     agg_kernel_name='eke_darelius2005',
             ...     agg_kernel_params={'corr_beta': 1e-3, 'g': 1000, 'optimal_saturation': 0.5},
             ...     porosity_growth_kernel_name='incomplete_mixing',
             ...     porosity_growth_kernel_params={'trapped_pore_fraction': 0.15},
@@ -2318,9 +2318,48 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # affect this event's timing.
             dt_event = elapsed_time - t_prev  # time since the previous MC event
 
+            # Both the continuous processes and nucleation invalidate the
+            # stored agglomeration/breakage propensities. Collect that in one
+            # flag and rebuild ONCE, after both have run -- rebuilding inside
+            # each block would do the work twice in every event where both
+            # fire, which is most of them while liquid is being added.
+            state_changed = False
+
             # Liquid internalization and/or porosity compression via kernels.
             if continuous_processes is not None:
                 continuous_processes.step(current_time, float(dt_event))
+                # Compression conserves V_solid and shrinks the pore volume, so
+                # it rewrites `porosity` AND `V_flat[-1]` -- i.e. the particle
+                # diameter changes. Every aggregation kernel in this package is
+                # a function of the radii, so every beta(i,j) changes with it,
+                # and `powerlaw_rumpf` additionally reads porosity and
+                # saturation for its strength model. Nothing here used to
+                # rebuild afterwards: the only rebuild in this region hung off
+                # nucleation's `consume_population_changed()`.
+                #
+                # That made the defect intermittent and easy to miss. While
+                # liquid is being added, nucleation fires on almost every event
+                # and its rebuild repaired the compression damage as a side
+                # effect, so the error stayed at one event's worth (~5e-4
+                # relative). The moment the addition window closed, nothing
+                # rebuilt again and the per-event errors accumulated linearly
+                # -- measured 5.5e-3 for the aggregation propensities and
+                # 2.5e-2 for the breakage rates by the end of a 4 s run.
+                # `_agg_sampler` is built from `_r_agg`, so this biased the
+                # event timing and the partner draw, not just a diagnostic
+                # array. See docs/Nucleation_Propensity_Blockade.md.
+                #
+                # Deliberately NOT gated on "did compression actually change
+                # anything". The handler does know (it computes
+                # `active = ~isnan(poro) & (poro > min_poro)` for its own early
+                # return), but measured against the granulation benchmark the
+                # gate saves 0 % with the moment form and 4 % with a kernel
+                # that only has the O(n^2) pairwise path -- not worth a second
+                # mechanism that has to stay in sync with the physics. A flag
+                # per changed QUANTITY would be worse still: it would have to
+                # know which kernels read saturation, and would silently go
+                # wrong the first time an aggregation kernel does.
+                state_changed = True
 
             # Nucleation follows its own time schedule.
             if nucleation is not None:
@@ -2353,19 +2392,27 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # propensities. Measured: 0 agglomerations across 13 parameter
                 # variants, including one with 21812 collisions.
                 #
-                # The rebuild is O(n), so it is tied to a change actually having
-                # happened rather than run on every event.
+                # `consume_population_changed()` RESETS the handler's flag, so
+                # it has to be called on every event regardless of what
+                # `state_changed` already holds. Writing
+                # `state_changed = state_changed or nucleation.consume_...()`
+                # would short-circuit and leave the flag set, leaking into the
+                # next event.
                 if nucleation.consume_population_changed():
-                    if pt in ("agglomeration", "mix"):
-                        self._rebuild_all_propensities()
-                        self._agg_sampler = rebuild_sampler(
-                            self._agg_sampler, self._r_agg[: self.a_tot]
-                        )
-                    if pt in ("breakage", "mix"):
-                        self._calc_break_rates_full()
-                        self._break_sampler = rebuild_sampler(
-                            self._break_sampler, self._break_rate[: self.a_tot]
-                        )
+                    state_changed = True
+
+            # One rebuild per event, covering both causes above.
+            if state_changed:
+                if pt in ("agglomeration", "mix"):
+                    self._rebuild_all_propensities()
+                    self._agg_sampler = rebuild_sampler(
+                        self._agg_sampler, self._r_agg[: self.a_tot]
+                    )
+                if pt in ("breakage", "mix"):
+                    self._calc_break_rates_full()
+                    self._break_sampler = rebuild_sampler(
+                        self._break_sampler, self._break_rate[: self.a_tot]
+                    )
 
             # Keep the ParticleMerger's hash index current. Its key is built
             # from V_dry/liquid/porosity/saturation, and several sites above

@@ -42,7 +42,7 @@ def liquid_volume(solver) -> float:
 
 
 SOLID = ["agg_shear_1d", "agg_shear_1d_large", "agg_constant_1d", "agg_sum_1d",
-         "agg_brownian_1d", "agg_liquid_bridge_1d", "agg_shear_2d",
+         "agg_brownian_1d", "agg_shear_2d",
          "break_powerlaw_1d", "mix_1d", "granulation_1d"]
 
 RTOL = 1e-9

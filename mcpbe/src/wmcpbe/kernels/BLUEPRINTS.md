@@ -22,8 +22,55 @@ Blueprints bieten:
 | **Aggregation** | `aggregation/blueprint.py` | Kollisionsfrequenz β(i,j) [m³/s] |
 | **Breakage** | `breakage/blueprint.py` | Bruchrate S(V) [1/s] |
 | **Porosity Growth** | `porosity_growth/blueprint.py` | Porositätsentwicklung bei Ereignissen |
-| **Compression** | `compression/blueprint.py` | Porositätsreduktion über Zeit [1/s] |
+| **Agg. Acceptance** | `agglomeration_acceptance/blueprint.py` | Kollision annehmen oder abprallen (bool) |
 | **Liquid Distribution** | `liquid_distribution/blueprint.py` | Partikel-Selektion für Flüssigkeitszugabe |
+
+> Das frühere Modul `compression/` gibt es nicht mehr; Kompression läuft über
+> `continuous_processes/porosity_compression.py`. Siehe `COMPRESSION_MIGRATION.md`.
+
+---
+
+## ⛔ Die Grundregel: kein Kernel haengt von einem anderen Kernel ab
+
+**Bevor du irgendetwas implementierst, lies das hier.**
+
+Ein Kernel muss einzeln weitergegeben werden koennen. Wer eine einzelne
+Kerneldatei bekommt, ohne den Rest des Pakets zu haben, muss damit rechnen
+koennen. Erlaubt sind deshalb nur:
+
+* Standardbibliothek, `numpy`, `numba`
+* `kernels/base.py` -- die abstrakte Basisklasse
+* `kernels/mixer_speed.py` -- die gemeinsamen Mischer-Konstanten
+
+**Verboten:**
+
+| Verboten | Stattdessen |
+|---|---|
+| `from ..breakage.powerlaw_rumpf import ...` | den benoetigten Code **kopieren** |
+| `class MeinKernel(PowerLawRumpfBreakageKernel)` | von der Basisklasse erben und kopieren |
+| ein gemeinsames privates Hilfsmodul anlegen | in jeden Kernel kopieren |
+
+Das kostet Duplikation, und das ist Absicht. Historisch gab es ein geteiltes
+`breakage/_base_rate.py` und Vererbung zwischen Kerneln -- beides ist am
+20.08.2026 entfernt worden. Heute steht die BREAKRVAL-Basisrate woertlich
+identisch in allen drei Bruchkerneln, `powerlaw_rumpf_dynamic` hat eine eigene
+Kopie des Rumpf-Festigkeitsmodells und `stokes_dynamik` eine eigene Kopie der
+Stokes-Logik.
+
+### Damit die Kopien nicht auseinanderlaufen
+
+Duplikation ist nur dann vertretbar, wenn sie bewacht wird.
+`Trials/test_dry_mixer_kernels.py` tut das dreifach:
+
+| Abschnitt | Pruefung |
+|---|---|
+| 9 | **statisch** -- AST-Analyse der Importe, Vererbung nur aus `kernels.base` |
+| 10 | **numerisch** -- alle Kopien liefern bitgenau dasselbe Ergebnis |
+| 11 | **dynamisch** -- jeder Kernel laeuft in einem leeren Paket, allein mit `base.py` + `mixer_speed.py` |
+
+**Trage deinen neuen Kernel dort in die Listen der Abschnitte 9 und 11 ein.**
+Sonst gilt die Regel fuer ihn nur auf dem Papier -- die Tests pruefen genau die
+Kernel, die dort namentlich stehen, und keinen anderen.
 
 ## 🚀 Schnellstart: Eigenen Kernel implementieren
 
@@ -90,7 +137,11 @@ def compute_beta(self, r1, r2, particle1_idx, particle2_idx, solver):
 
 from .my_custom_kernel import MyCustomKernel
 
-AGGREGATION_KERNELS['my_custom_kernel'] = MyCustomKernel
+# Das Registry-Dict heisst AGG_KERNELS (nicht AGGREGATION_KERNELS).
+# Namen je Kategorie: AGG_KERNELS, BREAK_KERNELS,
+# POROSITY_GROWTH_KERNELS, LIQUID_DIST_KERNELS,
+# AGG_ACCEPTANCE_KERNELS, CONTINUOUS_KERNELS.
+AGG_KERNELS['my_custom_kernel'] = MyCustomKernel
 ```
 
 ### Schritt 7: Testen
@@ -133,6 +184,17 @@ kernel = get_breakage_kernel('my_custom_kernel', param1=0.2)
 rate = kernel.compute_rate(v_particle=1e-18)
 print(f"S = {rate:.3e} 1/s")
 ```
+
+**Option D: Eigenstaendigkeit pruefen (Pflicht)**
+
+```bash
+cd mcpbe/src/wmcpbe/Trials
+python test_dry_mixer_kernels.py
+```
+
+Abschnitte 9 bis 11 pruefen, dass dein Kernel niemanden ausser
+`base.py` und `mixer_speed.py` braucht -- vorausgesetzt, du hast ihn
+dort in die Listen eingetragen.
 
 ## 📖 Blueprint-Struktur
 
@@ -470,8 +532,9 @@ def test_my_kernel_integration():
 
 ## 📚 Weiterführende Ressourcen
 
-- **Kern-Dokumentation**: `README.md` (Framework-Übersicht)
-- **Kernel-Übersicht**: `KERNEL_UEBERSICHT.md` (alle verfügbaren Kernel)
+- **Kern-Dokumentation und Kernel-Katalog**: `README.md` -- seit 20.08.2026
+  der einzige Katalog; `KERNEL_UEBERSICHT.md` ist darin aufgegangen
+- **Mischer-Konstanten**: `mixer_speed.py` (Herkunft der DEM-Exponenten)
 - **Base-Klassen**: `base.py` (abstrakte Schnittstellen)
 - **Beispiele**: `*/volume_mixing.py`, `*/shear_chin1998.py` (konkrete Implementierungen)
 
@@ -489,10 +552,16 @@ A: 1) Direktes Ausführen (`python my_kernel.py`), 2) Im Solver verwenden, 3) Ma
 **Q: Kann ich mehrere Kernel kombinieren?**  
 A: Pro Kategorie nur EIN Kernel aktiv (z.B. EIN Aggregations-Kernel). Aber verschiedene Kategorien können kombiniert werden (z.B. `shear_chin1998` + `volume_mixing` + `exponential_decay`).
 
+**Q: Ich brauche eine Funktion, die es in einem anderen Kernel schon gibt.**  
+A: Kopieren, nicht importieren. Siehe die Grundregel oben. Wenn die Kopie
+sich vom Original unterscheiden koennte, ergaenze in
+`Trials/test_dry_mixer_kernels.py`, Abschnitt 10, einen Vergleich beider --
+so wie es dort fuer die Basisrate und das sigma-Modell gemacht ist.
+
 **Q: Wo melde ich Bugs?**  
 A: Issue-Tracker im Repository. Bitte Minimalbeispiel und Fehlermeldung beifügen.
 
 ---
 
-*Stand: Juli 2026*  
+*Stand: 20.08.2026*  
 *WMCPBE Development Team*

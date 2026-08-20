@@ -367,7 +367,9 @@ class ExampleBreakageKernel(BreakageKernel):
         # Choose ONE of these common models (or implement your own):
         
         # Option A: Power-law (most common, reference-compatible)
-        # S(V) = P1 × G × V^P2  -- see kernels/breakage/_base_rate.py
+        # S(V) = P1 × G × V^P2  -- the BREAKRVAL switch is implemented
+        #   inside each breakage kernel; see power_law.py. There is no
+        #   shared rate module: kernels must not depend on each other.
         # Best for: General purpose, empirical fitting
         rate = self.p1 * self.g * (v_particle ** self.p2)
         

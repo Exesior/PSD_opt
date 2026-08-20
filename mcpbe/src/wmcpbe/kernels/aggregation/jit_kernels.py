@@ -59,7 +59,15 @@ Complexity (n = number of computational particles):
     sum             O(n^2)      O(n log n)
     shear           O(n^2)      O(n log n)
     brownian        O(n^2)      O(n log n)
-    liquid_bridge   O(n^2)      -            (not separable)
+    eke             O(n^2)      -            (not separable)
+    etm             O(n^2)      -            (not separable)
+
+Why EKE/ETM have no moment form: their velocity factor is the square root of a
+*sum*, ``sqrt(1/r_i^k + 1/r_j^k)``. A moment form needs
+``beta(i,j) = sum_m f_m(i) g_m(j)``, and a square root does not distribute over
+the sum, so no finite decomposition exists. They still get the compiled
+pairwise path, because they are pure functions of ``(p0, r_i, r_j)`` - the same
+shape as shear and brownian - and therefore fit into ``_beta_of`` directly.
 """
 
 from __future__ import annotations
@@ -76,6 +84,8 @@ KID_CONSTANT = 0
 KID_SUM = 1
 KID_SHEAR = 2
 KID_BROWNIAN = 3
+KID_EKE = 4
+KID_ETM = 5
 
 #: Maps kernel name -> (kid, parameter extractor). ``p0`` folds every constant
 #: prefactor into a single number so the compiled kernels stay branch-cheap.
@@ -84,11 +94,14 @@ KERNEL_IDS = {
     "sum": KID_SUM,
     "shear_chin1998": KID_SHEAR,
     "brownian_tsouris1995": KID_BROWNIAN,
+    "eke_darelius2005": KID_EKE,
+    "etm_darelius2005": KID_ETM,
 }
 
 #: Kernel names with a compiled batch implementation here.
 BATCH_KERNELS = frozenset(
-    {"shear_chin1998", "brownian_tsouris1995", "constant", "sum", "liquid_bridge"}
+    {"shear_chin1998", "brownian_tsouris1995", "constant", "sum",
+     "eke_darelius2005", "etm_darelius2005"}
 )
 
 #: Kernel names that are separable and therefore have an O(n log n) moment form.
@@ -112,13 +125,24 @@ PARALLEL_MIN_N = 800
 
 @njit(cache=True)
 def _beta_of(kid, p0, ri, rj):
-    """``beta(i,j)`` for the four built-in separable kernels.
+    """``beta(i,j)`` for the built-in single-prefactor kernels.
 
     ``p0`` carries the folded prefactor:
         constant  -> corr_beta
         sum       -> corr_beta
         shear     -> corr_beta * g
         brownian  -> 2 * corr_beta * kT / (3 * viscosity)
+        eke       -> corr_beta * n_mixer**c_mixer
+        etm       -> corr_beta * n_mixer**c_mixer
+
+    The first four are also separable and therefore have a moment form; EKE and
+    ETM are not (see the module docstring) and only ever reach this function
+    through the pairwise path.
+
+    The EKE/ETM branches must stay bit-for-bit identical to ``_beta_eke_jit`` /
+    ``_beta_etm_jit`` in the kernel modules, which is what those kernels'
+    ``compute_beta`` calls. ``verify_jit_kernels`` asserts the equality, so keep
+    the association order as written.
     """
     if kid == KID_CONSTANT:
         return p0
@@ -132,6 +156,20 @@ def _beta_of(kid, p0, ri, rj):
             return 0.0
         _rsum = ri + rj
         return p0 * _rsum * _rsum / (ri * rj)
+    elif kid == KID_EKE:
+        if ri <= 0.0 or rj <= 0.0:
+            return 0.0
+        _rsum = ri + rj
+        _inv = 1.0 / (ri * ri * ri) + 1.0 / (rj * rj * rj)
+        return p0 * _rsum * _rsum * math.sqrt(_inv)
+    elif kid == KID_ETM:
+        if ri <= 0.0 or rj <= 0.0:
+            return 0.0
+        _rsum = ri + rj
+        _ci = ri * ri * ri
+        _cj = rj * rj * rj
+        _inv = 1.0 / (_ci * _ci) + 1.0 / (_cj * _cj)
+        return p0 * _rsum * _rsum * math.sqrt(_inv)
     return 0.0
 
 
@@ -425,135 +463,14 @@ def kernel_p0(name: str, kernel) -> float:
         return float(kernel.corr_beta) * float(kernel.g)
     if name == "brownian_tsouris1995":
         return 2.0 * float(kernel.corr_beta) * float(kernel.kT) / (3.0 * float(kernel.viscosity))
+    if name in ("eke_darelius2005", "etm_darelius2005"):
+        # Read the value the kernel already computed rather than recomputing
+        # corr_beta * n_mixer**c_mixer here. Recomputing would be correct to
+        # within a rounding of the pow(), and a rounding difference in the
+        # prefactor is exactly what breaks the bit-for-bit parity between
+        # compute_beta and the compiled path.
+        return float(kernel.p0)
     raise ValueError(f"{name!r} is not a built-in compiled kernel")
-
-
-# ---------------------------------------------------------------------------
-# Liquid-bridge kernel: shear base modulated by the saturation of *both*
-# partners and by their external liquid. The cross term s_i*s_j in the Gaussian
-# exponent makes it non-separable, so only the O(n^2) form exists - but it runs
-# compiled instead of as n^2 Python-level kernel calls.
-# ---------------------------------------------------------------------------
-
-
-@njit(cache=True)
-def _beta_liquid_bridge(cg, s_opt, two_sigma_sq, alpha_liq, ri, rj, si, sj, ext_i, ext_j):
-    _rsum = ri + rj
-    beta = cg * _rsum * _rsum * _rsum
-    if np.isnan(si) or np.isnan(sj):
-        return beta if beta > 0.0 else 0.0
-    _s_eff = 0.5 * (si + sj)
-    _d = _s_eff - s_opt
-    bridge = math.exp(-(_d * _d) / two_sigma_sq)
-    v_ref = (_PI43 * (ri**3 + rj**3)) * 0.01
-    if v_ref < 1e-30:
-        v_ref = 1e-30
-    liquid = 1.0 + alpha_liq * math.log1p((ext_i + ext_j) / v_ref)
-    beta = beta * bridge * liquid
-    return beta if beta > 0.0 else 0.0
-
-
-@njit(cache=True, parallel=True)
-def rebuild_r_pairdelta_liquid_bridge(
-    corr_beta, g, s_opt, sigma_s, alpha_liq,
-    R, W, delta, dW_const, saturation, v_liq_ext, r_out,
-):
-    """Pair-delta corrected propensities for the liquid-bridge kernel. O(n^2)."""
-    a = W.shape[0]
-    cg = corr_beta * g
-    two_sigma_sq = 2.0 * sigma_s * sigma_s
-
-    for i in prange(a):
-        di = delta[i]
-        Wi = W[i]
-        ri = R[i]
-        if di <= 0.0 or Wi <= 0.0 or ri <= 0.0:
-            r_out[i] = 0.0
-            continue
-        si = saturation[i]
-        ext_i = v_liq_ext[i]
-        s = 0.0
-        for j in range(a):
-            if j == i:
-                continue
-            dj = delta[j]
-            Wj = W[j]
-            rj = R[j]
-            if dj <= 0.0 or Wj <= 0.0 or rj <= 0.0:
-                continue
-            bij = _beta_liquid_bridge(
-                cg, s_opt, two_sigma_sq, alpha_liq,
-                ri, rj, si, saturation[j], ext_i, v_liq_ext[j],
-            )
-            if bij <= 0.0:
-                continue
-            pair_delta = di if di < dj else dj
-            s += Wj * bij / pair_delta
-        if Wi > 1.0:
-            sd = _self_delta(di, Wi)
-            if sd > 0.0:
-                bii = _beta_liquid_bridge(
-                    cg, s_opt, two_sigma_sq, alpha_liq,
-                    ri, ri, si, si, ext_i, ext_i,
-                )
-                if bii > 0.0:
-                    s += (Wi - 1.0) * bii / sd
-        val = Wi * s
-        r_out[i] = val if val > 0.0 else 0.0
-
-
-@njit(cache=True)
-def rebuild_r_pairdelta_liquid_bridge_serial(
-    corr_beta, g, s_opt, sigma_s, alpha_liq,
-    R, W, delta, dW_const, saturation, v_liq_ext, r_out,
-):
-    """Serial twin of :func:`rebuild_r_pairdelta_liquid_bridge` (bit-identical)."""
-    a = W.shape[0]
-    cg = corr_beta * g
-    two_sigma_sq = 2.0 * sigma_s * sigma_s
-
-    for i in range(a):
-        di = delta[i]
-        Wi = W[i]
-        ri = R[i]
-        if di <= 0.0 or Wi <= 0.0 or ri <= 0.0:
-            r_out[i] = 0.0
-            continue
-        si = saturation[i]
-        ext_i = v_liq_ext[i]
-        s = 0.0
-        for j in range(a):
-            if j == i:
-                continue
-            dj = delta[j]
-            Wj = W[j]
-            rj = R[j]
-            if dj <= 0.0 or Wj <= 0.0 or rj <= 0.0:
-                continue
-            bij = _beta_liquid_bridge(
-                cg, s_opt, two_sigma_sq, alpha_liq,
-                ri, rj, si, saturation[j], ext_i, v_liq_ext[j],
-            )
-            if bij <= 0.0:
-                continue
-            pair_delta = di if di < dj else dj
-            s += Wj * bij / pair_delta
-        if Wi > 1.0:
-            sd = _self_delta(di, Wi)
-            if sd > 0.0:
-                bii = _beta_liquid_bridge(
-                    cg, s_opt, two_sigma_sq, alpha_liq,
-                    ri, ri, si, si, ext_i, ext_i,
-                )
-                if bii > 0.0:
-                    s += (Wi - 1.0) * bii / sd
-        val = Wi * s
-        r_out[i] = val if val > 0.0 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# Partner sampling (paper Eq. 40):  P*(j|i) = lambda_ij / R_i*
-# ---------------------------------------------------------------------------
 
 
 @njit(cache=True)

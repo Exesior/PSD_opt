@@ -49,8 +49,6 @@ from .kernels.aggregation.jit_kernels import (
     PARALLEL_MIN_N,
     kernel_p0,
     pick_partner_pairdelta,
-    rebuild_r_pairdelta_liquid_bridge,
-    rebuild_r_pairdelta_liquid_bridge_serial,
     rebuild_r_pairdelta_moment,
     rebuild_r_pairdelta_pairwise,
     rebuild_r_pairdelta_pairwise_serial,
@@ -418,7 +416,7 @@ class MCPBEAgg:
 
         - **Pairwise mode** (agg_propensity_mode="pairwise"):
           O(n²) explicit summation over all pairs.
-          Required for: liquid_bridge and custom kernels without moment form.
+          Required for: 2D setups and custom kernels without moment form.
           Slower but exact for non-separable kernels.
 
         **Packet Size Normalization:**
@@ -520,41 +518,7 @@ class MCPBEAgg:
                 fn(kid, p0, R, W, delta, dW_const, out)
             return
 
-        if name == "liquid_bridge" and int(self.dim) == 1:
-            self._raw_propensities_liquid_bridge(kernel, R, W, delta, dW_const, out)
-            return
-
         self._raw_propensities_generic(R, W, delta, dW_const, out)
-
-    def _raw_propensities_liquid_bridge(self, kernel, R, W, delta, dW_const, out) -> None:
-        """Compiled O(n^2) pair-delta path for the liquid-bridge kernel.
-
-        The Gaussian bridge factor contains a cross term ``s_i*s_j``, so the
-        kernel is not separable and the quadratic loop stays - but it runs
-        compiled instead of as ``n^2`` Python calls.
-        """
-        a = out.shape[0]
-        alpha = self._alpha_scalar()
-        v_liq_ext = self.get_V_liquid_external()
-        if v_liq_ext.shape[0] != a:  # pragma: no cover - defensive
-            v_liq_ext = v_liq_ext[:a]
-
-        fn = (
-            rebuild_r_pairdelta_liquid_bridge
-            if a >= PARALLEL_MIN_N
-            else rebuild_r_pairdelta_liquid_bridge_serial
-        )
-        fn(
-            float(kernel.corr_beta) * alpha,
-            float(kernel.g),
-            float(kernel.s_opt),
-            float(kernel.sigma_s),
-            float(kernel.alpha_liq),
-            R, W, delta, dW_const,
-            np.ascontiguousarray(self.saturation[:a]),
-            np.ascontiguousarray(v_liq_ext, dtype=np.float64),
-            out,
-        )
 
     def _raw_propensities_generic(self, R, W, delta, dW_const, out) -> None:
         """Fallback for kernels (or 2D setups) without a compiled batch path.

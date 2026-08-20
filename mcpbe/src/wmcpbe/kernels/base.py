@@ -520,9 +520,9 @@ class LiquidDistributionKernel(KernelBase):
     
     Selection strategies:
     - Uniform weighted (by W): All physical particles equally likely
-    - Surface-weighted: Larger particles more likely
-    - Saturation-preferential: Unsaturated particles preferred
-    - Size-dependent: Based on collision cross-section
+
+    Surface-weighted and saturation-preferential variants existed but
+    were removed as stale experiments.
     """
     
     @property

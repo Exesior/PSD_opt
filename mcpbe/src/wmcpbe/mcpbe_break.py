@@ -226,9 +226,8 @@ class MCPBEBreak:
         # used to raise here, so the very same configuration was legal on one
         # code path and a hard error on the other -- a run could look healthy
         # for a long time and only abort at the first incremental update.
-        # A run without breakage is a valid setup (pure dry agglomeration, see
-        # `helpers.create_dry_agglomeration_solver`); a typo in the kernel name
-        # is already rejected by `kernel_integration`.
+        # A run without breakage is a valid setup (pure agglomeration); a typo
+        # in the kernel name is already rejected by `kernel_integration`.
         return 0.0
 
     # ------------------------------------------------------------------

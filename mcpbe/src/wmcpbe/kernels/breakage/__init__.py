@@ -4,6 +4,8 @@ Breakage Kernels for WMCPBE Solver.
 Available kernels:
     - power_law: Power-law breakage rate (BREAKRVAL=1,2,3,4)
     - powerlaw_rumpf: Rumpf theory with porosity/saturation strength
+    - powerlaw_rumpf_dynamic: same, but driven by the mixer speed instead of a
+                              shear rate (gas continuum)
 
 Usage:
     >>> from wmcpbe.kernels.breakage import get_breakage_kernel
@@ -17,11 +19,13 @@ from ..base import BreakageKernel, reject_unknown_params
 # Import all kernel implementations
 from .power_law import PowerLawBreakageKernel
 from .powerlaw_rumpf import PowerLawRumpfBreakageKernel
+from .powerlaw_rumpf_dynamic import PowerLawRumpfDynamicBreakageKernel
 
 # Registry of available kernels
 BREAK_KERNELS: dict[str, Type[BreakageKernel]] = {
     'power_law': PowerLawBreakageKernel,
     'powerlaw_rumpf': PowerLawRumpfBreakageKernel,
+    'powerlaw_rumpf_dynamic': PowerLawRumpfDynamicBreakageKernel,
 }
 
 
@@ -61,4 +65,5 @@ __all__ = [
     'list_breakage_kernels',
     'PowerLawBreakageKernel',
     'PowerLawRumpfBreakageKernel',
+    'PowerLawRumpfDynamicBreakageKernel',
 ]

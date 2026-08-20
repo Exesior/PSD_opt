@@ -6,6 +6,8 @@ bounce off. Called AFTER partner selection, BEFORE agglomeration execution.
 
 Available kernels:
     - stokes_krit: Stokes criterion (Braumann et al. 2007)
+    - stokes_dynamik: Stokes criterion with mixer-speed-dependent collision
+                      velocity (dry mixing)
     - fittable: Simple fit parameter (rng < u_acc)
 
 Usage:
@@ -27,11 +29,13 @@ from ..base import AggAcceptanceKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .stokes_krit import StokesKritKernel
+from .stokes_dynamik import StokesDynamikKernel
 from .fittable import FittableKernel
 
 # Registry of available kernels
 AGG_ACCEPTANCE_KERNELS: dict[str, Type[AggAcceptanceKernel]] = {
     'stokes_krit': StokesKritKernel,
+    'stokes_dynamik': StokesDynamikKernel,
     'fittable': FittableKernel,
 }
 
@@ -80,5 +84,6 @@ __all__ = [
     'get_agglomeration_acceptance_kernel',
     'list_agglomeration_acceptance_kernels',
     'StokesKritKernel',
+    'StokesDynamikKernel',
     'FittableKernel',
 ]

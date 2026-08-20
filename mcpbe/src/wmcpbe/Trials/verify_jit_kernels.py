@@ -23,18 +23,29 @@ import numpy as np
 
 from wmcpbe.kernels.aggregation import get_aggregation_kernel
 from wmcpbe.kernels.aggregation.jit_kernels import (
-    KERNEL_IDS, kernel_p0, separable_tables,
+    KERNEL_IDS, MOMENT_KERNELS, _beta_of, kernel_p0, separable_tables,
     rebuild_r_pairdelta_moment,
     rebuild_r_pairdelta_pairwise, rebuild_r_pairdelta_pairwise_serial,
     pick_partner_pairdelta,
 )
 
+# Muss jeden Namen aus KERNEL_IDS abdecken, sonst bricht das Skript beim
+# Nachziehen eines neuen kompilierten Kernels mit einem KeyError ab.
 KERNEL_ARGS = {
     "constant": dict(corr_beta=2.5e-10),
     "sum": dict(corr_beta=1e-9),
     "shear_chin1998": dict(corr_beta=1e-3, g=1000.0),
     "brownian_tsouris1995": dict(corr_beta=1.0, temperature=293.0, viscosity=1e-3),
+    "eke_darelius2005": dict(corr_beta=1e-11, n_mixer=20.0),
+    "etm_darelius2005": dict(corr_beta=1e-16, n_mixer=20.0),
 }
+
+_MISSING = sorted(set(KERNEL_IDS) - set(KERNEL_ARGS))
+if _MISSING:
+    raise SystemExit(
+        f"KERNEL_ARGS fehlen Eintraege fuer {_MISSING}. Jeder kompilierte "
+        "Kernel muss hier mit Testparametern hinterlegt sein."
+    )
 
 
 def make_pop(case, rng, n, dW):
@@ -97,38 +108,46 @@ def main():
     dWs = [1.0, 5.0, 10.0]
 
     print("(a)+(b) Momentenform / Pairwise / Serial")
+    print("    (Kernel ohne Momentenform - EKE/ETM - haben keine Spalte (a);")
+    print("     die Wurzel einer Summe laesst sich nicht separieren.)")
     ok = True
     worst_all = 0.0
     for name, kid in KERNEL_IDS.items():
         kernel = get_aggregation_kernel(name, **KERNEL_ARGS[name])
         p0 = kernel_p0(name, kernel)
+        separable = name in MOMENT_KERNELS
         worst_m, worst_s = 0.0, 0.0
         for case in cases:
             for n in sizes:
                 for dW in dWs:
                     R, W = make_pop(case, rng, n, dW)
                     d = deltas(W, dW)
-                    F, G, bii, _ = separable_tables(name, kernel, R)
-
-                    r_mom = np.zeros(n)
-                    rebuild_r_pairdelta_moment(
-                        np.ascontiguousarray(F), np.ascontiguousarray(G),
-                        np.ascontiguousarray(bii), W, d, dW, r_mom)
 
                     r_par = np.zeros(n)
                     rebuild_r_pairdelta_pairwise(kid, p0, R, W, d, dW, r_par)
                     r_ser = np.zeros(n)
                     rebuild_r_pairdelta_pairwise_serial(kid, p0, R, W, d, dW, r_ser)
-
-                    worst_m = max(worst_m, relmax(r_mom, r_par))
                     worst_s = max(worst_s, relmax(r_par, r_ser))
+
+                    if not separable:
+                        continue
+
+                    F, G, bii, _ = separable_tables(name, kernel, R)
+                    r_mom = np.zeros(n)
+                    rebuild_r_pairdelta_moment(
+                        np.ascontiguousarray(F), np.ascontiguousarray(G),
+                        np.ascontiguousarray(bii), W, d, dW, r_mom)
+                    worst_m = max(worst_m, relmax(r_mom, r_par))
+
         worst_all = max(worst_all, worst_m)
-        flag = "OK " if worst_m <= 1e-13 else "FAIL"
-        print(f"  {flag} {name:24s} moment-vs-pairwise = {worst_m:.3e} | par-vs-serial = {worst_s:.3e}")
-        ok &= worst_m <= 1e-13 and worst_s == 0.0
+        good = worst_s == 0.0 and (worst_m <= 1e-13 if separable else True)
+        flag = "OK " if good else "FAIL"
+        mom = f"{worst_m:.3e}" if separable else "  --     "
+        print(f"  {flag} {name:24s} moment-vs-pairwise = {mom} | par-vs-serial = {worst_s:.3e}")
+        ok &= good
 
     print("\n(c) separable_tables vs. kernel.compute_beta")
-    for name in KERNEL_IDS:
+    for name in sorted(MOMENT_KERNELS):
         kernel = get_aggregation_kernel(name, **KERNEL_ARGS[name])
         R = np.ascontiguousarray(rng.uniform(1e-6, 5e-5, 60))
         F, G, bii, _ = separable_tables(name, kernel, R)
@@ -140,6 +159,44 @@ def main():
         flag = "OK " if max(e1, e2) <= 1e-13 else "FAIL"
         print(f"  {flag} {name:24s} beta = {e1:.3e} | beta(i,i) = {e2:.3e}")
         ok &= max(e1, e2) <= 1e-13
+
+    print("\n(c2) _beta_of vs. kernel.compute_beta")
+    # Fuer die separablen Kernel deckt (c) den Weg ueber die f_k/g_k-Tabellen ab.
+    # Die nicht separablen erreichen den kompilierten Pfad NUR ueber _beta_of,
+    # also muss genau dort die Gleichheit mit compute_beta geprueft werden.
+    #
+    # Massstab: relative Uebereinstimmung fuer alle, Bitgleichheit nur fuer die
+    # Kernel in _BITEXACT. Der Unterschied ist Absicht, nicht Nachlaessigkeit:
+    #   * `sum` rechnet in _beta_sum_jit `4/3*pi*r**3`, in _beta_of dagegen
+    #     `_PI43*r*r*r`;
+    #   * `brownian` multipliziert corr_beta in _beta_brownian_jit separat,
+    #     waehrend _beta_of alles in p0 faltet.
+    # Beides ist algebraisch identisch und weicht nur im letzten Bit ab -
+    # dieselbe Klasse von Abweichung, die (a) fuer die Momentenform mit 1e-13
+    # zulaesst. Eine Bitgleichheit zu fordern wuerde diese beiden Kernel
+    # grundlos rot faerben.
+    #
+    # EKE und ETM sind dagegen bewusst so geschrieben, dass beide Seiten
+    # dieselbe Formel in derselben Klammerung rechnen. Dort IST Bitgleichheit
+    # die Zusage, und ein Bruch davon soll auffallen.
+    _BITEXACT = {"eke_darelius2005", "etm_darelius2005"}
+    for name, kid in KERNEL_IDS.items():
+        kernel = get_aggregation_kernel(name, **KERNEL_ARGS[name])
+        p0 = kernel_p0(name, kernel)
+        R = rng.uniform(1e-6, 5e-5, 50)
+        ref = np.array([[kernel.compute_beta(float(ri), float(rj)) for rj in R]
+                        for ri in R])
+        got = np.array([[_beta_of(kid, p0, float(ri), float(rj)) for rj in R]
+                        for ri in R])
+        e = relmax(ref, got)
+        bad = int(np.count_nonzero(ref != got))
+        strict = name in _BITEXACT
+        good = (bad == 0) if strict else (e <= 1e-13)
+        flag = "OK " if good else "FAIL"
+        note = "bitgenau gefordert" if strict else "rel. Toleranz 1e-13"
+        print(f"  {flag} {name:24s} rel = {e:.3e} | {bad:5d} Bit-Abweichungen "
+              f"({note})")
+        ok &= good
 
     print("\n(d) pick_partner_pairdelta: Gesamtgewicht == partner_total = R_i*/W_i")
     worst_p = 0.0

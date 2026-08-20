@@ -1,11 +1,30 @@
 """
-Comprehensive Test: PowerLaw-Rumpf Breakage + Full Physics Suite.
+Comprehensive Test: mixer-speed-driven ("dynamic") full physics suite.
+
+Line-for-line the same run as `test_powerlaw_rumpf_full.py`, but every kernel
+that CAN be driven by the mixer speed is. This is the gas-continuum branch:
+there is no liquid velocity gradient G, so the shear rate is replaced by the
+mixer speed everywhere it appeared.
+
+    aggregation   shear_chin1998  ->  eke_darelius2005
+    acceptance    stokes_krit     ->  stokes_dynamik
+    breakage      powerlaw_rumpf  ->  powerlaw_rumpf_dynamic
+
+Unchanged, because they never read a shear rate: cone_model,
+porosity_compression, liquid_internalization, liq_internalisation_agglomeration.
+
+!! NOT CALIBRATED !!
+    AGG_COEFFICIENT and PL_P1 are carried over unchanged from the shear run.
+    They are wrong there by orders of magnitude: in the shear kernels the
+    prefactor absorbs G ~ 1000, here it has to absorb n^c ~ 1-10 instead.
+    Expect far too few events until both are refitted. That is the point of
+    this script -- it is the harness the calibration runs in, not a result.
 
 This test verifies the complete MCPBE solver with all advanced physics modules:
 - Nucleation: Liquid droplet addition during defined time window
-- Agglomeration: Particle collisions with constant kernel
-- Agglomeration Acceptance: Stokes criterion (Braumann et al. 2007)
-- Breakage: PowerLaw-Rumpf with porosity/saturation-dependent strength
+- Agglomeration: EKE collision frequency, mixer-speed driven
+- Agglomeration Acceptance: Stokes criterion with mixer-speed-dependent U_coll
+- Breakage: PowerLaw-Rumpf, mixer-speed driven, with porosity/saturation strength
 - Porosity Growth: Cone model for pore formation
 - Compression: Porosity reduction over time
 - Liquid Internalization: Capillary-driven pore filling (continuous)
@@ -19,10 +38,10 @@ Test Configuration:
     - All physics modules active
 
 Usage:
-    python -m wmcpbe.Trials.test_powerlaw_rumpf_full
+    python -m wmcpbe.Trials.test_powerlaw_rumpf_dynamic_full
     
 Or from the wmcpbe directory:
-    python Trials/test_powerlaw_rumpf_full.py
+    python Trials/test_powerlaw_rumpf_dynamic_full.py
 """
 
 import numpy as np
@@ -39,6 +58,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from wmcpbe import MCPBESolver
+from wmcpbe.kernels.mixer_speed import C_VEL as _C_VEL_DEFAULT
 
 
 # =============================================================================
@@ -57,7 +77,7 @@ class TestConfig:
     
     # Particle properties (initial)
     PARTICLE_DIAMETER = 34e-6            # 700 µm
-    PARTICLE_DENSITY = 500.0             # kg/m³ (solid material)
+    PARTICLE_DENSITY = 600.0             # kg/m³ (solid material)
     INITIAL_POROSITY = 0.0                # 80% void fraction
     
     # Droplet properties
@@ -65,16 +85,32 @@ class TestConfig:
     DROPLET_DENSITY = 1000.0              # kg/m³ (water)
     
     # Process parameters
-    VOLUMETRIC_FLOW_RATE = 3e-10       # m³/s
-    NUCLEATION_DURATION = 10.0         # s
-    AGG_COEFFICIENT = 4            # Constant kernel coefficient [m³/s] - HIGH for testing
+    VOLUMETRIC_FLOW_RATE = 1.635e-10       # m³/s
+    NUCLEATION_DURATION = 20.0         # s
+    AGG_COEFFICIENT = 5e-8           # Constant kernel coefficient [m³/s] - HIGH for testing
     BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True
-    PL_P1 = 4e13                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
-    PL_P2 = 1.0                       # Volume exponent in S = P1*G*V^P2
-    G = 1000.0                        # Shear rate [1/s]
+    PL_P1 = 1e13                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
+    PL_P2 = 1.0                       # Volume exponent in S = P1*n^c*V^P2
+
+    # --- Mischerdrehzahl statt Scherrate -------------------------------
+    # Eine Groesse fuer den ganzen Lauf: Agglomeration, Akzeptanz und Bruch
+    # lesen alle dasselbe n_mixer. Weichen sie ab, bricht der Solver beim
+    # Aufbau mit einem Fehler ab (assert_consistent_mixer_speed).
+    # In der zugrundeliegenden DEM eine Umfangsgeschwindigkeit in m/s,
+    # Bereich 5-40; 20.0 ist die Mitte.
+    N_MIXER = 20.0                    # Mischergeschwindigkeit m/s
+    # stokes_dynamik nimmt seit 20.08.2026 KEIN n_ref mehr (nicht identifizierbar
+    # neben U_coll_ref, siehe kernels/README.md). COLLISION_VELOCITY unten wird
+    # direkt als Vorfaktor U_coll_ref gelesen: U_coll = U_coll_ref * n_mixer^c_vel.
+    # Exponenten: None = Kernel-Default aus kernels/mixer_speed.py.
+    # C_FREQ = 0.0995 (Agglomeration), C_VEL = 0.2852 (Stossgeschwindigkeit),
+    # C_BREAK = 0.6699 (Bruch, Frequenz x Stossenergie).
+    C_MIXER_AGG = None
+    C_MIXER_BREAK = None
+    C_VEL = None
     BREAKRVAL = 4                     # Volume-based power law
     # Rumpf strength parameters
     RUMPF_K = 2.5                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
@@ -84,12 +120,12 @@ class TestConfig:
     
     # Compression parameters
     COMPRESSION_ENABLED = True
-    COMPRESSION_RATE = 0.02             # Porosity decay rate [1/s]
+    COMPRESSION_RATE = 0.1             # Porosity decay rate [1/s]
     MIN_POROSITY = 0.2                # Minimum achievable porosity
     
     # Liquid internalization parameters
     LIQ_INTERN_ENABLED = True
-    LIQ_INTERN_RATE = 1e12             # Rate constant [1/(m³·s)]
+    LIQ_INTERN_RATE = 1e11             # Rate constant [1/(m³·s)]
     
     # Liquid internalization during agglomeration
     LIQ_INTERN_AGG_ENABLED = True
@@ -97,13 +133,13 @@ class TestConfig:
     # Agglomeration acceptance (Stokes criterion)
     STOKES_ENABLED = True
     BINDER_VISCOSITY = 0.1            # Pa·s
-    COLLISION_VELOCITY = 0.5          # m/s
+    COLLISION_VELOCITY = 0.0794       # [m/s] U_coll_ref, direkter Vorfaktor (kein n_ref mehr)
     H_A = 500e-9                      # m (half-distance of closest approach)
     
     # Numerical settings
-    INITIAL_PARTICLES = 2000          # Computational particles
-    INITIAL_WEIGHT = 600             # Weight per particle
-    CONTROL_VOLUME = 1               # m³ 
+    INITIAL_PARTICLES = 1000          # Computational particles
+    INITIAL_WEIGHT = 600              # Weight per particle
+    CONTROL_VOLUME = 1              # m³ 
     
     # Merger configuration
     MERGER_TOLERANCE = 1e-4               # Relative tolerance for matching (0.0001%)
@@ -195,13 +231,15 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print_section("PROCESS PARAMETERS")
     print(f"  Volumetric flow:    {format_scientific(cfg.VOLUMETRIC_FLOW_RATE, 'm³/s')}")
     print(f"  Nucleation window:  [0.0 s, {cfg.NUCLEATION_DURATION:.1f} s]")
-    print(f"  Agg. coefficient:   {format_scientific(cfg.AGG_COEFFICIENT, 'm³/s')}")
+    print(f"  Agg. coefficient:   {format_scientific(cfg.AGG_COEFFICIENT, 'm^(5/2)/s')}")
+    print(f"  Mixer speed:        {cfg.N_MIXER:.1f}")
+    print("  !! AGG_COEFFICIENT und PL_P1 sind NICHT fuer diesen Zweig kalibriert !!")
     
     print_section("BREAKAGE (POWERLAW-RUMPF)")
     print(f"  Enabled:            {cfg.BREAKAGE_ENABLED}")
     print(f"  P1:                 {format_scientific(cfg.PL_P1)}")
     print(f"  P2:                 {cfg.PL_P2}")
-    print(f"  G:                  {cfg.G:.1f} 1/s")
+    print(f"  n_mixer:            {cfg.N_MIXER:.1f}  (c_mixer={cfg.C_MIXER_BREAK or 'Default 0.6699'})")
     print(f"  BREAKRVAL:          {cfg.BREAKRVAL}")
     print(f"  Rumpf k:            {cfg.RUMPF_K}")
     print(f"  Rumpf alpha:        {cfg.RUMPF_ALPHA}")
@@ -220,7 +258,10 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print_section("AGGLOMERATION ACCEPTANCE (STOKES)")
     print(f"  Enabled:            {cfg.STOKES_ENABLED}")
     print(f"  Binder viscosity:   {cfg.BINDER_VISCOSITY:.2f} Pa·s")
-    print(f"  Collision velocity: {cfg.COLLISION_VELOCITY:.2f} m/s")
+    _c_vel_eff = cfg.C_VEL if cfg.C_VEL is not None else _C_VEL_DEFAULT
+    print(f"  Collision velocity: U_coll_ref={cfg.COLLISION_VELOCITY:.4f} m/s "
+          f"-> U_coll={cfg.COLLISION_VELOCITY * cfg.N_MIXER ** _c_vel_eff:.4f} m/s "
+          f"bei n_mixer={cfg.N_MIXER:.1f} (c_vel={_c_vel_eff:.4f})")
     print(f"  h_a:                {cfg.H_A*1e9:.1f} nm")
     
     print_section("EXPECTED RESULTS")
@@ -244,14 +285,15 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print(f"\nCreating solver (seed={cfg.SEED})...")
     
     print("\nKernel configuration:")
-    print("  - Aggregation: constant kernel")
-    print("  - Agg. Acceptance: stokes_krit")
-    print("  - Breakage: powerlaw_rumpf (porosity/saturation-dependent strength)")
+    print("  - Aggregation: eke_darelius2005 (mixer-speed driven)")
+    print("  - Agg. Acceptance: stokes_dynamik (U_coll ~ n^c_vel)")
+    print("  - Breakage: powerlaw_rumpf_dynamic (mixer-speed driven)")
     print("  - Porosity Growth: cone_model")
     print("  - Porosity Compression: porosity_compression kernel")
     print("  - Liq. Internalization: continuous")
     print("  - Liq. Internalization (Agg): braumann_2007")
-    print("  - Propensity mode: moment (O(n) acceleration)")
+    print("  - Propensity mode: moment angefordert -- EKE ist nicht separierbar,")
+    print("    faellt daher intern auf den kompilierten O(n^2)-Pfad zurueck.")
     
     solver = MCPBESolver(
         dim=1,
@@ -261,23 +303,33 @@ def run_comprehensive_test() -> Dict[str, Any]:
         init=True,
         rng=rng,
         # Aggregation kernel
-        agg_kernel_name='shear_chin1998',
-        agg_kernel_params={'corr_beta': cfg.AGG_COEFFICIENT,'g':cfg.G},
+        # EKE: kinetische Gastheorie statt Scherstroemung. Fuer die
+        # Alternativhypothese hier auf 'etm_darelius2005' umstellen -- gleiche
+        # Parameternamen, anderer Geschwindigkeitsterm.
+        agg_kernel_name='eke_darelius2005',
+        agg_kernel_params={
+            'corr_beta': cfg.AGG_COEFFICIENT,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_mixer': cfg.C_MIXER_AGG} if cfg.C_MIXER_AGG is not None else {}),
+        },
         # Agglomeration acceptance kernel
-        agg_acceptance_kernel_name='stokes_krit',
+        agg_acceptance_kernel_name='stokes_dynamik',
         agg_acceptance_kernel_params={
-            'U_coll': cfg.COLLISION_VELOCITY,
+            'U_coll_ref': cfg.COLLISION_VELOCITY,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_vel': cfg.C_VEL} if cfg.C_VEL is not None else {}),
             'binder_viscosity': cfg.BINDER_VISCOSITY,
             'rho_solid': cfg.PARTICLE_DENSITY,
             'rho_liquid': cfg.DROPLET_DENSITY,
             'h_a': cfg.H_A,
         },
         # Breakage kernel (PowerLaw-Rumpf)
-        break_kernel_name='powerlaw_rumpf',
+        break_kernel_name='powerlaw_rumpf_dynamic',
         break_kernel_params={
             'p1': cfg.PL_P1,
             'p2': cfg.PL_P2,
-            'g': cfg.G,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_mixer': cfg.C_MIXER_BREAK} if cfg.C_MIXER_BREAK is not None else {}),
             'breakrval': cfg.BREAKRVAL,
             'k': cfg.RUMPF_K,
             'alpha': cfg.RUMPF_ALPHA,
@@ -484,7 +536,7 @@ def run_comprehensive_test() -> Dict[str, Any]:
     diameter_mean_um = np.average(diameter_active_um, weights=diameter_weights)
     diameter_min_um = np.min(diameter_active_um)
     diameter_max_um = np.max(diameter_active_um)
-    
+
     # Errors
     error_liquid = (actual_liquid - expected_liquid) / expected_liquid
     error_system = (liquid_in_system - expected_liquid) / expected_liquid
@@ -542,7 +594,7 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print(f"  {'Initial:':<20} {cfg.PARTICLE_DIAMETER*1e6:.2f}")
     print(f"  {'Final (mean, W-avg):':<20} {diameter_mean_um:.2f}")
     print(f"  {'Final (min/max):':<20} {diameter_min_um:.2f} / {diameter_max_um:.2f}")
-    
+
     print(f"\n{'Performance:':<25}")
     print(f"  {'Real time:':<20} {elapsed_real:.2f} s")
     print(f"  {'Simulated time:':<20} {cfg.T_TOTAL:.1f} s")

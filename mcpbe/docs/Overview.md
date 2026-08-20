@@ -75,8 +75,19 @@ n_phys = Σ W_i / Vc        [Partikel pro m³]
 ```
 
 `Vc` ist damit **keine numerische Stellschraube, sondern eine physikalische
-Größe**: sie legt zusammen mit `Σ W` die Konzentration fest, und die Konzentration
-steuert die Agglomerationsrate (∝ 1/Vc).
+Größe**: sie legt zusammen mit `Σ W` die Konzentration fest, in der die Partikel
+am Anfang erzeugt werden — `n_phys` ist der Sache nach eine Konzentration
+[1/m³], auch wenn sie wie eine Teilchenzahl aussieht.
+
+Eine Kollisionsrate ist textbuch-mäßig konzentrationsabhängig (β·n_i·n_j), aber
+`Vc` geht hier **nicht** als expliziter 1/Vc-Faktor in die Propensity ein — die
+sitzt in `mcpbe_agg.py`/`mcpbe_break.py` direkt auf `W`, nicht auf `W/Vc`. Bei
+festem `a0`/`W` legt `Vc` also `n_phys` fest, ändert aber nicht automatisch die
+simulierte Rate; `corr_beta`/`P1` sind implizit für das bei der Kalibrierung
+verwendete `Vc` gültig. Alle bisherigen Konfigurationen fahren mit `Vc = 1 m³`,
+weshalb das nie aufgefallen ist — bei jedem `Vc ≠ 1` muss man sich das bewusst
+machen. Für die Bruchrate `S` gilt das nicht: Bruch ist eine Eigenschaft eines
+einzelnen Partikels, keine Paarwechselwirkung, also ohne Konzentrationsbezug.
 
 Wenn Agglomeration die Partikelzahl stark reduziert, wird die Statistik dünn.
 Dagegen gibt es `_maybe_double_control_volume`: `Vc` wird verdoppelt und der
@@ -465,9 +476,10 @@ Die inneren Summen sind **Momente** der Population und werden einmal berechnet.
 Aus O(n²) wird O(n) – bei n = 4000 rund 275× schneller.
 
 Der Dispatch in `_compute_raw_propensities` wählt automatisch:
-kompilierte Momentenform → kompilierte O(n²)-Form → kompilierte Sonderform für
-`liquid_bridge` (nicht separierbar wegen des Kreuzterms `s_i·s_j`) → generischer
-Python-Fallback. Der Fallback warnt **einmal**, damit die Kosten sichtbar sind und
+kompilierte Momentenform → kompilierte O(n²)-Form → generischer
+Python-Fallback. Der frühere Sonderpfad für `liquid_bridge` ist mit diesem
+Kernel entfallen; in den generischen Fallback führen jetzt nur noch
+2D-Setups und Kernel ohne Eintrag in `KERNEL_IDS`. Der Fallback warnt **einmal**, damit die Kosten sichtbar sind und
 nicht als mysteriöse Langsamkeit erscheinen.
 
 Die kompilierte Schiene gilt nur für `dim == 1`, weil dort die Kollisionseffizienz
@@ -801,11 +813,11 @@ wirft das Fehlen dort einen `ValueError` mit einer Liste der verfügbaren Kernel
 
 | Steckplatz | Beantwortet die Frage | Implementierungen |
 |---|---|---|
-| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum_kernel`, `liquid_bridge` |
+| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005` |
 | `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `fittable` |
 | `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf` |
 | `porosity_growth_kernel` | Wie entwickelt sich der Porenraum? | `volume_mixing`, `cone_model`, `incomplete_mixing` |
-| `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted`, `surface_weighted`, `saturation_preferential` |
+| `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted` |
 | `porosity_compression_kernel` | Wie schnell kollabieren Poren? | `porosity_compression` |
 | `liquid_internalization_kernel` | Wie schnell zieht Flüssigkeit in die Poren? | `liquid_internalization` |
 | `liq_internalisation_agglomeration_kernel` | Wie viel Film wird beim Stoß eingeschlossen / beim Bruch freigesetzt? | `liq_internalisation_agglomeration` |
@@ -869,12 +881,23 @@ Fragmentanzahl. Heute sind es getrennte Größen mit getrennten Namen.
 Scherinduzierte Kollision im gerührten Behälter:
 `β ∝ corr_beta · G · (r₁+r₂)³`. Separierbar → Momentenmodus verfügbar.
 
-### `liquid_bridge` (Aggregation)
+### `eke_darelius2005` / `etm_darelius2005` (Aggregation)
 
-Bezieht die Sättigung ein: die Kollisionsrate ist um eine Gauß-Glocke um eine
-optimale Sättigung `s_opt` moduliert. Zu trocken → keine Brücke; zu nass → das
-Granulat wird weich. **Nicht separierbar**, weil der Ausdruck einen Kreuzterm
-`s_i·s_j` enthält – dafür gibt es einen eigenen kompilierten O(n²)-Pfad.
+Für einen Mischer, dessen **Kontinuum ein Gas** ist: es gibt keinen
+Flüssigkeits-Geschwindigkeitsgradienten G, angetrieben wird über die
+Mischerdrehzahl. Kinetische Gastheorie statt Scherströmung:
+`β ∝ corr_beta · n^c · (r₁+r₂)² · √(1/r₁³ + 1/r₂³)` (EKE, gleiche kinetische
+Energie je Granulat) bzw. `√(1/r₁⁶ + 1/r₂⁶)` (ETM, gleicher Impuls).
+
+**Nicht separierbar** – die Wurzel einer Summe lässt sich nicht in
+`Σ f(i)·g(j)` zerlegen –, also kompilierter O(n²)-Pfad ohne Momentenform.
+
+Das heißt *nicht*, dass der Prozess trocken ist: Binder wird weiterhin
+zugegeben. Trocken ist nur die Phase, durch die sich die Granulate bewegen.
+Der Zweig ist implementiert und getestet, aber **noch nicht kalibriert**.
+
+Der frühere `liquid_bridge`-Kernel (Gauß-Glocke um eine optimale Sättigung)
+wurde am 20.08.2026 als veraltetes Experiment entfernt.
 
 ### `stokes_krit` (Akzeptanz, Braumann 2007)
 
@@ -1059,9 +1082,14 @@ Zielmethode durch einen Wrapper ersetzen, der vor und nach dem Originalaufruf
 
 ### Nützliche Helfer
 
-`helpers.py` enthält fertige Konfigurationen (`create_dry_agglomeration_solver`,
-`create_wet_granulation_solver`, `create_breakage_test_solver`) sowie
+`helpers.py` enthält `setup_initial_particles`, `compute_moments` und
 `validate_mass_conservation(solver)` für einen schnellen Bilanzcheck.
+
+> Die drei `create_*_solver`-Konfigurationstemplates wurden am 20.08.2026
+> entfernt: sie verdrahteten einen festen Kernelsatz für einen festen Falltyp,
+> und die Fälle in diesem Projekt unterscheiden sich zu stark, als dass das
+> genutzt hätte – aufgerufen hat sie niemand. Solver explizit bauen oder über
+> `framework/builder.py`.
 
 ---
 

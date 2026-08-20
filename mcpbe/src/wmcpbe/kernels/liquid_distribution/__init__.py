@@ -6,9 +6,10 @@ nucleation. Different selection strategies model different physical
 mechanisms of droplet-particle collision.
 
 Available kernels:
-    - uniform_weighted: Weight-proportional selection (existing behavior)
-    - surface_weighted: Surface-area-weighted selection (NEW)
-    - saturation_preferential: Prefer unsaturated particles (NEW)
+    - uniform_weighted: Weight-proportional selection
+
+`surface_weighted` and `saturation_preferential` were removed as stale
+experiments; neither was ever used by a production configuration.
 
 Usage:
     >>> from wmcpbe.kernels.liquid_distribution import get_liquid_distribution_kernel
@@ -21,14 +22,10 @@ from ..base import LiquidDistributionKernel, reject_unknown_params
 
 # Import all kernel implementations
 from .uniform_weighted import UniformWeightedKernel
-from .surface_weighted import SurfaceWeightedKernel
-from .saturation_preferential import SaturationPreferentialKernel
 
 # Registry of available kernels
 LIQUID_DIST_KERNELS: dict[str, Type[LiquidDistributionKernel]] = {
     'uniform_weighted': UniformWeightedKernel,
-    'surface_weighted': SurfaceWeightedKernel,
-    'saturation_preferential': SaturationPreferentialKernel,
 }
 
 
@@ -67,6 +64,4 @@ __all__ = [
     'get_liquid_distribution_kernel',
     'list_liquid_distribution_kernels',
     'UniformWeightedKernel',
-    'SurfaceWeightedKernel',
-    'SaturationPreferentialKernel',
 ]
