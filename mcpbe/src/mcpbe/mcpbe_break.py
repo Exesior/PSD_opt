@@ -1,4 +1,4 @@
-﻿# Breakage mixin: breakage rates (full & single), two-level CDF builder, fragment production, single break event.
+# Breakage mixin: breakage rates (full & single), two-level CDF builder, fragment production, single break event.
 from __future__ import annotations
 
 import math

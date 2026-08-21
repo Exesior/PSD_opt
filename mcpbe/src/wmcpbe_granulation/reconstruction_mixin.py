@@ -1,4 +1,4 @@
-﻿# reconstruction_mixin.py
+# reconstruction_mixin.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿import numpy as np
+import numpy as np
 from pbe_core.func.jit_mcpbe import nb_fenwick_add, nb_fenwick_build, nb_fenwick_update, nb_fenwick_prefix_sum_1based  # local numba kernels
 
 

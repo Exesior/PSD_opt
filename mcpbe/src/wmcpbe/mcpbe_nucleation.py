@@ -1,25 +1,32 @@
-"""
-Nucleation Handler fuer Fluessigkeitszugabe via Tropfenverteilung.
+"""Liquid addition: distributing binder droplets onto particles.
 
-Physikalisches Modell:
-    Tropfen kollidieren zufaellig mit Partikeln. Alle Partikel haben gleiche
-    Kollisionswahrscheinlichkeit (uniform Sampling gewichtet nach W).
-    
-    DSMC-Skalierung: Ein computational droplet event repraesentiert
-    physical_droplets = (Vc_ref/Vc) × W_selected physikalische Tropfen.
+Physical model
+--------------
+Droplets hit particles at random. Every *physical* particle is equally likely
+to be hit, which means sampling the *computational* particles weighted by
+``W``.
 
-Komponenten:
-    NucleationConfig: Konfigurations-Dataclass mit Validierungslogik
-    NucleationHandler: Hauptklasse (Composition Pattern, kein Mixin)
+DSMC scaling: one computational droplet event stands for
+``physical_droplets = (Vc_ref / Vc) * W_selected`` physical droplets, so the
+physical flow rate stays correct even as ``Vc`` doubles during a run.
 
-Verwendung:
-    >>> config = NucleationConfig(
+Structure
+---------
+``NucleationConfig``
+    Configuration dataclass; validates itself in ``__post_init__``.
+``NucleationHandler``
+    The handler itself. Composed onto the solver, not mixed in -- it runs on
+    its own time scale via ``.step(t, dt)`` after each MC event, rather than as
+    a drawn event.
+
+Usage
+-----
+    >>> handler = solver.create_nucleation_handler(
     ...     enabled=True,
     ...     volumetric_flow_rate=1e-9,      # m^3/s
     ...     droplet_diameter=1e-6,          # m
     ...     liquid_addition_duration=300.0, # s
     ... )
-    >>> handler = solver.create_nucleation_handler(**config.__dict__)
 """
 
 from __future__ import annotations
@@ -34,11 +41,12 @@ from .fenwick_new import FenwickSampler
 
 
 class InitializationType(Enum):
-    """
-    Veraltet: Nur fuer Abwaertskompatibilitaet.
-    
-    Moderne Nukleation verwendet einheitliche zeitbasierte Fluessigkeitszugabe.
-    Diese Enum wird nicht mehr verwendet.
+    """Deprecated marker for how the addition window was specified.
+
+    Nucleation is time-based either way; this only records which of the two
+    input forms the user chose. Nothing in the solver branches on it -- it is
+    set in ``NucleationConfig.__post_init__`` and read back out only in
+    ``NucleationHandler.get_statistics()``.
     """
     DURATION = "duration"
     MASS = "mass"
@@ -46,62 +54,59 @@ class InitializationType(Enum):
 
 @dataclass
 class NucleationConfig:
-    """
-    Konfiguration fuer zeitbasierte Fluessigkeitszugabe via Tropfenverteilung.
-    
-    Physikalisches Modell:
-        Tropfen kollidieren zufaellig mit Partikeln (uniform Sampling nach W).
-        Ein computational droplet event repraesentiert mehrere physikalische Tropfen:
-        physical_droplets = (Vc_ref/Vc) × W_selected
-    
-    Dauer-Spezifikation (mutually exclusive):
-        Option A: Direkt via `liquid_addition_duration` [s]
-        Option B: Berechnet aus target_wt_percent + solid_mass_in_mixer + Dichten
-    
-    Parameter
-    ---------
+    """Configuration for time-based liquid addition.
+
+    The addition window can be given in two mutually exclusive ways:
+
+    A. directly, as ``liquid_addition_duration`` [s]
+    B. derived from ``target_wt_percent`` together with
+       ``solid_mass_in_mixer``, ``rho_solid`` and ``rho_liquid``
+
+    Giving both is allowed only if they agree within ``consistency_tol``.
+
+    Parameters
+    ----------
     enabled : bool
-        Aktiviert Nukleation
+        Turn nucleation on.
     volumetric_flow_rate : float
-        Physikalische Flussrate [m^3/s]. Wird direkt verwendet (keine DSMC-Skalierung).
+        Physical flow rate [m^3/s], used as such -- the DSMC correction for a
+        changing ``Vc`` happens in the handler.
     droplet_diameter : float
-        Physikalischer Tropfendurchmesser [m]
+        Physical droplet diameter [m].
     liquid_addition_start : float, optional
-        Startzeit [s], Default: 0.0
+        Start time [s], default 0.0.
     liquid_addition_duration : float, optional
-        Direkte Dauer [s]
+        Window length [s] (option A).
     target_wt_percent : float, optional
-        Ziel Fluessigkeitsanteil (dry basis) [%]
+        Target liquid fraction on a dry basis [%] (option B).
     solid_mass_in_mixer : float, optional
-        Gesamte Feststoffmasse im Mixer [kg]
-    rho_solid : float, optional
-        Dichte Feststoff [kg/m^3]
-    rho_liquid : float, optional
-        Dichte Fluessigkeit [kg/m^3]
+        Total solid mass in the mixer [kg] (option B).
+    rho_solid, rho_liquid : float, optional
+        Densities [kg/m^3] (option B).
     batch_size : float, optional
-        Computational weight pro Tropfen-Event. Default: 25.0.
-        dW = min(batch_size, W_i) steuert Granularitaet der Verteilung.
+        Computational weight per droplet event. ``dW = min(batch_size, W_i)``
+        sets how coarsely the liquid is distributed. Required when enabled.
     consistency_tol : float
-        Relative Toleranz fuer Konsistenzpruefung, Default: 0.001 (0.1%)
+        Relative tolerance of the A-vs-B check, default 0.001 (0.1 %).
     similarity_tol : float
-        Relative Toleranz fuer Partikel-Merging, Default: 1e-5
+        Relative tolerance for reusing an existing particle, default 1e-5.
     liquid_match_scale : str
-        Referenz fuer liquid tolerance: 'droplet' (Default, massenerhaltend)
-        oder 'total' (veraltet, fuehrt zu systematischem Verlust)
+        What the liquid part of that tolerance is measured against --
+        ``'droplet'`` (default) or ``'total'``. See the comment at the field.
     debug : bool
-        Diagnoseausgaben aktivieren, Default: False
-    
+        Print diagnostics, default False.
+
     Raises
     ------
     ValueError
-        Wenn volumetric_flow_rate oder droplet_diameter ≤ 0
-        Wenn weder Dauer noch Massen-Parameter angegeben
-        Wenn beide Methoden disagreed > 0.1%
-    
+        If ``volumetric_flow_rate`` or ``droplet_diameter`` is <= 0, if neither
+        duration nor mass parameters are given, or if both forms are given and
+        disagree by more than ``consistency_tol``.
+
     See Also
     --------
-    NucleationHandler : Hauptklasse die diese Konfiguration verwendet
-    
+    NucleationHandler : the handler that consumes this configuration
+
     Examples
     --------
     >>> config = NucleationConfig(
@@ -142,7 +147,7 @@ class NucleationConfig:
     # What the liquid part of that tolerance is measured against.
     #
     #   "total"   - relative to the particle's own liquid, i.e. the plain rule
-    #               |ist - Kandidat| / ist <= similarity_tol.
+    #               |target - candidate| / target <= similarity_tol.
     #   "droplet" (default) - the same rule, but additionally capped at
     #               similarity_tol * v_droplet. The cap can only tighten the
     #               tolerance, never loosen it.
@@ -150,37 +155,27 @@ class NucleationConfig:
     # Why the cap: under "total" the accepted absolute liquid difference grows
     # with how much liquid a particle already carries, so late merges accept
     # ever larger differences while the statistics still book a whole droplet.
-    # That mechanism is plausible but its magnitude has NOT been measured here.
-    #
-    # CORRECTION (2026-08): earlier revisions of this comment justified the
-    # default with "0.58 % liquid drift, see docs/REFACTORING_FINDINGS.md
-    # (F-03)". That attribution was wrong on two counts: F-03 describes the
-    # nucleation REMAINDER path (the child was created with only
-    # _liquid_remainder instead of parent_liquid + remainder) and has long been
-    # fixed, and the file now lives at docs/old/REFACTORING_FINDINGS.md. The
-    # 0.58 % belongs to that unrelated bug and says nothing about this
-    # tolerance. "droplet" is kept as the conservative default; switch to
-    # "total" and compare `python -m tests.test_conservation` if you want the
-    # higher merge hit rate.
+    # The mechanism is plausible; its magnitude has NOT been measured here.
+    # "droplet" is therefore the conservative default. To trade that for a
+    # higher merge hit rate, switch to "total" and compare
+    # `python -m tests.test_conservation`.
     liquid_match_scale: str = "droplet"
 
-    # Suchweg im ParticleMerger.
-    #   True (Default) - vektorisierter linearer Scan ueber alle aktiven
-    #           Partikel. Zusaetzlich deterministisch: liefert den niedrigsten
-    #           passenden Index, waehrend der Hash-Pfad ueber ein set iteriert.
-    #   False - Hash-Index.
+    # Which lookup path the ParticleMerger uses for nucleation.
+    #   True (default) - vectorised linear scan over all active particles.
+    #           Also deterministic: it returns the lowest matching index,
+    #           whereas the hash path iterates a set.
+    #   False - hash index.
     #
-    # Warum NICHT der Hash, obwohl er "O(1)" ist: der Hash-Key binnt V_dry und
-    # liquid auf log10/8 Stellen und poro/sat auf 4 Nachkommastellen. In der
-    # Nucleation starten aber alle Partikel monodispers und trocken, sitzen also
-    # im selben Bucket. _find_via_hash iteriert dieses Bucket in einer
-    # PYTHON-Schleife und ruft _matches_exact je Kandidat einzeln auf -- bei
-    # einem Bucket mit ~n Eintraegen und einer Trefferquote von wenigen Prozent
-    # heisst das: fast jeder Lookup laeuft das ganze Bucket interpretiert durch.
-    # Der lineare Scan macht dieselbe Pruefung vektorisiert in NumPy und ist
-    # dadurch um Groessenordnungen schneller, obwohl er formal dieselbe
-    # Komplexitaet hat. Gemessen: mit Hash blieb ein 20-s-Lauf nach t~4 haengen,
-    # mit linearem Scan laeuft er in ~50 s durch.
+    # Why not the hash, despite being "O(1)": its key bins V_dry and liquid to
+    # 8 log10 digits and porosity/saturation to 4 decimals. In nucleation all
+    # particles start monodisperse and dry, so they all land in ONE bucket.
+    # _find_via_hash walks that bucket in a PYTHON loop, calling _matches_exact
+    # per candidate -- with ~n entries per bucket and a hit rate of a few
+    # percent, almost every lookup interprets the whole bucket. The linear scan
+    # runs the same test vectorised in NumPy and is orders of magnitude faster
+    # despite the identical formal complexity. Measured: with the hash a 20 s
+    # run stalled around t~4; with the linear scan it completes in ~50 s.
     merge_linear_scan: bool = True
 
     # Diagnostic output. The handler used to print progress unconditionally,
@@ -298,77 +293,75 @@ class NucleationConfig:
 
 
 class NucleationHandler:
-    """
-    Handler fuer Fluessigkeitszugabe via Tropfenverteilung im MC-Simulator.
-    
-    Physikalisches Modell:
-        Fluessigkeit wird als diskrete Tropfen zugegeben. Alle Partikel haben
-        gleiche Kollisionswahrscheinlichkeit (uniform Sampling nach W).
-    
-    DSMC-Skalierung:
-        Ein computational droplet event repraesentiert:
-        physical_droplets = (Vc_ref / Vc) × W_selected
-        
-        Dadurch bleibt die physikalische Flussrate (m^3/s) konstant,
-        unabhaengig von Control-Volume-Änderungen.
-    
-    Funktionsweise:
-        1. Überlappung Event-Intervall mit Nukleations-Fenster berechnen
-        2. Fluessigkeitsvolumen = flow_rate × dt_overlap
-        3. Partikel gewichtet nach W auswaehlen (FenwickSampler, O(log n))
-        4. Tropfen hinzufuegen, Porositaet/Saettigung via Kernel aktualisieren
-        5. Rest-Volumen akkumulieren (massenerhaltend)
-    
+    """Adds binder liquid to the population as discrete droplets.
+
+    Composed onto the solver rather than mixed in: ``solve()`` calls
+    ``.step(t, dt)`` after every MC event, so nucleation runs on its own,
+    continuous time scale instead of being a drawn event.
+
+    Per step
+    --------
+    1. Intersect the event interval with the addition window.
+    2. Liquid to add = ``flow_rate * dt_overlap``.
+    3. Pick a particle weighted by ``W`` (Fenwick sampler, O(log n)) -- which
+       samples *physical* particles uniformly.
+    4. Add the droplet, update porosity and saturation through the kernels.
+    5. Carry the leftover volume over to the next step, so integer
+       discretisation of the droplet count cannot lose liquid.
+
+    DSMC scaling: one computational droplet event stands for
+    ``physical_droplets = (Vc_ref / Vc) * W_selected``, which keeps the
+    physical flow rate [m^3/s] constant across control-volume doublings.
+
     Attributes
     ----------
     solver : MCPBESolver
-        Eltern-Solver Instanz
+        The owning solver.
     config : NucleationConfig
-        Konfigurationsobjekt
+        Configuration.
     _current_time : float
-        Aktuelle Simulationszeit [s]
+        Current simulated time [s].
     _Vc_reference : float
-        Referenz-Control-Volume fuer DSMC-Statistiken [m^3]
+        Control volume at start, the reference for the DSMC scaling [m^3].
     _droplets_added_total : float
-        Gesamtzahl physikalischer Tropfen (gewichtete Summe)
+        Physical droplets added so far (weighted sum).
     _liquid_volume_added_total : float
-        Gesamtes Fluessigkeitsvolumen [m^3]
+        Liquid volume added so far [m^3].
     _liquid_remainder : float
-        Akkumuliertes Restvolumen fuer Massenerhaltung [m^3]
-    
+        Carried-over volume that has not yet filled a whole droplet [m^3].
+
     See Also
     --------
-    NucleationConfig : Konfigurations-Dataclass
-    fenwick_new.FenwickSampler : Gewichtetes Sampling
-    
+    NucleationConfig : configuration dataclass
+    fenwick_new.FenwickSampler : weighted sampling
+
     Examples
     --------
-    >>> config = NucleationConfig(enabled=True, volumetric_flow_rate=1e-9,
-    ...                           droplet_diameter=1e-6, liquid_addition_duration=300.0)
-    >>> handler = solver.create_nucleation_handler(**config.__dict__)
+    >>> handler = solver.create_nucleation_handler(
+    ...     enabled=True, volumetric_flow_rate=1e-9,
+    ...     droplet_diameter=1e-6, liquid_addition_duration=300.0)
     >>> solver.solve()
     """
     
     def __init__(self, solver, config: NucleationConfig) -> None:
-        """
-        Initialisiert Nukleations-Handler fuer Fluessigkeitszugabe.
-        
-        Parameter
-        ---------
+        """Attach the handler to a solver.
+
+        Parameters
+        ----------
         solver : MCPBESolver
-            Eltern-Solver Instanz
+            The owning solver.
         config : NucleationConfig
-            Konfigurationsobjekt mit Flussrate, Tropfengroesse, Zeitfenster
-        
+            Flow rate, droplet size and time window.
+
         Raises
         ------
         ValueError
-            Wenn required Solver-Attribute (x, Vc) nicht gesetzt
-        
+            If required solver attributes (``x``, ``Vc``) are not set.
+
         See Also
         --------
-        NucleationConfig : Konfigurationsparameter
-        MCPBESolver.create_nucleation_handler : Factory-Methode
+        NucleationConfig : the configuration
+        MCPBESolver.create_nucleation_handler : factory that calls this
         """
         self.solver = solver
         self.config = config
@@ -493,35 +486,33 @@ class NucleationHandler:
         pass
     
     def mark_event_for_statistics(self, current_time: float) -> None:
-        """
-        Markiert MC-Event fuer Statistik (veraltet, nur Kompatibilitaet).
-        
-        Wird vom Solver nach jedem Event aufgerufen. Aktualisiert
-        _last_event_time fuer finalize(). Das _had_events_in_window Flag
-        wird in step() gesetzt wenn dt_overlap > 0.
-        
-        Parameter
-        ---------
+        """Record the time of the last MC event, for :meth:`finalize_after_solve`.
+
+        Called by the solver after every event. The ``_had_events_in_window``
+        flag is not set here but in :meth:`step`, once ``dt_overlap > 0``.
+
+        Parameters
+        ----------
         current_time : float
-            Aktuelle Simulationszeit [s]
+            Current simulated time [s].
         """
         self._last_event_time = current_time
     
     def check_first_event(self, current_time: float) -> None:
-        """
-        Prueft ob Nukleationsfenster vor erstem MC-Event abgeschlossen wurde.
-        
-        Wird bei count==0 (erstes MC-Event) aufgerufen. Falls das Fenster
-        vor dem ersten Event endete, wird manuelle Nukleation ausgeloest.
-        
-        Parameter
-        ---------
+        """Catch an addition window that closed before the first MC event.
+
+        Called on the first event (``count == 0``). If the whole window already
+        lies in the past, no ``step()`` will ever see it, so the liquid is
+        added in one go instead.
+
+        Parameters
+        ----------
         current_time : float
-            Zeitpunkt des ersten MC-Events [s]
-        
+            Time of the first MC event [s].
+
         See Also
         --------
-        _trigger_manual_full_window : Manuelle Ausloesung bei verpasstem Fenster
+        _trigger_manual_full_window : the catch-up path
         """
         if not self.config.enabled:
             return
@@ -532,25 +523,25 @@ class NucleationHandler:
             self._manual_trigger_done = True
     
     def finalize_after_solve(self, final_time: float, event_count: int) -> None:
-        """
-        Finalisiert Nukleation nach Abschluss des MC-Loops.
-        
-        Behandelt drei Faelle:
-        1. Keine MC-Events waehrend Simulation -> manueller Trigger mit voller Dauer
-        2. Fenster endete nach letztem Event -> verbleibende Zeit verteilen
-        3. Verbleibendes Volumen in _liquid_remainder -> immer verteilen
-        
-        Parameter
-        ---------
+        """Add whatever liquid the event loop did not get to.
+
+        Three cases:
+
+        1. No MC events at all -- add the full window in one go.
+        2. The window closed after the last event -- add the missing span.
+        3. Liquid left in ``_liquid_remainder`` -- always placed.
+
+        Parameters
+        ----------
         final_time : float
-            Finale Simulationszeit [s]
+            Final simulated time [s].
         event_count : int
-            Anzahl aufgetretener MC-Events
-        
+            Number of MC events that occurred.
+
         See Also
         --------
-        _trigger_manual_full_window : Manuelle Ausloesung
-        _distribute_remaining_liquid : Restvolumen-Verteilung
+        _trigger_manual_full_window : case 1
+        _distribute_remaining_liquid : case 3
         """
         if not self.config.enabled:
             return
@@ -638,16 +629,15 @@ class NucleationHandler:
                 dW, v_eff = self._distribute_one_droplet_with_dW(
                     v_droplet, max_physical_droplets=n_physical_remaining)
 
-                # Sampler pro Tropfen aktualisieren, siehe Begruendung in
+                # Refresh the sampler per droplet; see the reasoning in
                 # _distribute_liquid_volume.
                 self._ensure_samplers()
 
                 if dW > 0:
                     effective_dW = dW * vc_scale
-                    # v_eff, nicht v_droplet: bei gedeckelten Events bekommt
-                    # jedes physikalische Partikel weniger als einen vollen
-                    # Tropfen. Mit v_droplet gerechnet wuerde hier mehr
-                    # abgebucht als real verteilt wurde.
+                    # v_eff, not v_droplet: on a capped event each physical
+                    # particle receives less than a full droplet, so booking
+                    # v_droplet here would charge more than was delivered.
                     v_event = v_eff * effective_dW
                     v_distributed += v_event
                     self._droplets_added_total += v_event / v_droplet
@@ -675,14 +665,13 @@ class NucleationHandler:
 
             if dW > 0:
                 effective_dW = dW * vc_scale
-                # Die Deckelung verkleinert die Menge PRO Partikel (v_eff),
-                # nicht dW. Die real abgegebene Fluessigkeit ist deshalb
-                # effective_dW * v_eff -- mit dem nominalen v_droplet
-                # gerechnet wurde hier frueher zu viel abgebucht, wodurch
-                # _liquid_remainder negativ wurde.
+                # Capping shrinks the amount PER PARTICLE (v_eff), not dW.
+                # The liquid actually delivered is therefore
+                # effective_dW * v_eff -- booking the nominal v_droplet
+                # instead drives _liquid_remainder negative.
                 v_physical_distributed = effective_dW * v_eff
 
-                # Statistik in NOMINALEN Tropfen, konsistent zum Volumen
+                # Statistics count NOMINAL droplets, consistent with the volume.
                 self._droplets_added_total += v_physical_distributed / v_droplet
                 self._liquid_volume_added_total += v_physical_distributed
                 self._liquid_remainder -= v_physical_distributed
@@ -699,26 +688,23 @@ class NucleationHandler:
             )
     
     def step(self, current_time: float, solver_last_dt: float) -> None:
-        """
-        Fuehrt einen Nukleationsschritt via Überlappungsberechnung aus.
-        
-        Wird nach jedem MC-Event aufgerufen. Berechnet das Überlappungsintervall
-        zwischen Event-Intervall [t-dt, t] und Nukleationsfenster [start, end].
-        
-        Physikalisches Modell:
-            Fluessigkeitsvolumen = flow_rate × dt_overlap
-            wobei dt_overlap = Schnittlaenge der beiden Intervalle
-        
-        Parameter
-        ---------
+        """Add the liquid belonging to one MC event.
+
+        Called after every event. Intersects the event interval
+        ``[t - dt, t]`` with the addition window ``[start, end]`` and adds
+        ``flow_rate * dt_overlap``. An event entirely outside the window adds
+        nothing.
+
+        Parameters
+        ----------
         current_time : float
-            Aktuelle Simulationszeit NACH diesem MC-Event [s]
+            Simulated time AFTER this MC event [s].
         solver_last_dt : float
-            Zeit seit vorherigem MC-Event (= Intervall-Laenge) [s]
-        
+            Time since the previous event, i.e. the interval length [s].
+
         See Also
         --------
-        _distribute_liquid_volume : Verteilt berechnetes Volumen
+        _distribute_liquid_volume : places the computed volume
         """
         if not self.config.enabled:
             return
@@ -761,25 +747,22 @@ class NucleationHandler:
         self.print_debug_status(force=False)
     
     def _trigger_manual_full_window(self) -> None:
-        """
-        Loest manuelle Nukleation mit voller Fensterdauer aus.
-        
-        Aufgerufen wenn:
-        - Erstes MC-Event nach Fensterende (Case C in check_first_event)
-        - Keine MC-Events waehrend Simulation (Case 1 in finalize_after_solve)
-        
-        Verteilt das GESAMTE Fluessigkeitsvolumen fuer die gesamte Fensterdauer
-        in einem Durchgang.
-        
+        """Add the entire window's liquid in one pass.
+
+        Used when the event loop cannot cover the window: either the first
+        event already lies past its end (see :meth:`check_first_event`), or the
+        simulation produced no events at all (see
+        :meth:`finalize_after_solve`).
+
         Raises
         ------
         UserWarning
-            Warnung ueber verpasstes Zeitfenster
-        
+            Always -- a missed window means the event rate was far lower than
+            the addition rate, which is worth knowing about.
+
         See Also
         --------
-        check_first_event : Prueft verpasstes Fenster beim ersten Event
-        finalize_after_solve : Finalisierung nach MC-Loop
+        check_first_event, finalize_after_solve : the two callers
         """
         import warnings
         warnings.warn(
@@ -872,22 +855,20 @@ class NucleationHandler:
         return False
     
     def _ensure_samplers(self) -> None:
-        """
-        Erstellt oder aktualisiert gewichteten Sampler fuer uniformes Partikel-Sampling.
-        
-        Physikalisches Modell:
-            Um PHYSISCHE Partikel uniform zu samplen, werden COMPUTATIONALE Partikel
-            proportional zu ihrem Gewicht W gesampelt:
-            P(Partikel i) = W[i] / Sum(W)
-        
-        Performance:
-            - Inkrementelle Updates: O(log n) bei Gewichtsaenderungen
-            - Vollstaendiger Rebuild: O(n) nur bei Partikelanzahl-Änderung
-        
+        """Build or refresh the weighted sampler used to pick a target particle.
+
+        To hit *physical* particles uniformly, *computational* particles have
+        to be drawn proportional to their weight::
+
+            P(particle i) = W[i] / sum(W)
+
+        Weight changes are applied incrementally in O(log n); only a change in
+        particle count forces a full O(n) rebuild.
+
         See Also
         --------
-        fenwick_new.FenwickSampler : Implementierung des gewichteten Samplers
-        _apply_pending_weight_updates : Inkrementelle Gewichtsaktualisierung
+        fenwick_new.FenwickSampler : the sampler
+        _apply_pending_weight_updates : the incremental path
         """
         a_tot = self.solver.a_tot
         if a_tot < 1:
@@ -938,20 +919,18 @@ class NucleationHandler:
         self._last_W_sum = float(np.sum(W))
     
     def _apply_pending_weight_updates(self) -> None:
-        """
-        Wendet akkumulierte Gewichtsaenderungen inkrementell am Sampler an.
-        
-        Performance:
-            - Einzelnes Update: O(log n) statt O(n) fuer vollstaendigen Rebuild
-            - Bei k Updates auf n Partikeln: O(k log n) vs O(k n)
-        
-        Wird automatisch von _ensure_samplers() aufgerufen wenn
-        inkrementelle Updates aktiviert sind.
-        
+        """Flush the recorded weight changes into the sampler.
+
+        One update costs O(log n) instead of the O(n) of a full rebuild, so k
+        updates over n particles cost O(k log n) rather than O(k n).
+
+        Called automatically from :meth:`_ensure_samplers` when incremental
+        updates are enabled.
+
         See Also
         --------
-        _record_weight_change : Zeichnet Gewichtsaenderung auf
-        fenwick_new.FenwickSampler.update : Inkrementelle Fenwick-Update-Methode
+        _record_weight_change : records the changes this applies
+        fenwick_new.FenwickSampler.update : the underlying operation
         """
         if not self._pending_weight_updates or self._weight_sampler is None:
             return
@@ -994,23 +973,22 @@ class NucleationHandler:
         self._pending_weight_updates.clear()
     
     def _record_weight_change(self, idx: int, new_weight: float) -> None:
-        """
-        Zeichnet Gewichtsaenderung fuer spaetere inkrementelle Aktualisierung auf.
-        
-        Wird bei jeder Gewichtsaenderung waehrend Nukleation aufgerufen.
-        Das eigentliche Sampler-Update wird bis zum naechsten Aufruf von
-        _ensure_samplers() verzoegert (Batch-Verarbeitung).
-        
-        Parameter
-        ---------
+        """Note that a particle's weight changed, without touching the sampler yet.
+
+        Called on every weight change during nucleation. The sampler update is
+        deferred until the next :meth:`_ensure_samplers` call, so a droplet
+        that changes several weights pays for one flush rather than several.
+
+        Parameters
+        ----------
         idx : int
-            Partikelindex dessen Gewicht sich geaendert hat
+            Index of the particle whose weight changed.
         new_weight : float
-            Neuer absoluter Gewichtswert
-        
+            The new absolute weight.
+
         See Also
         --------
-        _apply_pending_weight_updates : Wendet aufgezeichnete Änderungen an
+        _apply_pending_weight_updates : applies what this records
         """
         # Unconditional: this is the single hook every weight change of this
         # handler passes through (droplet transfer, parent depletion, forced
@@ -1035,25 +1013,22 @@ class NucleationHandler:
 
 
     def _select_particle_uniform_physical(self) -> int:
-        """
-        Waehlt computationales Partikel sodass alle PHYSISCHEN gleiche Wahrscheinlichkeit haben.
-        
-        Physikalisches Modell:
-            Sampling proportional zu W gewaehrleistet uniforme Verteilung
-            ueber physikalische Partikel.
-        
-        Kernel-Framework:
-            Bei vorhandenem liquid_dist_kernel wird dieser fuer erweiterte
-            Strategien verwendet (surface-weighted, saturation-preferential).
-        
+        """Draw a computational particle so that all PHYSICAL ones are equally likely.
+
+        Sampling proportional to ``W`` is what makes the distribution uniform
+        over physical particles rather than over array slots.
+
+        If a ``liquid_dist_kernel`` is configured, it takes over and can
+        implement other strategies (surface-weighted, saturation-preferential).
+
         Returns
         -------
         int
-            Index des gewaehlten Partikels, oder -1 falls kein gueltiges Partikel
-        
+            Index of the chosen particle, or ``-1`` if none is eligible.
+
         See Also
         --------
-        kernels.liquid_distribution : Kernel fuer Partikelauswahl
+        kernels.liquid_distribution : the pluggable selection strategies
         """
         solver = self.solver
         
@@ -1086,31 +1061,28 @@ class NucleationHandler:
         
     def _distribute_liquid_volume(self, v_liquid_to_distribute: float, 
                                    is_manual_trigger: bool = False) -> None:
-        """
-        Kern-Logik zur Verteilung von Fluessigkeitsvolumen als Tropfen.
-        
-        Physikalische Grundlagen:
-            - Verteilt Volumen als diskrete Tropfen via DSMC-Sampling
-            - Akkumuliert Restvolumen ueber Aufrufe hinweg (Massenerhaltung)
-            - Vermeidet systematischen Verlust durch Integer-Diskretisierung
-        
-        Algorithmus:
-            1. Neues Liquid zu _liquid_remainder addieren
-            2. Anzahl ganzer Tropfen berechnen
-            3. Tropfen mit Volumen-Tracking verteilen (nicht Count-Tracking!)
-            4. Restliches Volumen als Mini-Tropfen verteilen (effektive_dW=1)
-        
-        Parameter
-        ---------
+        """Turn a liquid volume into droplets and place them on particles.
+
+        The volume is added to ``_liquid_remainder`` first, and only whole
+        droplets are placed; what is left stays in the remainder for the next
+        call. Tracking *volume* rather than a droplet *count* is what keeps
+        this mass-conserving -- rounding a count down each time would lose
+        liquid systematically.
+
+        Whatever remains at the very end is placed as one final partial
+        droplet with an effective weight of 1.
+
+        Parameters
+        ----------
         v_liquid_to_distribute : float
-            Physikalisches Fluessigkeitsvolumen [m^3]
+            Physical liquid volume to add [m^3].
         is_manual_trigger : bool
-            Wenn True, detaillierte Fortschrittsausgaben (fuer manuellen Trigger)
-        
+            Print detailed progress (used by the manual trigger path).
+
         See Also
         --------
-        _distribute_one_droplet_with_dW : Verteilt einzelnen Tropfen
-        _distribute_remaining_liquid : Verteilt Restvolumen am Simulationende
+        _distribute_one_droplet_with_dW : places a single droplet
+        _distribute_remaining_liquid : places the remainder at end of run
         """
         # Initialize remainder accumulator if needed
         if not hasattr(self, '_liquid_remainder'):
@@ -1177,27 +1149,24 @@ class NucleationHandler:
             dW, v_eff = self._distribute_one_droplet_with_dW(
                 v_droplet, max_physical_droplets=n_physical_remaining)
 
-            # Sampler nach JEDEM Tropfen aktualisieren. Der Tropfen hat gerade
-            # Gewicht vom getroffenen Partikel abgezogen, ggf. ein neues Partikel
-            # angelegt und ggf. zwangsagglomeriert -- der naechste Tropfen muss
-            # aus dem Zustand DANACH ziehen.
+            # Refresh the sampler after EVERY droplet. The droplet just took
+            # weight off the particle it hit, possibly created a new particle
+            # and possibly forced an agglomeration -- the next droplet has to
+            # draw from the state AFTER all of that.
             #
-            # Vorher lief dieser Aufruf nur EINMAL vor der Schleife: ab dem
-            # zweiten Tropfen zog der Sampler mit veralteten Gewichten, und die
-            # innerhalb dieses Schrittes neu entstandenen Partikel waren fuer
-            # die restlichen Tropfen ueberhaupt nicht auswaehlbar. Die
-            # Batch-Verarbeitung sollte Rechenzeit sparen, hat damit aber die
-            # Sampling-Verteilung veraendert -- und genau dieses gewichtete
-            # Ziehen ueber ALLE verfuegbaren Partikel ist der Zweck von
-            # `batch_size`: sie ist das W des Tropfens, analog zum W eines
-            # Partikels. Bei batch_size = 1 entspricht ein Event damit genau
-            # einem physikalischen Tropfen auf ein Partikel.
+            # Doing this once before the loop instead would leave the sampler
+            # on stale weights from the second droplet onwards, and particles
+            # created within this step would be unreachable for the rest of it.
+            # Weighted drawing over ALL available particles is precisely what
+            # `batch_size` is for: it is the droplet's W, analogous to a
+            # particle's W. At batch_size = 1 one event is exactly one physical
+            # droplet landing on one particle.
             self._ensure_samplers()
 
             if dW > 0:
                 effective_dW = dW * vc_scale
-                # v_eff statt v_droplet -- siehe _distribute_remaining_liquid:
-                # gedeckelte Events geben weniger als einen vollen Tropfen ab.
+                # v_eff rather than v_droplet -- see _distribute_remaining_liquid:
+                # capped events deliver less than a full droplet.
                 v_event = v_eff * effective_dW
                 v_distributed += v_event
                 self._droplets_added_total += v_event / v_droplet
@@ -1261,8 +1230,8 @@ class NucleationHandler:
                     i, new_liquid, is_first_contact
                 )
 
-                # Saettigung fortschreiben (jeder Tropfen!). Der Rest-Tropfen
-                # `_liquid_remainder` ist der Zuwachs, der rein extern ankommt.
+                # Carry saturation forward (on every droplet). The remainder
+                # `_liquid_remainder` arrives as purely external liquid.
                 sat_new = self._compute_saturation_for_liquid(
                     src_idx=i,
                     v_dry=v_dry_new,
@@ -1333,73 +1302,72 @@ class NucleationHandler:
     
     def _distribute_one_droplet_with_dW(self, v_droplet: float, 
                                          max_physical_droplets: Optional[float] = None) -> float:
-        """
-        Verteilt einen computionalen Tropfen auf Partikel.
-        
-        UNIFIED PATH fuer ALLE Tropfen (1., 2., 3., ...).
-        
-        Physikalisches Modell:
-            Ein computational droplet Event verteilt einen einzelnen Tropfen des Volumens
-            v_droplet auf gesammelte Partikel. Das Event-Gewicht dW bestimmt wie viele
-            PHYSISCHEN Tropfen dies repraesentiert:
-            
-                n_physical_droplets = effective_dW = dW × (Vc_ref / Vc)
-            
-            Sampling erfolgt gewichtet nach W fuer uniforme Verteilung ueber physikalische
-            Partikel.
-        
-        Stabilitaetskriterium (KRITISCH!):
-            V_dry >= v_liquid  ->  Partikel kann Fluessigkeit tragen
-            V_dry < v_liquid   ->  Zu viel Fluessigkeit! Agglomeration fuer mehr V_dry
-            
-            Warum V_dry (nicht V_solid)? Hochporoese Partikel koennen MEHR Fluessigkeit
-            aufnehmen! V_dry = V_solid + V_pore beruecksichtigt Porenkapazitaet.
-        
-        Algorithmus:
-            1. Partikel i gewichtet nach W auswaehlen (uniform ueber physikalische Partikel)
-            2. Tropfen addieren: new_liquid = current_liquid + v_droplet
-            3. SOLANGE V_dry < new_liquid:
-                 - Mit Partikel j agglomerieren um V_dry zu erhoehen
-                 - V_dry und new_liquid vom gemergten Partikel aktualisieren
-            4. dW aus gesammeltem Partikelgewicht W_i berechnen
-            5. Porositaet via PorosityGrowthKernel bestimmen (kernel-spezifisch!)
-            6. Saettigung berechnen (jeder Tropfen!)
-            7. Versuchen mit aehnlichem Partikel zu mergen (Optimierung)
-            8. Neues Partikel erstellen oder Gewicht transferieren
-            9. Eltern-Gewichte und Sampler aktualisieren
-        
-        Kernel-spezifisches Verhalten:
-            - volume_mixing: Erster Kontakt bekommt poro=0.4 (erforderlich fuer Porositaet!)
-            - cone_model: Startet mit poro=0.0, Porositaet waechst via ΔV bei Agglomeration
-        
-        Parameter
-        ---------
+        """Place one computational droplet, agglomerating first if necessary.
+
+        The single path for every droplet -- the first and all later ones.
+
+        One computational droplet event distributes a droplet of volume
+        ``v_droplet``. The event weight ``dW`` decides how many *physical*
+        droplets that represents::
+
+            n_physical_droplets = effective_dW = dW * (Vc_ref / Vc)
+
+        The target particle is drawn weighted by ``W``, which samples physical
+        particles uniformly.
+
+        Capacity criterion
+        ------------------
+        A particle can only carry the liquid if ``V_dry >= v_liquid``. Note
+        that this uses **V_dry**, not ``V_solid``: a highly porous particle can
+        hold more liquid, because ``V_dry = V_solid + V_pore`` includes the
+        pore space.
+
+        If the drawn particle cannot take the droplet, it is agglomerated with
+        further particles until enough ``V_dry`` has been collected.
+
+        Steps
+        -----
+        1. Draw particle ``i`` weighted by ``W``.
+        2. ``new_liquid = current_liquid + v_droplet``.
+        3. While ``V_dry < new_liquid``: agglomerate with a partner ``j`` and
+           update ``V_dry`` and ``new_liquid`` from the merged particle.
+        4. Derive ``dW`` from the collected weight ``W_i``.
+        5. Porosity from the porosity-growth kernel.
+        6. Saturation (updated on every droplet, never recomputed from
+           scratch -- see :meth:`_compute_saturation_for_liquid`).
+        7. Merge into a matching existing particle, or create a new one.
+        8. Update parent weights and the samplers.
+
+        Kernel-dependent behaviour: ``volume_mixing`` starts a first contact at
+        ``poro=0.4`` (otherwise no porosity could ever form), ``cone_model``
+        starts at ``poro=0.0`` and grows porosity geometrically on later
+        agglomeration.
+
+        Parameters
+        ----------
         v_droplet : float
-            Tropfenvolumen [m^3]
+            Droplet volume [m^3].
         max_physical_droplets : float, optional
-            Limit fuer physikalische Tropfen. Cappt dW sodass:
-            effective_dW = dW × vc_scale <= max_physical_droplets
-        
+            Upper limit on physical droplets, capping ``dW`` such that
+            ``effective_dW = dW * vc_scale <= max_physical_droplets``.
+
         Returns
         -------
         tuple[float, float]
-            ``(dW, v_droplet_effective)`` -- das fuer dieses Event verbrauchte
-            Gewicht und die Tropfengroesse, die dabei TATSAECHLICH abgegeben
-            wurde.
+            ``(dW, v_droplet_effective)`` -- the weight this event consumed and
+            the droplet size it ACTUALLY delivered.
 
-            Wenn ``max_physical_droplets`` greift, wird nicht ``dW``
-            verkleinert, sondern die Menge pro Partikel (s.u.). Der Aufrufer
-            muss die abgegebene Fluessigkeit deshalb als
-            ``dW * vc_scale * v_droplet_effective`` verbuchen -- mit dem
-            NOMINALEN ``v_droplet`` gerechnet zieht er zu viel vom
-            ``_liquid_remainder`` ab, was diesen negativ werden laesst.
-            Ohne Deckelung ist ``v_droplet_effective == v_droplet``.
+            When ``max_physical_droplets`` binds, it is not ``dW`` that shrinks
+            but the amount per particle. The caller must therefore book the
+            delivered liquid as ``dW * vc_scale * v_droplet_effective``; using
+            the nominal ``v_droplet`` subtracts too much from
+            ``_liquid_remainder`` and drives it negative. Without capping,
+            ``v_droplet_effective == v_droplet``.
 
         See Also
         --------
-        _perform_nucleation_agglomeration : Manuelle Agglomeration fuer V_dry-Sammlung
-        _get_porosity_kernel : Holt Porositaets-Kernel
-        _compute_saturation_for_liquid : Berechnet Saettigung
+        _perform_nucleation_agglomeration : forced agglomeration to gain V_dry
+        _compute_saturation_for_liquid : saturation update
         """
         solver = self.solver
         a_tot = solver.a_tot
@@ -1428,14 +1396,12 @@ class NucleationHandler:
         
         while V_dry_sum < new_liquid and attempts < max_attempts:
             j = self._select_particle_uniform_physical()
-            # solver.a_tot, NICHT das oben eingefrorene a_tot: diese Schleife
-            # agglomeriert und veraendert dabei selbst die Partikelzahl
-            # (Eltern werden entfernt, Kinder angelegt). Gegen den alten Wert
-            # geprueft war die Schranke je nach Richtung zu streng (gueltige
-            # neue Partikel verworfen, Sammelschleife bricht vorzeitig ab)
-            # oder zu grosszuegig (ungueltiger Index, bisher nur durch den
-            # Eingangs-Guard in _manual_agglomerate_particles abgefangen).
-            # Siehe docs/Audit_2026-08-17.md, N-01.
+            # solver.a_tot, NOT the a_tot frozen above: this loop agglomerates
+            # and therefore changes the particle count itself (parents removed,
+            # children created). Checking against the stale value made the
+            # bound either too strict (valid new particles rejected, the
+            # collection loop aborting early) or too loose (invalid index).
+            # See mcpbe/docs/historical/Audit_2026-08-17.md, N-01.
             if j < 0 or j >= solver.a_tot:
                 break
             
@@ -1446,9 +1412,9 @@ class NucleationHandler:
             
             i = child_idx
             V_dry_sum = float(solver.V_flat[-1, i])
-            # Das gemergte Partikel bringt seine eigene (Vor-Tropfen-)Fluessigkeit mit;
-            # der anstehende Tropfen v_droplet muss weiterhin oben draufgerechnet werden,
-            # sonst geht er aus dem Zielwert verloren (siehe Fundamentals.md Abschnitt 7).
+            # The merged particle brings its own pre-droplet liquid; the
+            # pending droplet v_droplet still has to be added on top, otherwise
+            # it is lost from the target value.
             current_liquid = float(solver.liquid_volume[i])
             new_liquid = current_liquid + v_droplet
 
@@ -1465,25 +1431,25 @@ class NucleationHandler:
         if W_i <= 0:
             return 0.0, 0.0
         
-        # Effektive Batch-Groesse (Paper Gl. 33): der Event verbraucht GENAU dW,
-        # deshalb raeumt der letzte Event ein Partikel exakt auf 0.0 leer und es
-        # koennen keine Restgewichte entstehen.
+        # Effective batch size (paper Eq. 33): the event consumes EXACTLY dW,
+        # so the final event drains a particle to precisely 0.0 and no residual
+        # weights can arise.
         dW = min(self.config.batch_size, W_i)
 
-        # Volumen-Deckelung. Frueher wurde hier dW auf den kontinuierlichen Quotienten
-        # max_physical_droplets/vc_scale heruntergesetzt -- das war die Hauptquelle
-        # fraktionaler Restgewichte.
+        # Volume capping.
         #
-        # Der Deckel ist aber eine VOLUMEN-Bedingung, keine Gewichts-Bedingung: es soll
-        # insgesamt max_physical_droplets * v_droplet an physikalischer Fluessigkeit
-        # abgegeben werden. Statt das Paket zu verkleinern, wird deshalb die Menge PRO
-        # Partikel verkleinert -- dW bleibt auf dem delta-Raster, und
+        # The cap is a VOLUME condition, not a weight condition: in total
+        # max_physical_droplets * v_droplet of physical liquid should be
+        # delivered. So instead of shrinking the packet, the amount PER
+        # PARTICLE is shrunk -- dW stays on the delta grid, and
         #
         #     dW * vc_scale * v_eff  ==  max_physical_droplets * v_droplet
         #
-        # gilt exakt. Physikalisch ist das auch die richtige Lesart: ein Partikel
-        # bekommt weniger Fluessigkeit, nicht "ein Bruchteil eines Partikels bekommt
-        # einen vollen Tropfen".
+        # holds exactly. That is also the physically correct reading: a
+        # particle receives less liquid, rather than "a fraction of a particle
+        # receives a full droplet". Shrinking dW to the continuous quotient
+        # max_physical_droplets/vc_scale instead is what produced fractional
+        # residual weights.
         if max_physical_droplets is not None and max_physical_droplets > 0:
             vc_scale = self._Vc_reference / self.solver.Vc
             max_dW_allowed = max_physical_droplets / vc_scale
@@ -1491,9 +1457,9 @@ class NucleationHandler:
                 v_eff = v_droplet * max_dW_allowed / dW
                 if v_eff <= 0.0:
                     return 0.0, 0.0
-                # new_liquid mit der kleineren Menge neu bilden. Die
-                # Aufnahmefaehigkeit wurde oben mit dem GROESSEREN v_droplet geprueft,
-                # bleibt also konservativ gueltig.
+                # Rebuild new_liquid from the smaller amount. Capacity was
+                # checked above against the LARGER v_droplet, so it stays
+                # conservatively valid.
                 v_droplet = v_eff
                 new_liquid = current_liquid + v_droplet
 
@@ -1523,10 +1489,10 @@ class NucleationHandler:
         )
         
         # ==========================================
-        # SCHRITT 6: Zielzustand einbuchen (mergen oder neu anlegen)
+        # STEP 6: book the target state (merge or create)
         # ==========================================
-        # Geht ueber den gemeinsamen ParticleMerger -- Matching-Regeln und
-        # Hash-Index sind damit dieselben wie bei Agglomeration und Breakage.
+        # Goes through the shared ParticleMerger, so matching rules and hash
+        # index are the same as for agglomeration and breakage.
         self._place_nucleated_state(
             src_idx=i,
             dW=dW,
@@ -1544,47 +1510,42 @@ class NucleationHandler:
         if solver.W[i] <= 0.0:
             self._remove_particle_tracked(i)
 
-        # `v_droplet` ist ab hier die TATSAECHLICH abgegebene Menge pro
-        # physikalischem Tropfen (durch die Deckelung oben ggf. verkleinert).
+        # From here on `v_droplet` is the amount ACTUALLY delivered per
+        # physical droplet -- possibly reduced by the capping above.
         return dW, v_droplet
 
     def _resolve_nucleation_geometry(self, i: int, new_liquid: float,
                                       is_first_contact: bool) -> tuple:
-        """
-        Bestimmt (V_dry, Porositaet) eines Partikels nach Tropfenauftrag.
+        """Determine ``(V_dry, porosity)`` of a particle after a droplet lands.
 
-        Zwei Faelle, physikalisch verschieden:
+        Two physically different cases:
 
-        1. **Partikel hat bereits Porenstruktur** (``poro_old > 0``):
-           Benetzen fuegt Fluessigkeit hinzu, es verdichtet das Feststoffgeruest
-           nicht. V_solid und V_pore bleiben, also bleibt auch V_dry und die
-           Porositaet unveraendert. Die Fluessigkeit landet in ``liquid_volume``;
-           der Internalisierungs-Kernel zieht sie ueber die Zeit in die Poren und
-           ``saturation`` bildet den Fuellgrad ab. Porositaet = geometrischer
-           Hohlraum, Saettigung = Fuellgrad -- zwei getrennte Groessen.
+        1. **The particle already has pore structure** (``poro_old > 0``).
+           Wetting adds liquid; it does not compact the solid skeleton.
+           ``V_solid`` and ``V_pore`` stay, so ``V_dry`` and the porosity stay
+           too. The liquid goes into ``liquid_volume``, the internalisation
+           kernel draws it into the pores over time, and ``saturation`` tracks
+           how full they are. Porosity is geometric void, saturation is fill
+           level -- two separate quantities.
 
-        2. **Partikel ist porenlos** (``poro_old == 0`` oder NaN):
-           Echte Neu-Nukleation, der Kernel bestimmt die Startgeometrie.
-           ``volume_mixing`` setzt seine 0.4-Saat (ohne die koennte durch reine
-           Porenaddition nie Porositaet entstehen), ``cone_model`` startet bei
-           0.0 und laesst Porositaet erst durch Agglomeration entstehen.
+        2. **The particle is poreless** (``poro_old == 0`` or NaN).
+           A genuine new nucleus, so the kernel sets the starting geometry.
+           ``volume_mixing`` seeds 0.4 (without it, pure pore addition could
+           never create porosity), ``cone_model`` starts at 0.0 and lets
+           porosity grow through later agglomeration.
 
-        Vorher lief JEDER Tropfen durch Fall 2. Da an
-        ``compute_nucleation_porosity`` nur ``v_solid`` uebergeben wird, kam bei
-        ``cone_model`` ``(v_solid, 0.0)`` zurueck -- ein Tropfen auf ein Partikel
-        mit eps=0.8 loeschte dessen kompletten Porenraum und liess V_dry auf
-        V_solid zusammenfallen. V_solid blieb erhalten (kein Massenfehler), aber
-        Durchmesser, Rumpf-Festigkeit, Kompression und Internalisierung wurden
-        dadurch entwertet.
+        Case 1 exists because ``compute_nucleation_porosity`` only receives
+        ``v_solid``: routing an already-porous particle through it would return
+        ``(v_solid, 0.0)`` and erase its entire pore space.
 
-        Parameter
-        ---------
+        Parameters
+        ----------
         i : int
-            Index des getroffenen Partikels
+            Index of the particle that was hit.
         new_liquid : float
-            Gesamtfluessigkeit des Partikels nach dem Tropfen [m^3]
+            The particle's total liquid after the droplet [m^3].
         is_first_contact : bool
-            True, wenn das Partikel vorher trocken war (nur fuer volume_mixing)
+            True if the particle was dry before (only used by volume_mixing).
 
         Returns
         -------
@@ -1599,7 +1560,7 @@ class NucleationHandler:
         if not np.isnan(poro_old) and poro_old > 0.0:
             return V_dry_i, poro_old
 
-        # Fall 2: porenloses Partikel -> Kernel bestimmt die Startgeometrie.
+        # Case 2: poreless particle -> the kernel sets the starting geometry.
         porosity_kernel = self._get_porosity_kernel()
 
         if porosity_kernel.name == 'volume_mixing' and is_first_contact:
@@ -1639,59 +1600,54 @@ class NucleationHandler:
     def _compute_saturation_for_liquid(self, src_idx: int, v_dry: float, poro: float,
                                         v_liquid: float, v_added: float,
                                         is_first_contact: bool) -> float:
-        """
-        Saettigung des Zielzustands nach dem Auftreffen eines Tropfens.
+        """Saturation of the target state after a droplet lands.
 
-        WIRD FUER JEDEN TROPFEN AUFGERUFEN -- deshalb ist die Fortschreibung
-        entscheidend, nicht die Neuberechnung.
+        Called for EVERY droplet, so this updates the previous state rather
+        than recomputing it from scratch.
 
-        Physik
-        ------
-        Die Aufteilung intern/extern ist eine Zustandsgroesse **mit Gedaechtnis**:
-        interne Fluessigkeit entsteht durch Kapillarsog ueber die Zeit
-        (Internalisierungs-Kernel), nicht als fester Anteil der Gesamtmenge. Ein
-        frisch auftreffender Tropfen hat noch nichts durchdrungen und ist damit
-        **vollstaendig extern**; die bereits imbibierte Fluessigkeit bleibt, wo
-        sie ist.
+        Physics
+        -------
+        The internal/external split is a state variable **with memory**:
+        internal liquid arises from capillary suction over time (the
+        internalisation kernel), not as a fixed fraction of the total. A
+        droplet that has just landed has penetrated nothing and is therefore
+        **entirely external**; liquid already imbibed stays where it is.
 
-        Daraus folgt::
+        Hence::
 
-            V_int_neu = V_int_alt                         (Internalisierungs-Kernel aktiv)
-            V_int_neu = V_int_alt + split * v_added       (kein Kernel: empirischer Split,
-                                                           aber NUR auf den Zuwachs)
-            V_int_neu = min(V_int_neu, V_pore_neu, v_liquid)   -> Ueberschuss wird extern
-            S         = V_int_neu / V_pore_neu
+            V_int_new = V_int_old                        (internalisation kernel active)
+            V_int_new = V_int_old + split * v_added      (no kernel: empirical split,
+                                                          applied to the INCREMENT only)
+            V_int_new = min(V_int_new, V_pore_new, v_liquid)  -> excess becomes external
+            S         = V_int_new / V_pore_new
 
-        Frueher wurde der Split fuer jeden Tropfen aus der Gesamtfluessigkeit neu
-        gebildet und bei aktivem Kernel unbedingt ``0.0`` zurueckgegeben. Ein
-        vollstaendig gesaettigtes Partikel (S = 1) fiel dadurch mit dem naechsten
-        Tropfen auf S = 0 zurueck -- gemessen betraf das 35,6 % aller
-        Tropfen-Ereignisse bei poroeser Population. Die Internalisierung arbeitete
-        so gegen einen staendigen Reset an, und die Kopplung Benetzung ->
-        Festigkeit -> Bruch war aufgetrennt.
+        Recomputing the split from the total liquid on every droplet would reset
+        a fully saturated particle (S = 1) back to S = 0 with the next droplet,
+        leaving internalisation to work against a constant reset and breaking
+        the chain wetting -> strength -> breakage.
 
-        Der Ueberschuss beim Schrumpfen des Porenraums wird externalisiert, nicht
-        verworfen: die Fluessigkeitsbilanz ist so unantastbar wie die Massenbilanz
-        (identisch zu ``_apply_compression`` und ``mcpbe_agg._merge_pair``).
+        Excess liquid from a shrinking pore space is externalised, not
+        discarded: the liquid balance is as inviolable as the mass balance
+        (same rule as in ``_apply_compression`` and ``mcpbe_agg._merge_pair``).
 
-        Parameter
-        ---------
+        Parameters
+        ----------
         src_idx : int
-            Index des getroffenen Partikels -- Quelle des bisherigen
-            intern/extern-Zustands. ``None``/ungueltig => kein Vorzustand.
+            Index of the particle that was hit -- the source of the previous
+            internal/external state. ``None`` or invalid means no prior state.
         v_dry, poro : float
-            Geometrie des Zielzustands.
+            Geometry of the target state.
         v_liquid : float
-            Gesamtfluessigkeit des Zielzustands (alt + Tropfen).
+            Total liquid of the target state (previous + droplet).
         v_added : float
-            Volumen des gerade auftreffenden Tropfens [m^3].
+            Volume of the droplet just landing [m^3].
         is_first_contact : bool
-            True, wenn das Partikel vorher trocken war.
+            True if the particle was dry before.
 
         Returns
         -------
         float
-            Saettigung S in [0, 1].
+            Saturation S in [0, 1].
         """
         solver = self.solver
 
@@ -1716,9 +1672,9 @@ class NucleationHandler:
                     sat_old = 0.0
                 sat_old = min(max(sat_old, 0.0), 1.0)
                 liq_old = float(solver.liquid_volume[src_idx])
-                # Deckel auf die tatsaechlich vorhandene Fluessigkeit: poro,
-                # saturation und liquid_volume werden an anderen Stellen
-                # unabhaengig gesetzt und sind nicht garantiert konsistent.
+                # Cap at the liquid actually present: poro, saturation and
+                # liquid_volume are set independently elsewhere and are not
+                # guaranteed to be mutually consistent.
                 V_int_old = max(0.0, min(liq_old, V_pore_old * sat_old))
 
         # Check if internalization kernel is active
@@ -1729,46 +1685,46 @@ class NucleationHandler:
         )
 
         if has_internalization_kernel:
-            # Der Kernel zieht die Fluessigkeit ueber die Zeit nach innen.
-            # Der Tropfen selbst landet vollstaendig aussen.
+            # The kernel draws liquid inward over time; the droplet itself
+            # lands entirely on the outside.
             V_int_new = V_int_old
         else:
-            # Kein Kernel: der empirische Split ist der einzige Mechanismus, der
-            # ueberhaupt Fluessigkeit nach innen bringt -- er greift deshalb auf
-            # den ZUWACHS, nicht auf die Gesamtmenge.
+            # No kernel: the empirical split is then the only mechanism that
+            # moves liquid inward at all, so it acts on the INCREMENT rather
+            # than on the total.
             split_ratio = self._get_liquid_split_ratio(poro)
             V_int_new = V_int_old + split_ratio * max(0.0, v_added)
 
-        # Porenraum kann geschrumpft sein -> Ueberschuss wird extern, nicht geloescht.
+        # Pore space may have shrunk -> excess becomes external, not discarded.
         V_int_new = min(V_int_new, V_pore_new, max(0.0, v_liquid))
 
         return V_int_new / V_pore_new
     
     def _get_liquid_split_ratio(self, poro: float) -> float:
-        """
-        Ermittelt Liquid-Split-Ratio aus Porositaets-Kernel.
-        
-        Bestimmt wie Fluessigkeit auf intern/extern aufgeteilt wird:
-        - split_ratio = V_liq_int / V_liq_total
-        - (1 - split_ratio) = externer Anteil
-        
-        Kernel-spezifische Werte:
-            - volume_mixing: 0.4 (hardcodiert, empirisch)
-            - cone_model: Aus Kernel-Params (Default: 0.4)
-        
-        Parameter
-        ---------
+        """Fraction of newly arriving liquid that counts as internal.
+
+        ``split_ratio = V_liq_int / V_liq_total``; the rest is the external
+        surface film. Only used when no internalisation kernel is configured --
+        with a kernel, internal liquid is produced by capillary suction over
+        time instead (see :meth:`_compute_saturation_for_liquid`).
+
+        Kernel-dependent values: ``volume_mixing`` uses a hardcoded empirical
+        0.4, ``cone_model`` reads it from its parameters (default 0.4).
+
+        Parameters
+        ----------
         poro : float
-            Aktuelle Porositaet (derzeit nicht verwendet, fuer Zukunft vorbehalten)
-        
+            Current porosity. Not used at present; accepted so a
+            porosity-dependent split can be added without changing callers.
+
         Returns
         -------
         float
-            Split-Ratio im Bereich [0, 1]
-        
+            Split ratio in [0, 1].
+
         See Also
         --------
-        _compute_saturation_for_liquid : Verwendet Split-Ratio fuer Saettigung
+        _compute_saturation_for_liquid : the only caller
         """
         porosity_kernel = self._get_porosity_kernel()
         
@@ -1776,44 +1732,36 @@ class NucleationHandler:
             # Volume Mixing: 0.4 hardcoded (legacy behavior)
             return 0.4
         elif porosity_kernel.name == 'cone_model':
-            # HINWEIS: Der Default 0.4 ist fuer cone_model fragwuerdig. Der
-            # Kernel erzeugt Porenraum geometrisch bei Kontakt und trifft
-            # bewusst keine Aussage darueber, wie viel Fluessigkeit beim
-            # Auftreffen sofort nach innen geht -- 0.0 waere die konsistente
-            # Wahl. Frueher war der Wert ohnehin unerreichbar, weil
-            # compute_nucleation_porosity fuer cone_model immer poro=0 lieferte
-            # und _compute_saturation_for_liquid dann am poro<=0-Guard abbrach.
-            # Seit die Porositaet bei Nucleation erhalten bleibt, ist der Pfad
-            # erreichbar, sobald KEIN liquid_internalization-Kernel aktiv ist.
-            # Nicht geaendert, weil das Ergebnisse verschiebt -- bewusst
-            # entscheiden und dann hier festhalten.
+            # NOTE: the 0.4 default is questionable for cone_model. That
+            # kernel creates pore space geometrically on contact and makes no
+            # claim about how much liquid goes inward on impact -- 0.0 would be
+            # the consistent choice. The path is only reachable when NO
+            # liquid_internalization kernel is active. Left unchanged because
+            # it shifts results; decide deliberately and record the decision
+            # here.
             return porosity_kernel.params.get('liquid_split_ratio', 0.4)
         else:
             # Other kernels: Default 0.4
             return 0.4
     
     def _get_merger(self):
-        """
-        Liefert den ParticleMerger des Solvers, oder None.
+        """Return the solver's ParticleMerger, or ``None`` if there is none.
 
-        Die Nucleation nutzt bewusst denselben Merger wie Agglomeration und
-        Breakage. Frueher hatte sie eine eigene ``_find_similar_particle``, die
-        (a) das Feststoffvolumen gegen ``V_flat[-1]`` = V_dry verglich, also
-        gegen die falsche Groesse, und (b) den Hash-Index weder fuellte noch
-        aufraeumte -- Agglomeration und Breakage konnten die so erzeugten
-        Partikel deshalb nie wiederfinden und legten Duplikate an.
+        Nucleation deliberately shares the merger with agglomeration and
+        breakage, so all three use one dedup rule and one hash index. A
+        separate implementation here would create particles the other two
+        cannot find, and they would then duplicate them.
         """
         return getattr(self.solver, '_particle_merger', None)
 
     def _remove_particle_tracked(self, idx: int) -> None:
-        """
-        Entfernt ein Partikel und haelt den Merger-Hash-Index konsistent.
+        """Remove a particle, keeping the merger's hash index consistent.
 
-        ``_remove_particle_column`` arbeitet mit Swap-with-last. Der Eintrag des
-        entfernten Partikels muss VORHER aus dem Hash-Index, sonst zeigt er auf
-        einen Slot, der danach von einem fremden Partikel belegt wird (der Swap
-        selbst wird von ``notify_index_swap`` abgedeckt). Agglomeration und
-        Breakage machen das an ihren Entfernstellen genauso.
+        ``_remove_particle_column`` works by swap-with-last, so the removed
+        particle's hash entry has to go BEFORE the swap -- otherwise it points
+        at a slot that a different particle is about to occupy. The swap itself
+        is covered by ``notify_index_swap``. Agglomeration and breakage do the
+        same at their removal sites.
         """
         merger = self._get_merger()
         if merger is not None:
@@ -1823,25 +1771,23 @@ class NucleationHandler:
     def _place_nucleated_state(self, src_idx: int, dW: float, v_dry: float,
                                poro: float, liquid: float, saturation: float,
                                v_droplet: Optional[float] = None) -> tuple:
-        """
-        Bucht den Zustand nach dem Tropfen ein: mergen oder neu anlegen.
+        """Book the post-droplet state: merge into an existing particle or create one.
 
-        Geht ueber ``ParticleMerger.find_or_create``, damit Nucleation,
-        Agglomeration und Breakage dieselbe Dedup-Logik und denselben
-        Hash-Index benutzen.
+        Goes through ``ParticleMerger.find_or_create``, so nucleation shares
+        the dedup logic and the hash index with agglomeration and breakage.
 
-        Parameter
-        ---------
+        Parameters
+        ----------
         src_idx : int
-            Quellpartikel (liefert die Feststoffkomponenten, wird vom Matching
-            ausgeschlossen)
+            Source particle. Supplies the solid components and is excluded from
+            matching against itself.
         dW : float
-            Gewicht, das dem Zielpartikel zugeschlagen wird
+            Weight credited to the target particle.
         v_dry, poro, liquid, saturation : float
-            Zielzustand nach dem Tropfen
+            The target state after the droplet.
         v_droplet : float, optional
-            Tropfenvolumen als Referenzmassstab fuer die Liquid-Toleranz
-            (nur bei ``liquid_match_scale == "droplet"``)
+            Droplet volume, used as the reference scale for the liquid
+            tolerance (only when ``liquid_match_scale == "droplet"``).
 
         Returns
         -------
@@ -1878,25 +1824,27 @@ class NucleationHandler:
                                           v_dry: float, poro: float,
                                           liquid: float, saturation: float,
                                           src_idx: int) -> None:
-        """
-        Legt ein Partikel ohne Merger an (Fallback, wenn kein Merger existiert).
+        """Create a particle directly, bypassing the merger.
 
-        Parameter
-        ---------
+        Fallback for the case where no merger exists; the normal path is
+        :meth:`_place_nucleated_state`.
+
+        Parameters
+        ----------
         V_solid_src : np.ndarray
-            Feststoffkomponenten des Quellpartikels
+            Solid components of the source particle.
         dW : float
-            Gewicht fuer das neue Partikel
+            Weight for the new particle.
         v_dry : float
-            Trockenvolumen [m^3]
+            Dry volume [m^3].
         poro : float
-            Porositaet
+            Porosity.
         liquid : float
-            Gesamtes Fluessigkeitsvolumen [m^3]
+            Total liquid volume [m^3].
         saturation : float
-            Berechnete Saettigung
+            Saturation, already computed.
         src_idx : int
-            Quell-Partikelindex (nur fuer Debug-Ausgaben)
+            Source particle index, for debug output only.
         """
         solver = self.solver
 
@@ -1941,27 +1889,26 @@ class NucleationHandler:
         self._record_weight_change(new_idx, dW)
     
     def _perform_nucleation_agglomeration(self, i: int, j: int) -> int:
-        """
-        Fuehrt Agglomeration zwischen Partikeln i und j fuer Nukleation durch.
-        
-        Ruft die echte Agglomerationslogik des Solvers auf um physikalische
-        Konsistenz zu wahren (Fluessigkeitstransfer, Gewichts-Updates, etc.).
-        
-        Parameter
-        ---------
-        i : int
-            Index erstes Partikel
-        j : int
-            Index zweites Partikel
-        
+        """Force an agglomeration of ``i`` and ``j`` to gain dry volume.
+
+        Used when the drawn particle cannot hold the droplet
+        (``V_dry < v_liquid``). Delegates to the solver's own agglomeration
+        logic so liquid transfer, weight bookkeeping and porosity stay
+        consistent with a normally drawn event.
+
+        Parameters
+        ----------
+        i, j : int
+            Indices of the two particles.
+
         Returns
         -------
         int
-            Index des Kind-Partikels nach Agglomeration
-        
+            Index of the resulting child particle.
+
         See Also
         --------
-        mcpbe_agg.MCPBEAgg._do_one_agg : Basis-Agglomerationsmethode
+        mcpbe_agg.MCPBEAgg._do_one_agg : the drawn-event counterpart
         """
         # Save current state
         solver = self.solver
@@ -1985,37 +1932,37 @@ class NucleationHandler:
             solver._in_nucleation = old_in_nucleation
     
     def _manual_agglomerate_particles(self, i: int, j: int) -> int:
-        """
-        Fuehrt manuelle Agglomeration zweier Partikel durch (ohne Propensity-Logik).
-        
-        Erstellt gemergtes Partikel aus i und j unter Erhaltung von Fluessigkeits-
-        volumen und Massenerhaltung.
-        
-        WICHTIG: Returniert den tatsaechlichen Index des Kind-Partikels, der sich
-        von (a_tot - 1) unterscheiden kann wenn ein Elternteil via swap-remove
-        entfernt wurde!
-        
-        Volumen-Semantik:
-            - V_flat[-1, :]: Speichert V_dry (= V_solid + V_pore)
-            - V_flat[:dim, :]: Speichert V_solid-Komponenten (Multi-Component)
-            - Fuer dim=1 (monodispers): V_flat[:dim, :] = V_solid
-            - V_solid wird IMMER berechnet als: V_dry × (1 - Porositaet)
-        
-        Parameter
-        ---------
-        i : int
-            Index erstes Partikel
-        j : int
-            Index zweites Partikel
-        
+        """Merge particles ``i`` and ``j`` without touching the propensities.
+
+        The propensity rebuild is O(n); running it once per droplet inside the
+        collection loop would dominate the whole simulation. It is skipped here
+        and made up for once per MC event in ``solve()``.
+
+        Returns the child's ACTUAL index, which need not be ``a_tot - 1``: if a
+        parent was removed by swap-with-last, the child may have been moved
+        into that slot.
+
+        Volume semantics
+        ----------------
+        ``V_flat[-1, :]`` holds ``V_dry = V_solid + V_pore``; ``V_flat[:dim, :]``
+        holds the solid components (a single one for ``dim == 1``). Solid volume
+        is always derived as ``V_dry * (1 - porosity)``, never stored twice
+        independently.
+
+        Parameters
+        ----------
+        i, j : int
+            Indices of the two particles.
+
         Returns
         -------
         int
-            Index des Kind-Partikels nach Agglomeration
-        
+            Index of the child particle.
+
         See Also
         --------
-        _perform_nucleation_agglomeration : Wrapper mit Nukleations-spezifischer Logik
+        _perform_nucleation_agglomeration : wrapper with the nucleation-specific
+            bookkeeping
         """
         solver = self.solver
         
@@ -2162,12 +2109,11 @@ class NucleationHandler:
             V_liq_int_merged = V_liq_int_i + V_liq_int_j
             V_liq_ext_merged = V_liq_ext_i + V_liq_ext_j
 
-            # An der neu entstehenden Kontaktstelle wird zusaetzlich Fluessigkeit
-            # aus den Oberflaechenfilmen in die frisch gebildete Bruecke gezogen.
-            # Das ist ein eigener, ereignisbasierter Vorgang beim Stoss -- nicht
-            # dasselbe wie die kontinuierliche Internalisierung ueber die Zeit.
-            # `mcpbe_agg._merge_pair` ruft diesen Kernel auf; hier fehlte er, die
-            # Nucleations-Agglomeration uebersprang ihn also stillschweigend.
+            # At the newly formed contact, additional liquid is drawn from the
+            # surface films into the fresh bridge. This is a separate,
+            # event-based process at collision -- not the same as continuous
+            # internalisation over time. `mcpbe_agg._merge_pair` calls this
+            # kernel too; nucleation-driven agglomeration must not skip it.
             l_e_to_i = 0.0
             if getattr(solver, 'kernel_manager', None) is not None:
                 l_e_to_i = solver.kernel_manager.compute_liquid_internalization_agglomeration(
@@ -2224,11 +2170,11 @@ class NucleationHandler:
         if sat_merged is not None and hasattr(solver, 'saturation'):
             solver.saturation[new_idx] = sat_merged
 
-        # Im Merger-Hash-Index registrieren. Das Kind wird hier bewusst direkt
-        # angelegt statt ueber find_or_create, weil der folgende Code seinen
-        # Index durch mehrere Eltern-Entfernungen hindurch nachverfolgen muss
-        # (child_current_idx). Ohne Registrierung waere es fuer jede spaetere
-        # Suche unsichtbar und Agglomeration/Breakage wuerden Duplikate anlegen.
+        # Register in the merger hash index. The child is created directly
+        # rather than through find_or_create, because the code below has to
+        # track its index across several parent removals (child_current_idx).
+        # Without registration it would be invisible to every later lookup and
+        # agglomeration/breakage would create duplicates.
         merger = self._get_merger()
         if merger is not None:
             merger.register_particle(new_idx)
@@ -2328,44 +2274,35 @@ class NucleationHandler:
         
         return child_current_idx  # Return actual child index!
     
-    # Die wt%-Laufzeitueberwachung ist hier entfernt worden
+    # The wt% runtime monitoring has been removed here
     # (get_current_wt_percent / _should_check_wt / _update_wt_check /
-    # has_reached_target_wt).
+    # has_reached_target_wt). It computed the current liquid fraction during
+    # the run to stop addition early once target_wt_percent was reached, but
+    # the "adaptive throttling" in front of it called the very check it was
+    # meant to avoid -- an O(n) Python loop over all particles -- and
+    # has_reached_target_wt() then ran it a second time. Measured at 1.93
+    # passes per throttle check, i.e. doubled rather than saved work.
+    # See mcpbe/docs/historical/Audit_2026-08-17.md, N-03.
     #
-    # Sie stammte aus einem verworfenen Teilprojekt: waehrend des Laufs wurde
-    # laufend der aktuelle Fluessigkeitsanteil berechnet, um die Zugabe
-    # vorzeitig abzubrechen, sobald target_wt_percent erreicht war. Die
-    # "adaptive Drosselung" davor rief zur Entscheidung, ob die teure Pruefung
-    # noetig sei, genau diese teure Pruefung auf -- eine O(n)-Python-Schleife
-    # ueber alle Partikel -- und has_reached_target_wt() danach ein zweites
-    # Mal. Gemessen: 1,93 Durchlaeufe pro Drosselungs-Check, also kein
-    # eingesparter, sondern ein verdoppelter Aufwand.
-    # Siehe docs/Audit_2026-08-17.md, N-03.
-    #
-    # NICHT entfernt: `target_wt_percent` als KONFIGURATIONS-Parameter. Er
-    # dient weiterhin dazu, aus wt% + solid_mass_in_mixer + Dichten die
-    # Zugabedauer auszurechnen (NucleationConfig.__post_init__, Fall 2) --
-    # also die Angabe "gib 53 wt% Wasser zu" in eine Fensterlaenge zu
-    # uebersetzen. Das ist die Formulierung, in der die Prozessvorgabe
-    # tatsaechlich vorliegt, und bleibt erhalten.
+    # NOT removed: `target_wt_percent` as a CONFIGURATION parameter. It still
+    # converts wt% + solid_mass_in_mixer + densities into an addition duration
+    # (NucleationConfig.__post_init__, option B) -- turning "add 53 wt% water"
+    # into a window length, which is the form the process specification
+    # actually comes in.
 
     def get_statistics(self) -> dict:
-        """
-        Liefert Nukleations-Statistiken.
-        
+        """Current nucleation statistics.
+
         Returns
         -------
         dict
-            Dictionary mit Schluesselwerten:
-            - current_time: Aktuelle Simulationszeit [s]
-            - droplets_added_total: Gesamtzahl physikalischer Tropfen
-            - liquid_volume_added_total: Gesamtes Fluessigkeitsvolumen [m^3]
-            - target_wt_percent: Ziel-wt% aus der Konfiguration (oder None)
-            - in_addition_window: Boolean ob im Zeitfenster
-        
+            ``current_time`` [s], ``droplets_added_total`` (physical droplets),
+            ``liquid_volume_added_total`` [m^3], ``target_wt_percent`` from the
+            configuration (or ``None``), and ``in_addition_window``.
+
         See Also
         --------
-        print_debug_status : Gibt Statistiken formatiert aus
+        print_debug_status : formats these for the console
         """
         stats = {
             'current_time': self._current_time,
@@ -2389,15 +2326,10 @@ class NucleationHandler:
         return stats
     
     def reset(self) -> None:
-        """
-        Setzt Nukleations-Zustand fuer wiederholte Simulationen.
-        
-        Wird nach solve() aufgerufen um Solver fuer naechsten Run vorzubereiten.
-        Setzt alle Statistiken, Timer und Sampler zurueck.
-        
-        See Also
-        --------
-        MCPBESolver._reset_state : Ruft diese Methode auf
+        """Clear all nucleation state so the solver can be run again.
+
+        Resets statistics, timers and samplers. Called from
+        ``MCPBESolver._reset_state``.
         """
         self._current_time = 0.0
         self._next_nucleation_time = self.config.liquid_addition_start
@@ -2438,24 +2370,21 @@ class NucleationHandler:
                 print(f"[NUCLEATION {level}] {message}")
 
     def print_debug_status(self, force: bool = False) -> None:
-        """
-        Gibt Debug-Status des Nukleationsprozesses aus.
-        
-        Ausgabe enthaelt:
-        - Simulationszeit (absolut und % von total)
-        - Echtzeit (Wall Clock) und Speedup-Faktor
-        - Anzahl Tropfen (% vom Erwartungswert)
-        - Partikelanzahl (computational und physikalisch)
-        
-        Parameter
-        ---------
+        """Print a progress line for the nucleation process.
+
+        Covers simulated time (absolute and as a fraction of the total), wall
+        clock time and the resulting speed-up, droplet count against
+        expectation, and particle counts (computational and physical).
+
+        Parameters
+        ----------
         force : bool
-            Wenn True, Ausgabe unabhaengig vom Zeitintervall
-        
+            Print regardless of the interval throttle.
+
         Notes
         -----
-        Ausgabe erfolgt nur wenn config.debug=True oder solver.mcpbe_debug=True.
-        Intervall zwischen Ausgaben: _debug_print_interval (Default: 0.1s)
+        Prints only when ``config.debug`` or ``solver.mcpbe_debug`` is set, and
+        at most every ``_debug_print_interval`` seconds (default 0.1).
         """
         import time as time_module
         
@@ -2517,23 +2446,25 @@ class NucleationHandler:
 
 # Convenience function for creating nucleation handler
 def create_nucleation_handler(solver, **kwargs) -> NucleationHandler:
-    """
-    Factory-Funktion zum Erstellen eines Nukleations-Handlers.
-    
-    Parameter
-    ---------
+    """Create a nucleation handler for ``solver``.
+
+    Equivalent to ``solver.create_nucleation_handler(**kwargs)``, kept as a
+    free function for callers that build handlers without going through the
+    solver.
+
+    Parameters
+    ----------
     solver : MCPBESolver
-        Solver-Instanz
-    **kwargs : dict
-        Argumente fuer NucleationConfig (enabled, volumetric_flow_rate, etc.)
-    
+        The owning solver.
+    **kwargs
+        Passed to :class:`NucleationConfig`.
+
     Returns
     -------
     NucleationHandler
-        Konfigurierter Handler
-    
-    Example
-    -------
+
+    Examples
+    --------
     >>> handler = create_nucleation_handler(
     ...     solver,
     ...     enabled=True,

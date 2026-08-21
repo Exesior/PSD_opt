@@ -1,21 +1,21 @@
-"""Stufe 3, entscheidende Messung: Bias oder Rauschen?
+"""Stage 3, the decisive measurement: bias or noise?
 
-Ein einzelner MC-Lauf kann nicht zwischen einem systematischen Fehler (Bias) und
-statistischem Rauschen unterscheiden. Deshalb wird hier ueber ein Ensemble von
-Seeds gemittelt und der VORZEICHENBEHAFTETE relative Fehler betrachtet:
+A single MC run cannot distinguish a systematic error from statistical noise.
+This script therefore averages over an ensemble of seeds and looks at the
+SIGNED relative error::
 
-    e(t) = ( n_MC(t) - n_analytisch(t) ) / n_analytisch(t)
+    e(t) = ( n_MC(t) - n_analytic(t) ) / n_analytic(t)
 
-  * Rauschen  mittelt sich gegen 0, der Mittelwert liegt innerhalb des
-    Standardfehlers sem = std/sqrt(R).
-  * Bias      bleibt als systematische Abweichung stehen und waechst mit der Zeit
-    (Paper Sec. 3.4: der Bias akkumuliert).
+* Noise averages towards 0; the mean stays within the standard error
+  ``sem = std/sqrt(R)``.
+* Bias remains as a systematic deviation and grows with time (paper Sec. 3.4:
+  the bias accumulates).
 
-Verglichen werden zwei Schemata, die sich AUSSCHLIESSLICH in der Paar-Kappung
-unterscheiden (der W_i-Vorfaktor ist in beiden vorhanden):
+Two schemes are compared that differ ONLY in the pair capping -- the ``W_i``
+prefactor is present in both::
 
-    korrigiert   :  R_i = W_i * sum_j W_j beta / min(delta_i, delta_j)
-    unkorrigiert :  R_i = W_i * sum_j W_j beta / delta_i
+    corrected   :  R_i = W_i * sum_j W_j beta / min(delta_i, delta_j)
+    uncorrected :  R_i = W_i * sum_j W_j beta / delta_i
 """
 
 from __future__ import annotations

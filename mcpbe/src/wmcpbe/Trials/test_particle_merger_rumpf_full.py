@@ -64,7 +64,7 @@ class TestConfig:
     VOLUMETRIC_FLOW_RATE = 1e-9       # m³/s
     NUCLEATION_DURATION = 4.0         # s
     AGG_COEFFICIENT = 8000            # Constant kernel coefficient [m³/s] - HIGH for testing
-    BATCH_SIZE = 100                   # Wie viele Tropfen werden identisch verteilt?   
+    BATCH_SIZE = 100                   # How many droplets are distributed identically per event   
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True

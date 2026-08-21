@@ -1,25 +1,30 @@
-"""Eine Konfiguration, zehn Seeds -- Datengrundlage zum Testen der Auswertung.
+"""One configuration, ten seeds -- the data set the evaluation is built on.
 
-Rechnet die Referenzconfig aus ``Trials/test_powerlaw_rumpf_full.py`` mehrfach
-mit unabhaengigen Seeds und schreibt drei CSV-Dateien:
+Runs the reference configuration from ``Trials/test_powerlaw_rumpf_full.py``
+several times with independent seeds and writes four CSV files:
 
 ``timeseries_per_seed.csv``
-    Langformat, eine Zeile je (Seed, Zeitpunkt). Das ist die Datei fuer die
-    Auswertung -- daraus lassen sich beliebige Aggregate neu bilden.
+    Long format, one row per (seed, time point). This is the file to evaluate
+    from -- any aggregate can be rebuilt from it.
 ``timeseries_summary.csv``
-    Breitformat, eine Zeile je Zeitpunkt, mit ``_mean`` / ``_std`` / ``_sem``
-    je Groesse. Direkt plotbar (Mittelwert als Linie, ``_sem`` als Fehlerband).
+    Wide format, one row per time point, with ``_mean`` / ``_std`` / ``_sem``
+    per quantity. Directly plottable (mean as a line, ``_sem`` as a band).
 ``scalars_per_seed.csv`` / ``scalars_summary.csv``
-    Eine Zahl je Lauf (Endwerte, Bilanzfehler, Laufzeit) bzw. deren Statistik.
+    One number per run (final values, balance errors, runtime) and the
+    statistics over them.
 
-Aufruf (aus ``mcpbe/src``)
---------------------------
+Console output of this script is German by design -- it is a working tool, not
+documentation.
+
+Usage (from ``mcpbe/src``)::
+
     python -m wmcpbe.framework.run_reference_repeats --repeats 10 --workers 6
 
-Rauchtest (kurz, prueft zusaetzlich seriell gegen parallel):
+Smoke test (short, additionally checks serial against parallel)::
+
     python -m wmcpbe.framework.run_reference_repeats --smoke
 
-Alle Optionen mit ``--help``.
+All options via ``--help``.
 """
 
 from __future__ import annotations
@@ -34,8 +39,8 @@ from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
-# Erlaubt sowohl "python -m framework.run_reference_repeats" als auch den
-# direkten Aufruf der Datei.
+# Supports both "python -m framework.run_reference_repeats" and running the
+# file directly.
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from framework import bootstrap_paths, pin_threads
@@ -52,8 +57,8 @@ else:
 
 bootstrap_paths()
 
-# Ergebnisse liegen weiterhin unter Trials/Results, damit vorhandene Laeufe
-# nach dem Umzug des Pakets wiederverwendbar bleiben.
+# Results stay under Trials/Results so that runs computed before the package
+# moved remain reusable.
 DEFAULT_OUTPUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "Trials", "Results", "repeats",
@@ -361,7 +366,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    # Der Guard ist auf Windows Pflicht: Worker-Prozesse importieren dieses
-    # Modul erneut. Ohne ihn wuerde jede Wiederholung die ganze Kampagne neu
-    # starten.
+    # This guard is mandatory on Windows: worker processes re-import this
+    # module. Without it, every repeat would start the whole campaign again.
     raise SystemExit(main())

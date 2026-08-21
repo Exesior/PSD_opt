@@ -1,14 +1,14 @@
 """
-Integrationstest: Cone Model Kernel in Breakage-Prozess.
+Integration test: the cone model kernel in the breakage process.
 
-Testet die korrekte Integration von ConeModelKernel im Breakage-Workflow
-von MCPBESolver.
+Checks that ConeModelKernel is wired correctly into the breakage workflow of
+MCPBESolver.
 
-Getestete Eigenschaften:
-1. Multi-Fragment Breakage mit Cone Model (deferred computation)
-2. Massenerhaltung (V_solid konstant)
-3. Porenverlust bei Breakage (ΔV zwischen Fragmenten)
-4. Backward Compatibility mit Volume Mixing Kernel
+Properties tested:
+1. Multi-fragment breakage with the cone model (deferred computation)
+2. Mass conservation (V_solid constant)
+3. Pore loss on breakage (dV between fragments)
+4. Backward compatibility with the volume mixing kernel
 
 Usage:
     python test_cone_breakage_integration.py
@@ -58,11 +58,11 @@ def create_test_solver(porosity_kernel_name: str, **kernel_params):
 
 
 def initialize_single_particle(solver, V_solid_0, porosity_0):
-    """Initialisiere Solver mit einem einzelnen Partikel."""
+    """Build a solver holding a single particle."""
     x_grid = solver.x_grid.copy()
     
     # Einzelnes computational particle
-    solver.W = np.array([1000.0])  # Gewicht (Anzahl physikalischer Partikel)
+    solver.W = np.array([1000.0])  # weight = number of physical particles represented
     
     # V_flat: [:dim] = V_solid, [-1] = V_dry
     if porosity_0 is None or np.isnan(porosity_0):
@@ -98,7 +98,7 @@ def test_binary_breakage_volume_mixing():
     
     solver = create_test_solver('volume_mixing')
     
-    # Initialisierung: 1 Partikel mit V_solid=3e-18, ε=0.5
+    # Setup: one particle, V_solid=3e-18, eps=0.5
     V_solid_0 = 3.0e-18
     porosity_0 = 0.5
     initialize_single_particle(solver, V_solid_0, porosity_0)
@@ -161,7 +161,7 @@ def test_binary_breakage_cone_model():
         k_break=0.1     # Porenverlust-Faktor
     )
     
-    # Initialisierung: 1 Partikel mit V_solid=3e-18, ε=0.5
+    # Setup: one particle, V_solid=3e-18, eps=0.5
     V_solid_0 = 3.0e-18
     porosity_0 = 0.5
     initialize_single_particle(solver, V_solid_0, porosity_0)

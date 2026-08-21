@@ -1,4 +1,4 @@
-﻿# Core simulation framework: initialization, capacity buffers, main loop,
+# Core simulation framework: initialization, capacity buffers, main loop,
 # time stepping, doubling control volume, basic column ops.
 from __future__ import annotations
 

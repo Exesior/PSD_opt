@@ -1,5 +1,42 @@
-﻿# reconstruction_mixin.py
-# -*- coding: utf-8 -*-
+"""Reconstruction: bringing the computational particle count back down.
+
+Agglomeration removes particles, breakage adds them -- and breakage usually
+wins. Left alone, ``a_tot`` grows until the O(n) propensity rebuild dominates
+the runtime. Reconstruction replaces the current population with a smaller one
+that carries the same distribution, and is triggered by ``maybe_reconstruct``
+once ``a_tot`` exceeds ``recon_N_max`` (or every ``recon_every_events``
+events).
+
+Every method has to preserve the moments that matter -- at minimum ``M0``
+(``sum W``) and ``M1`` (``sum W * V``). They differ in how:
+
+``CAM`` (Cell Average Method)
+    Bin particles on a per-component grid, take the weighted mean coordinate
+    per cell, then redistribute each cell's ``M0`` onto the neighbouring pivot
+    points with linear (1D) or bilinear (2D) weights. Deterministic.
+
+``RS`` (Resampling)
+    Draw a target number of representatives per cell and correct the result so
+    ``M1`` is hit exactly (the "C-1" correction).
+
+``2PM`` / ``4PM`` / ``4PMC``
+    Represent a cell by two (or four) points chosen to reproduce its low-order
+    moments.
+
+``QMX`` (Quantile Mix)
+    Split the population at two weighted quantiles of total volume into
+    small / mid / tail, and run a different method on each -- the tail holds
+    few particles but most of the mass, so it tolerates the least smoothing.
+
+After any reconstruction the particle indices are entirely new, so
+``_initialize_samplers`` and ``ParticleMerger.rebuild_hash_index`` must run
+before the next event.
+
+Requirements on the host solver (satisfied by ``MCPBEBase`` and its mixins):
+arrays ``V_flat`` ``(dim+1, cap)``, ``W`` ``(cap,)``, ``X`` ``(cap,)``;
+scalars ``dim``, ``a_tot``, ``_cap``; methods ``_ensure_capacity_for``,
+``_vol2diam``, ``_initialize_samplers``.
+"""
 from __future__ import annotations
 
 import math
@@ -20,21 +57,14 @@ class _CellStats:
 
 
 class ReconstructionMixin:
-    """
-    Reconstruction / rebin / resampling mixin.
+    """Reconstruction / rebin / resampling mixin. See the module docstring.
 
-    This version implements CAM (Cell Average Method) reconstruction:
+    The class attributes below are the public configuration. Note that
+    ``recon_enable`` is ``False`` by default -- without it, ``a_tot`` is never
+    reduced.
 
-    - Build grid bins per component dimension (NOT using V_tot).
-    - For each cell: compute mean coordinate (weighted by W) and M0 = sum(W).
-    - Distribute that cell mass (M0) to neighboring pivot points using
-      linear (1D) or bilinear (2D) weights.
-    - Create new particles located at pivot points with weights from distribution.
-
-    Requirements on host solver (provided by MCPBEBase and mixins):
-      - Arrays: self.V_flat (shape (dim+1, cap)), self.W (shape (cap,)), self.X (shape (cap,))
-      - Scalars: self.dim, self.a_tot, self._cap
-      - Methods: self._ensure_capacity_for(extra), self._vol2diam(V), self._initialize_samplers()
+    Grid-based methods (CAM, 2PM) bin on the **component** volumes
+    ``V_flat[:dim]``, not on the total; QMX splits on the total volume.
     """
 
     # -----------------------------
@@ -55,8 +85,8 @@ class ReconstructionMixin:
     recon_RS_max_per_cell: int = 200     # safety cap to avoid huge replication in one cell
 
     # --- QMX method controls ---
-    recon_QMX_q_small: float = 0.65     # small / mid åˆ†ç•Œï¼ˆåŠ æƒåˆ†ä½æ•°ï¼‰
-    recon_QMX_q_tail: float = 0.95      # mid / tail åˆ†ç•Œï¼ˆåŠ æƒåˆ†ä½æ•°ï¼‰
+    recon_QMX_q_small: float = 0.65     # small/mid split, as a W-weighted quantile of V_tot
+    recon_QMX_q_tail: float = 0.95      # mid/tail split, same weighting
     recon_QMX_small_method: str = "2PM"   # "2PM" recommended
     recon_QMX_mid_method: str = "RS"     # "RS" recommended (with C-1)
     recon_QMX_tail_method: str = "CAM"  # "CAM" or "2PM" or "RS" or "NONE"
@@ -154,7 +184,7 @@ class ReconstructionMixin:
             "  * run reconstruction only for dry cases (recon_enable=False here), or\n"
             "  * set solver.recon_allow_granulation_state=True to proceed anyway and "
             "accept that liquid/porosity/saturation are discarded.\n"
-            "See docs/old/REFACTORING_FINDINGS.md (F-02) for the required fix."
+            "See mcpbe/docs/historical/REFACTORING_FINDINGS.md (F-02) for the required fix."
         )
 
     def reconstruct(self, method: str = "CAM", reason: str = "", iter_count: Optional[int] = None) -> None:

@@ -1,25 +1,24 @@
-"""Bauplan fuer einen einzelnen Referenzlauf.
+"""Recipe for a single reference run.
 
-Kernidee
---------
-Ein Worker-Prozess bekommt **kein fertiges Solver-Objekt**, sondern nur ein
-Rezept: ein flaches ``dict`` aus Zahlen und Strings plus einen Seed. Er baut
-den Solver damit selbst.
+Core idea
+---------
+A worker process receives **no finished solver object**, only a recipe: a flat
+``dict`` of numbers and strings plus a seed. It builds the solver itself.
 
-Warum nicht das Objekt selbst verschicken? Drei Unterobjekte des Solvers
-(``_particle_merger``, ``continuous_processes``, ``nucleation``) halten eine
-Rueckreferenz ``self.solver``. Ein ``copy.deepcopy`` des Solver-Zustands
-erzeugt davon Kopien, die auf einen *anderen* (verwaisten) Solver zeigen --
-die Physik wuerde dann still in ein Objekt schreiben, das niemand ausliest.
-Ausserdem haelt ``NucleationHandler`` eine Referenz auf den Zufallsgenerator
-(``self._rng = solver._rng``), die ein neu gesetzter Seed nicht mehr erreicht;
-alle Wiederholungen wuerden identisch nukleieren.
+Why not ship the object? Three of the solver's sub-objects
+(``_particle_merger``, ``continuous_processes``, ``nucleation``) hold a back
+reference ``self.solver``. A ``copy.deepcopy`` of the solver state produces
+copies of those pointing at a *different*, orphaned solver -- the physics would
+then quietly write into an object nobody reads. On top of that,
+``NucleationHandler`` keeps a reference to the random generator
+(``self._rng = solver._rng``) that a newly set seed no longer reaches, so every
+repeat would nucleate identically.
 
-Wird der Solver dagegen im Worker gebaut, entstehen diese Objekte dort und
-zeigen automatisch auf den richtigen Solver.
+Built inside the worker, those objects are created there and point at the right
+solver automatically.
 
-Die Parameterwerte in ``REFERENCE_PARAMS`` sind 1:1 aus
-``Trials/test_powerlaw_rumpf_full.py`` (Klasse ``TestConfig``) uebernommen.
+The values in ``REFERENCE_PARAMS`` are taken 1:1 from
+``Trials/test_powerlaw_rumpf_full.py`` (class ``TestConfig``).
 """
 
 from __future__ import annotations
@@ -30,60 +29,60 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Referenzkonfiguration
+# Reference configuration
 # ---------------------------------------------------------------------------
-# Identisch zu TestConfig in test_powerlaw_rumpf_full.py. Einzige Ausnahme:
-# t_total ist hier ein normaler Parameter, damit fuer Rauchtests eine kurze
-# Laufzeit gesetzt werden kann, ohne den Rest anzufassen.
+# Identical to TestConfig in test_powerlaw_rumpf_full.py, with one exception:
+# t_total is an ordinary parameter here, so a smoke test can shorten the run
+# without touching anything else.
 REFERENCE_PARAMS: Dict[str, Any] = {
-    # --- Zeit ---
+    # --- time ---
     "t_total": 100.0,                 # [s]
-    "t_write": 0.2,                   # Ausgabeintervall [s]
+    "t_write": 0.2,                   # output interval [s]
     "maxiter": int(1e9),
 
-    # --- Partikel (Anfangszustand) ---
+    # --- particles (initial state) ---
     "particle_diameter": 34e-6,       # [m]
     "particle_density": 500.0,        # [kg/m^3]
     "initial_porosity": 0.0,          # [-]
-    "initial_particles": 2000,        # Rechenpartikel
-    "initial_weight": 600.0,          # Gewicht je Rechenpartikel
+    "initial_particles": 2000,        # computational particles
+    "initial_weight": 600.0,          # weight per computational particle
     "control_volume": 1.0,            # [m^3]
 
-    # --- Tropfen ---
+    # --- droplets ---
     "droplet_diameter": 20e-6,        # [m]
     "droplet_density": 1000.0,        # [kg/m^3]
 
-    # --- Prozess ---
+    # --- process ---
     "volumetric_flow_rate": 3e-10,    # [m^3/s]
     "nucleation_duration": 10.0,      # [s]
-    "agg_coefficient": 4.0,           # Vorfaktor Kollisionskernel
-    "batch_size": 20,                 # Tropfen je Nukleationsereignis
+    "agg_coefficient": 4.0,           # collision kernel prefactor
+    "batch_size": 20,                 # droplets per nucleation event
 
-    # --- Bruch (PowerLaw-Rumpf) ---
+    # --- breakage (PowerLaw-Rumpf) ---
     "pl_p1": 4e13,
     "pl_p2": 1.0,
-    "g": 1000.0,                      # Scherrate [1/s]
+    "g": 1000.0,                      # shear rate [1/s]
     "breakrval": 4,
     "rumpf_k": 2.5,
     "rumpf_alpha": 1.0,
     "rumpf_gamma": 0.072,             # [N/m]
     "rumpf_delta": 0.0,               # [rad]
 
-    # --- Kompression ---
+    # --- compression ---
     "compression_enabled": True,
     "compression_rate": 0.02,         # [1/s]
     "min_porosity": 0.2,
 
-    # --- Fluessigkeits-Internalisierung ---
+    # --- liquid internalisation ---
     "liq_intern_enabled": True,
     "liq_intern_rate": 1e12,          # k_int
 
-    # --- Agglomerations-Akzeptanz (Stokes) ---
+    # --- agglomeration acceptance (Stokes) ---
     "binder_viscosity": 0.1,          # [Pa*s]
     "collision_velocity": 0.5,        # [m/s]
     "h_a": 500e-9,                    # [m]
 
-    # --- Numerik ---
+    # --- numerics ---
     "agg_dW_min": 1.0,
     "agg_dW_max": 20.0,
     "break_dW_max": 50.0,
@@ -92,11 +91,11 @@ REFERENCE_PARAMS: Dict[str, Any] = {
     "process_type": "mix",
     "recon_enable": False,
 
-    # --- Merger (rein numerisch: haelt n_comp klein) ---
-    # ACHTUNG: TestConfig in test_powerlaw_rumpf_full.py definiert
-    # MERGER_TOLERANCE = 1e-4, wendet den Wert aber nie auf den Solver an. Der
-    # Referenzlauf verwendet also den Solver-Default 1e-6. Genau dieser Wert
-    # steht hier, damit die Referenz bitgenau reproduziert bleibt.
+    # --- merger (purely numerical: keeps n_comp small) ---
+    # NOTE: TestConfig in test_powerlaw_rumpf_full.py defines
+    # MERGER_TOLERANCE = 1e-4 but never applies it to the solver, so the
+    # reference run uses the solver default of 1e-6. That value is repeated
+    # here so the reference stays bit-for-bit reproducible.
     "merger_tolerance": 1e-6,        # -> solver._fragment_merge_tol
     "merger_use_hash_index": True,   # -> solver._merger_use_hash_index
     "enable_particle_merging": True, # -> solver._enable_particle_merging
@@ -104,31 +103,30 @@ REFERENCE_PARAMS: Dict[str, Any] = {
 
 
 def resolve_params(params: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Ergaenze fehlende Schluessel aus der Referenz."""
+    """Fill missing keys from the reference configuration."""
     merged = dict(REFERENCE_PARAMS)
     merged.update(params or {})
     return merged
 
 
 def build_reference_solver(params: Dict[str, Any], seed: int, verbose: bool = False):
-    """Baue den vollstaendig konfigurierten Referenz-Solver.
+    """Build the fully configured reference solver.
 
     Parameters
     ----------
     params
-        Rezept, siehe :data:`REFERENCE_PARAMS`. Fehlende Schluessel werden aus
-        der Referenz ergaenzt.
+        Recipe, see :data:`REFERENCE_PARAMS`. Missing keys are filled from it.
     seed
-        Seed fuer diesen einen Lauf. Erzeugt den einzigen Zufallsgenerator des
-        Solvers; alle Untermodule leiten sich davon ab.
+        Seed for this one run. Creates the solver's only random generator; all
+        submodules derive from it.
     verbose
-        Fortschrittsausgabe des Solvers. Im Parallelbetrieb immer ``False``,
-        sonst schreiben mehrere Prozesse gleichzeitig in dieselbe Konsole.
+        Solver progress output. Always ``False`` when running in parallel,
+        otherwise several processes write into the same console at once.
 
     Returns
     -------
     MCPBESolver
-        Fertig initialisiert, bereit fuer ``solver.solve(maxiter=...)``.
+        Fully initialised, ready for ``solver.solve(maxiter=...)``.
     """
     from wmcpbe import MCPBESolver
 
@@ -140,16 +138,16 @@ def build_reference_solver(params: Dict[str, Any], seed: int, verbose: bool = Fa
         int(round(float(p["t_total"]) / float(p["t_write"]))) + 1,
     )
 
-    # Ein einziger RNG-Ursprung pro Lauf. Der Solver reicht ihn an Nucleation,
-    # Merger und Kernel weiter -- deshalb darf er nur hier entstehen.
+    # One RNG origin per run. The solver passes it on to nucleation, merger and
+    # kernels -- which is why it may only be created here.
     rng = np.random.default_rng(seed)
 
     solver = MCPBESolver(
         dim=1,
         t_vec=t_vec,
         verbose=bool(verbose),
-        load_attr=False,          # keine Config-Datei lesen: N Prozesse, eine Datei
-        init=True,                # bewusst wie im Referenzskript, siehe Hinweis unten
+        load_attr=False,          # read no config file: N processes, one file
+        init=True,                # deliberately as in the reference script, see note below
         rng=rng,
         agg_kernel_name="shear_chin1998",
         agg_kernel_params={"corr_beta": float(p["agg_coefficient"]), "g": float(p["g"])},
@@ -185,34 +183,33 @@ def build_reference_solver(params: Dict[str, Any], seed: int, verbose: bool = Fa
         liq_internalisation_agglomeration_kernel_name="liq_internalisation_agglomeration",
         liq_internalisation_agglomeration_kernel_params={},
     )
-    # HINWEIS zu init=True: der Konstruktor initialisiert damit bereits eine
-    # Default-Population, die unten sofort ueberschrieben wird. Das ist
-    # redundant, wird aber absichtlich beibehalten -- das Referenzskript macht
-    # es genauso, und ein Weglassen wuerde den Zustand des Zufallsgenerators
-    # verschieben. Damit waeren die Zahlen nicht mehr mit
-    # test_powerlaw_rumpf_full.py vergleichbar.
+    # On init=True: the constructor already builds a default population that is
+    # overwritten immediately below. That is redundant, but kept on purpose --
+    # the reference script does the same, and dropping it would shift the state
+    # of the random generator. The numbers would then no longer be comparable
+    # with test_powerlaw_rumpf_full.py.
 
     solver.mcpbe_debug = False
     solver.agg_propensity_mode = str(p["agg_propensity_mode"])
     solver.process_type = str(p["process_type"])
     solver.recon_enable = bool(p["recon_enable"])
 
-    # Paketgroessen muessen stehen, BEVOR _initialize_samplers() sie liest.
+    # Packet sizes must be set BEFORE _initialize_samplers() reads them.
     solver.agg_dW_min = float(p["agg_dW_min"])
     solver.agg_dW_max = float(p["agg_dW_max"])
     solver.break_dW_max = float(p["break_dW_max"])
     solver.SIZEEVAL = int(p["sizeeval"])
 
-    # Merger-Stellschrauben: werden in _ensure_particle_merger() vom Solver
-    # gelesen, das wiederum aus _initialize_samplers() heraus laeuft. Sie
-    # muessen deshalb VOR _initialize_samplers() stehen.
+    # Merger settings: read by the solver in _ensure_particle_merger(), which
+    # in turn runs from _initialize_samplers(). They therefore have to be set
+    # BEFORE _initialize_samplers().
     solver._fragment_merge_tol = float(p["merger_tolerance"])
     solver._merger_use_hash_index = bool(p["merger_use_hash_index"])
     solver._enable_particle_merging = bool(p["enable_particle_merging"])
 
-    # V_flat-Aufbau fuer dim=1:
-    #   V_flat[0, :] = V_solid  (Feststoffvolumen, bleibt bei Kompression erhalten)
-    #   V_flat[1, :] = V_dry    (geometrisches Trockenvolumen = V_solid + V_pore)
+    # V_flat layout for dim=1:
+    #   V_flat[0, :] = V_solid  (solid volume, unchanged by compression)
+    #   V_flat[1, :] = V_dry    (geometric dry volume = V_solid + V_pore)
     n0 = int(p["initial_particles"])
     particle_volume = (4.0 / 3.0) * np.pi * (float(p["particle_diameter"]) / 2.0) ** 3
     V_flat = np.zeros((2, n0), dtype=float)
@@ -251,13 +248,13 @@ def build_reference_solver(params: Dict[str, Any], seed: int, verbose: bool = Fa
 
 
 def expected_liquid_volume(params: Dict[str, Any] | None = None) -> float:
-    """Sollmenge zugefuehrter Fluessigkeit [m^3] -- Referenz fuer die Bilanz."""
+    """Target amount of liquid added [m^3] -- the reference for the balance."""
     p = resolve_params(params)
     return float(p["volumetric_flow_rate"]) * float(p["nucleation_duration"])
 
 
 def expected_droplet_count(params: Dict[str, Any] | None = None) -> float:
-    """Sollzahl zugefuehrter Tropfen -- Referenz fuer die Nukleationspruefung."""
+    """Target number of droplets added -- the reference for the nucleation check."""
     p = resolve_params(params)
     droplet_volume = (4.0 / 3.0) * np.pi * (float(p["droplet_diameter"]) / 2.0) ** 3
     return expected_liquid_volume(p) / droplet_volume

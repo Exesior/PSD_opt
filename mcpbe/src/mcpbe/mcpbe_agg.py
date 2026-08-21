@@ -1,4 +1,4 @@
-﻿# Agglomeration mixin: beta/alpha hooks, r_agg rebuild (JIT), single agglomeration event.
+# Agglomeration mixin: beta/alpha hooks, r_agg rebuild (JIT), single agglomeration event.
 from __future__ import annotations
 
 import numpy as np

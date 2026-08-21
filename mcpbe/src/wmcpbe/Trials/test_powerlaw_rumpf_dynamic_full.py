@@ -88,7 +88,7 @@ class TestConfig:
     VOLUMETRIC_FLOW_RATE = 1.635e-10       # m³/s
     NUCLEATION_DURATION = 20.0         # s
     AGG_COEFFICIENT = 5e-8           # Constant kernel coefficient [m³/s] - HIGH for testing
-    BATCH_SIZE = 20                   # Wie viele Tropfen werden identisch verteilt?
+    BATCH_SIZE = 20                   # How many droplets are distributed identically per event
     
     # Breakage parameters (PowerLaw-Rumpf)
     BREAKAGE_ENABLED = True
@@ -96,14 +96,14 @@ class TestConfig:
     PL_P2 = 1.0                       # Volume exponent in S = P1*n^c*V^P2
 
     # --- Mischerdrehzahl statt Scherrate -------------------------------
-    # Eine Groesse fuer den ganzen Lauf: Agglomeration, Akzeptanz und Bruch
+    # One value for the whole run: agglomeration, acceptance and breakage
     # lesen alle dasselbe n_mixer. Weichen sie ab, bricht der Solver beim
     # Aufbau mit einem Fehler ab (assert_consistent_mixer_speed).
-    # In der zugrundeliegenden DEM eine Umfangsgeschwindigkeit in m/s,
-    # Bereich 5-40; 20.0 ist die Mitte.
+    # In the underlying DEM a tip speed in m/s,
+    # range 5-40; 20.0 is the midpoint.
     N_MIXER = 20.0                    # Mischergeschwindigkeit m/s
     # stokes_dynamik nimmt seit 20.08.2026 KEIN n_ref mehr (nicht identifizierbar
-    # neben U_coll_ref, siehe kernels/README.md). COLLISION_VELOCITY unten wird
+    # alongside U_coll_ref, see kernels/README.md). COLLISION_VELOCITY below is
     # direkt als Vorfaktor U_coll_ref gelesen: U_coll = U_coll_ref * n_mixer^c_vel.
     # Exponenten: None = Kernel-Default aus kernels/mixer_speed.py.
     # C_FREQ = 0.0995 (Agglomeration), C_VEL = 0.2852 (Stossgeschwindigkeit),
@@ -233,7 +233,7 @@ def run_comprehensive_test() -> Dict[str, Any]:
     print(f"  Nucleation window:  [0.0 s, {cfg.NUCLEATION_DURATION:.1f} s]")
     print(f"  Agg. coefficient:   {format_scientific(cfg.AGG_COEFFICIENT, 'm^(5/2)/s')}")
     print(f"  Mixer speed:        {cfg.N_MIXER:.1f}")
-    print("  !! AGG_COEFFICIENT und PL_P1 sind NICHT fuer diesen Zweig kalibriert !!")
+    print("  !! AGG_COEFFICIENT and PL_P1 are NOT calibrated for this branch !!")
     
     print_section("BREAKAGE (POWERLAW-RUMPF)")
     print(f"  Enabled:            {cfg.BREAKAGE_ENABLED}")
@@ -528,9 +528,8 @@ def run_comprehensive_test() -> Dict[str, Any]:
     saturation_max = np.nanmax(saturation_active)
 
     # Particle diameter statistics [µm]. Mean is weight-averaged (W = number of
-    # physical particles per computational particle), same convention as
-    # helpers.compute_moments -- an unweighted mean over computational
-    # particles would not represent the physical population.
+    # physical particles per computational particle); an unweighted mean over
+    # computational particles would not represent the physical population.
     diameter_active_um = solver.X[:solver.a_tot] * 1e6
     diameter_weights = solver.W[:solver.a_tot]
     diameter_mean_um = np.average(diameter_active_um, weights=diameter_weights)
@@ -625,14 +624,12 @@ def run_comprehensive_test() -> Dict[str, Any]:
     # Check breakage occurred (if enabled)
     breakage_ok = break_events > 0 if cfg.BREAKAGE_ENABLED else True
     
-    # Check compression occurred: porosity must have CHANGED, not necessarily
-    # decreased. Der alte Check verlangte porosity_mean < INITIAL_POROSITY. Das
-    # war nie ein Kompressions-Test: er war nur erfuellt, solange die Nucleation
-    # die Porositaet auf 0 setzte und den Mittelwert nach unten riss. Seit die
-    # Porositaet erhalten bleibt, konkurrieren zwei echte Effekte -- Kompression
-    # zieht eps mit `rate` Richtung MIN_POROSITY, cone_model schiebt bei jeder
-    # Agglomeration Porenvolumen nach -- und der Mittelwert darf in beide
-    # Richtungen laufen.
+    # Check that compression happened: porosity must have CHANGED, not
+    # necessarily decreased. Two real effects compete here -- compression pulls
+    # eps towards MIN_POROSITY at `rate`, while cone_model adds pore volume on
+    # every agglomeration -- so the mean may move either way. Requiring
+    # porosity_mean < INITIAL_POROSITY would only hold while nucleation reset
+    # porosity to 0, which it no longer does.
     poro_delta = abs(porosity_mean - cfg.INITIAL_POROSITY)
     comp_ok = poro_delta > 1e-6 if cfg.COMPRESSION_ENABLED else True
     

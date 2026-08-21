@@ -139,7 +139,7 @@ Alle Defaults unten sind aus dem Code ausgelesen, nicht abgeschrieben.
 **β [m³/s] und S [1/s] sind konzentrationsbezogene Größen**, keine reinen
 Ereignisraten. β·n beschreibt Kollisionen pro Volumen und Zeit — n ist die
 Partikelkonzentration, die hier über `n_phys = ΣW/Vc` aus `a0`, `W` und dem
-Kontrollvolumen `Vc` folgt (§1.3 in `docs/Overview.md`). `Vc` legt damit fest,
+Kontrollvolumen `Vc` folgt (§1.3 der Projekt-README). `Vc` legt damit fest,
 in welcher Konzentration deine Partikel überhaupt erzeugt werden. Wichtig:
 `Vc` taucht in der Propensity-Berechnung selbst **nicht** als 1/Vc-Faktor auf —
 die Kollisionsrate hängt in diesem Code direkt an `W`, nicht an `W/Vc`. Ein
@@ -428,7 +428,7 @@ Laufen per Operator-Splitting **nach** jedem MC-Ereignis.
 > Agglomerationskernel eine Funktion der Radien ist, veralten dadurch die
 > gespeicherten Propensities. Seit 20.08.2026 löst der Solver nach
 > `continuous_processes.step()` einen Rebuild aus. Siehe
-> `docs/Nucleation_Propensity_Blockade.md`, Abschnitt 8.
+> `../../../docs/historical/Nucleation_Propensity_Blockade.md`, Abschnitt 8.
 
 ---
 
@@ -689,7 +689,7 @@ laufen dort, weil α dann vom Komponentengemisch des Paares abhängt.
 | [mixer_speed.py](mixer_speed.py) | Herkunft der DEM-Exponenten |
 | [porosity_growth/CONE_MODEL_README.md](porosity_growth/CONE_MODEL_README.md) | Kegelmodell im Detail |
 | [COMPRESSION_MIGRATION.md](COMPRESSION_MIGRATION.md) | Umstieg vom entfernten Compression-Modul |
-| `../../../docs/Fundamentals.md` | Solver-Grundlagen |
-| `../../../docs/Overview.md` | Gesamtüberblick |
-| `../../../docs/Bias_Correction_und_Gewichtsdisziplin.md` | Herleitung der Propensity-Korrektur |
-| `../../../docs/Nucleation_Propensity_Blockade.md` | Propensity-Aktualität, beide Ursachen |
+| `../../../docs/README.md` | Solver-Grundlagen |
+| `../../../docs/README.md` | Gesamtüberblick |
+| `../../../docs/historical/Bias_Correction_und_Gewichtsdisziplin.md` | Herleitung der Propensity-Korrektur |
+| `../../../docs/historical/Nucleation_Propensity_Blockade.md` | Propensity-Aktualität, beide Ursachen |

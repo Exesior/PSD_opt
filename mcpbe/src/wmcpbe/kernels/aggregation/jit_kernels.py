@@ -16,7 +16,7 @@ The ``1/dW_ij`` factor is what makes the scheme mean-unbiased: the batch actuall
 executed is capped by the *available* weight of both partners, so the sampling
 probability has to be scaled by exactly that cap. Dividing the finished sum by
 ``dW_i`` alone (the pre-2026-08 form) is biased - see
-``docs/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 2.
+``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 2.
 
 Two families of implementations
 -------------------------------
@@ -49,7 +49,7 @@ Two families of implementations
     ``W_i`` factor, so the light-particle branch ends up division-free.
 
     Full derivation, worked numeric example and the verification protocol:
-    ``mcpbe/docs/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 4.
+    ``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 4.
 
 Complexity (n = number of computational particles):
 

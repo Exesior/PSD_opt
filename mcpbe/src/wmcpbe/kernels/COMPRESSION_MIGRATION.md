@@ -244,9 +244,9 @@ print(f"Porosity nach 0.1s: {result:.3f}")
 
 ## 📚 Weiterführende Dokumentation
 
-- **Kernel Übersicht**: `kernels/KERNEL_UEBERSICHT.md`
-- **Quickstart**: `docs/QUICKSTART.md`
-- **Fundamentals**: `docs/Fundamentals.md`
+- **Kernel-Katalog**: `kernels/README.md` (seit 20.08.2026 der einzige; `KERNEL_UEBERSICHT.md` ist darin aufgegangen)
+- **Quickstart**: `../../../docs/historical/QUICKSTART.md`
+- **Fundamentals**: `../../../docs/historical/Fundamentals.md`
 - **Continuous Processes Code**: `mcpbe_continuous_processes.py`
 
 ---

@@ -17,7 +17,7 @@ Because the executed batch is capped by the available weight of *both* partners
 has to be divided by exactly that cap, and the partial rate carries a ``W_i``
 prefactor. Partner ``j`` is drawn proportional to ``W_j beta(i,j)/dW_ij``
 (Eq. 40), not proportional to ``W_j`` alone. Derivation and verification:
-``mcpbe/docs/Bias_Correction_und_Gewichtsdisziplin.md``.
+``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md``.
 
 Volume semantics (see also ``.agents/informations.txt``)
 -------------------------------------------------------
@@ -60,43 +60,34 @@ PROPENSITY_MODES = ("pairwise", "moment")
 
 
 class MCPBEAgg:
-    """
-    Agglomerations-Physik und Event-Durchfuehrung.
-    
-    Diese Mixin-Klasse implementiert den Agglomerationsprozess fuer den gewichteten
-    DSMC-PBE-Solver. Sie behandelt:
-    
-    * Berechnung der Kollisionsrate β(i,j) ueber modulare Kernel
-    * Partnerauswahl via FenwickSampler (O(log n))
-    * Groessenabhaengige Akzeptanz (SIZEEVAL-Kriterium)
-    * Durchfuehrung von Agglomerationsereignissen mit Massenerhaltung
-    
-    Die Propensity-Berechnung (r_i = Σ_j W_j·β(i,j)) kann im paarweisen O(n²)-Modus
-    oder im optimierten O(n)-Momentenmodus erfolgen (siehe agg_propensity_mode).
-    
+    """Agglomeration physics and event execution.
+
+    Per event: compute the collision rate ``beta(i,j)`` through the configured
+    aggregation kernel, draw a pair with the Fenwick sampler in O(log n), test
+    the acceptance criteria, then merge the pair while conserving solid volume.
+
     Attributes
     ----------
     agg_propensity_mode : str
-        Berechnungsmodus: 'pairwise' (O(n²), bitgenau) oder 'moment' (O(n), ~1e-15 Abweichung)
+        ``'pairwise'`` -- O(n^2), bit-exact; ``'moment'`` -- O(n), deviates by
+        about 1e-15. See the attribute docstring below.
     kernel_manager : KernelManager
-        Verwaltet alle Physik-Kernel (aggregation, acceptance, porosity_growth)
-    
+        Holds the aggregation, acceptance and porosity-growth kernels.
+
     Notes
     -----
-    Volumina-Semantik:
-    - V_flat[:dim]: Feststoffvolumen pro Komponente (erhalten bei Agglomeration)
-    - V_flat[-1]: Trockenvolumen (V_solid + V_pore, aendert sich mit Porositaet)
-    - liquid_volume, porosity, saturation: intensive Groessen (pro physical particle)
-    
-    Massenerhaltung:
-    Bei Agglomeration gilt: V_solid_merged = V_solid_i + V_solid_j
-    Das Kindpartikel erbt die Summe der Eltern-Feststoffvolumina.
-    
+    Volume semantics: ``V_flat[:dim]`` is solid volume per component (conserved
+    across a merge), ``V_flat[-1]`` is dry volume (solid + pores, moves with
+    porosity). ``liquid_volume``, ``porosity`` and ``saturation`` are intensive
+    -- per physical particle, not per computational one.
+
+    Conservation: ``V_solid_merged = V_solid_i + V_solid_j``, exactly and
+    independently of which porosity kernel is configured.
+
     See Also
     --------
-    kernels.aggregation.jit_kernels : JIT-kompilierte Kernel fuer Propensity-Rebuild
-    fenwick_new.FenwickSampler : Effizientes gewichtetes Sampling
-    MOMENT_MODE.md : Detaillierte Herleitung des O(n)-Momentenmodus
+    kernels.aggregation.jit_kernels : JIT kernels for the propensity rebuild
+    fenwick_new.FenwickSampler : weighted sampling in O(log n)
     """
 
     #: How ``r_i = sum_j W_j beta(i,j)`` is evaluated.
@@ -450,7 +441,7 @@ class MCPBEAgg:
         # delta_i = min(dW_const, W_i)  [paper Eq. 33], zeroed where W is
         # non-finite or non-positive. No epsilon threshold is needed: every
         # weight-consuming path drains a particle to exactly 0 (see
-        # mcpbe_time_helper and docs/Bias_Correction_und_Gewichtsdisziplin.md).
+        # mcpbe_time_helper and mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md).
         dW_const = float(getattr(self, "_agg_dW_const", None) or self._prepare_agg_delta_config())
         delta = buf["delta"][:a]
         np.minimum(W, dW_const, out=delta)
@@ -896,7 +887,7 @@ class MCPBEAgg:
                 # to the dW being added -- and it silently changed the
                 # particle's merger hash key behind the index's back. Breakage
                 # never did this; the two paths had drifted.
-                # See docs/Audit_2026-08-17.md, B-15.
+                # See mcpbe/docs/historical/Audit_2026-08-17.md, B-15.
                 return new_idx
             # else: new particle created, continue with initialization below
         else:
@@ -976,11 +967,11 @@ class MCPBEAgg:
     # values BEFORE the ParticleMerger lookup, to match on `liquid_target`,
     # while `_merge_liquid` wrote them AFTER the particle existed). Two copies
     # of one rule, one of them unreachable, is precisely the failure mode
-    # documented in Fundamentals.md section 7: a fix applied to the readable,
+    # a recurring trap in this code base: a fix applied to the readable,
     # documented method would have had no effect at all.
     # The shared, side-effect-free computation now lives in
     # `compute_merged_liquid()` at the bottom of this module and is called from
-    # `_merge_pair`. See docs/Audit_2026-08-17.md, B-09.
+    # `_merge_pair`. See mcpbe/docs/historical/Audit_2026-08-17.md, B-09.
 
     def _consume_parent_weight(self, i: int, j: int, dW: float) -> None:
         """Remove ``dW`` physical particles from each parent.
@@ -1064,7 +1055,7 @@ def compute_merged_liquid(
     needs these values *before* the particle exists (``liquid_target`` is one of
     the ParticleMerger's match criteria). This replaces the dead
     ``MCPBEAgg._merge_liquid``, which held a second copy of the same rule and
-    could never run. See docs/Audit_2026-08-17.md, B-09.
+    could never run. See mcpbe/docs/historical/Audit_2026-08-17.md, B-09.
 
     ``liquid_volume`` is intensive, so the child receives the *sum* of the
     parents' liquid -- no ``dW/W`` scaling. A self-collision (``i == j``) merges

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from .mcpbe_base import MCPBEBase
 from .mcpbe_agg import MCPBEAgg

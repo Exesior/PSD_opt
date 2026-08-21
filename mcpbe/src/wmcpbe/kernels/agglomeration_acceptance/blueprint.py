@@ -1,35 +1,29 @@
-# ================================================================================
-# AGGLOMERATION ACCEPTANCE KERNEL BLUEPRINT
-# ================================================================================
-# 
-# This is a TEMPLATE for implementing new agglomeration acceptance kernels.
-# Copy this file and modify it to create your own kernel.
-#
-# Purpose:
-#   Agglomeration acceptance kernels determine if a collision between two
-#   particles results in agglomeration or if they bounce off. They are called
-#   AFTER partner selection, BEFORE agglomeration execution.
-#
-# Physical Models:
-#   - Stokes criterion (viscous dissipation vs. inertia)
-#   - Liquid bridge rupture
-#   - Viscoelastic rebound
-#   - Surface roughness effects
-#   - Custom phenomenological models
-#
-# Implementation Steps:
-#   1. Copy this file to a new name (e.g., my_custom_kernel.py)
-#   2. Rename the class (e.g., MyCustomKernel)
-#   3. Update the 'name' property to match your filename
-#   4. Define your parameters in get_default_params()
-#   5. Implement accept_collision() with your physics
-#   6. Add your kernel to __init__.py registry
-#
-# Testing:
-#   Run directly: python blueprint.py (syntax check only)
-#   Run in solver: Use agg_acceptance_kernel_name='my_custom_kernel'
-#
-# ================================================================================
+"""Template for a new agglomeration acceptance kernel.
+
+An acceptance kernel decides whether a collision that has already been drawn
+actually sticks. It runs **after** partner selection and **before** the merge,
+so rejecting is free: the event becomes a no-op and no weight is consumed.
+
+This is where the physics of "do these two stay together" goes -- the Stokes
+criterion (viscous dissipation against inertia), liquid-bridge rupture,
+viscoelastic rebound, surface roughness. See ``stokes_krit.py`` for a worked
+implementation.
+
+To add one
+----------
+1. Copy this file under a new name, e.g. ``my_custom_kernel.py``.
+2. Rename the class, and make the ``name`` property return the file's stem --
+   that string is what ``agg_acceptance_kernel_name=`` selects.
+3. Declare every parameter you read in ``get_default_params()``. Names not
+   listed there are rejected at construction (``kernels/base.py::
+   reject_unknown_params``), so a typo fails loudly instead of silently
+   leaving the kernel on its default.
+4. Implement ``accept_collision()``.
+5. Register the kernel in this package's ``__init__.py``.
+
+The import below falls back to a stub base class so the file can be executed
+directly as a syntax check.
+"""
 
 from typing import Any, Dict, Optional
 import numpy as np

@@ -1,26 +1,25 @@
-"""Stufe 3 - Physik-Regression: wirkt die Bias-Correction in der richtigen Richtung?
+"""Stage 3 physics regression: does the bias correction act in the right direction?
 
-Aufbau nach Paper Sec. 3.4: reine Agglomeration mit KONSTANTEM Kernel, weil dafuer
-eine geschlossene analytische Loesung existiert. Verglichen werden DREI Varianten
-gegen dieselbe analytische Referenz:
+Set up as in paper Sec. 3.4: pure agglomeration with a CONSTANT kernel, because
+that is the case with a closed analytic solution. Three variants are compared
+against the same analytic reference:
 
-  corrected    : der neue Stand  R_i* = W_i * sum_j W_j beta / min(dW_i,dW_j),
-                 Partner ~ W_j beta / dW_ij                     (Paper Gl. 36/40)
-  uncorrected  : der alte Stand  r_i  = (sum_j W_j beta) / dW_i,
-                 Partner ~ W_j                                  (verzerrt)
-  dW=1         : Kontrolle - bei Batchgroesse 1 gibt es per Konstruktion keinen
-                 Batch-Bias, beide Schemata muessen zusammenfallen.
+  corrected    : the current form, R_i* = W_i * sum_j W_j beta / min(dW_i,dW_j),
+                 partner ~ W_j beta / dW_ij                    (paper Eq. 36/40)
+  uncorrected  : the older form,   r_i  = (sum_j W_j beta) / dW_i,
+                 partner ~ W_j                                 (biased)
+  dW=1         : control -- at batch size 1 there is no batch bias by
+                 construction, so both schemes must coincide.
 
-Analytische Loesung (Smoluchowski, konstanter Kernel, reine Agglomeration):
+Analytic solution (Smoluchowski, constant kernel, pure agglomeration)::
 
     dn/dt = -(1/2) * beta * n^2      ->      n(t) = n0 / (1 + beta*n0*t/2)
 
-n ist die PHYSIKALISCHE Anzahldichte, im Solver n = sum(W)/Vc.
+``n`` is the PHYSICAL number density, in the solver ``n = sum(W)/Vc``.
 
-Der alte Zustand wird per Monkeypatch nachgebildet - es wird keine Repo-Datei
-veraendert und nichts aus der Versionsgeschichte gebraucht. Damit ist der
-Vergleich auch frei von den anderen, schon vorher offenen Aenderungen im
-Arbeitsverzeichnis.
+The uncorrected form is reproduced by monkeypatching, so no repository file is
+modified and nothing has to be checked out from history. That also keeps the
+comparison free of other pending changes in the working tree.
 """
 
 from __future__ import annotations
@@ -114,9 +113,9 @@ def build(dW_max, t_end, seed=20260813):
     s.agg_dW_min = float(dW_max)
     s.agg_dW_mode = "const"
     s.recon_enable = False
-    # Startgewichte ueber den vorgesehenen W_init-Weg setzen. Ein nachtraegliches
-    # Ueberschreiben von s.W wuerde die in _initialize_particles angelegten
-    # Snapshots (W0, W_save[0]) auf den alten Werten stehen lassen.
+    # Set the start weights through the intended W_init path. Overwriting s.W
+    # afterwards would leave the snapshots created in _initialize_particles
+    # (W0, W_save[0]) sitting on the old values.
     s._initialize_particles(W_init=np.full(A0, W0))
     s._init_lmc()
     s._initialize_samplers()
@@ -232,8 +231,11 @@ def run_variant(dW_max, patcher, t_end, maxiter, w0):
 
 
 def experiment_b(t_end, maxiter):
-    """Batch-Bias isoliert: Startgewicht knapp ueber dW, damit sofort viele
-    'leichte' Partikel (W_i < dW) entstehen und min(delta_i,delta_j) wirklich beisst."""
+    """Batch bias in isolation.
+
+    Start weight just above dW, so that "light" particles (W_i < dW) appear
+    immediately and min(delta_i, delta_j) actually bites.
+    """
     print("\n\n=== Experiment B: Batch-Bias isoliert (W_i-Vorfaktor in BEIDEN Varianten) ===")
     print("Startgewicht 80, dW = 50 -> Kinder bekommen W=50, Eltern fallen auf 30 (leicht).\n")
     print(f"{'Variante':26s} {'Endfehler':>11s} {'max Fehler':>11s} {'phys. Koll.':>12s}")

@@ -369,7 +369,7 @@ class ContinuousProcessesHandler:
         # for `write_dry` changed V_solid = V_dry*(1-eps) for the difference
         # set -- i.e. it created solid mass out of nothing whenever the volume
         # bookkeeping was skipped (eps -> 1, non-finite V_dry).
-        # See docs/Audit_2026-08-17.md, B-07.
+        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-07.
 
         # ------------------------------------------------------------------
         # Step 2: conserve V_solid, shrink V_pore

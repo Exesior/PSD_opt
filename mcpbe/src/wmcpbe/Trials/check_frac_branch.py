@@ -1,11 +1,13 @@
-"""Ist der Fraktional-Tropfen-Zweig durch meinen Umbau tot?
+"""Is the fractional-droplet branch dead after the rework?
 
-In _finalize_remaining_liquid, Zweig n_droplets_exact < 1.0, wird
-_distribute_one_droplet_with_dW mit max_physical_droplets = n_droplets_exact < 1
-aufgerufen. Meine Aenderung verwirft den Event, sobald dW > max_physical_droplets/vc_scale.
-Da dW = min(batch_size, W_i) und beide typisch >= 1 sind, muesste das IMMER greifen.
+In ``_finalize_remaining_liquid``, the branch ``n_droplets_exact < 1.0`` calls
+``_distribute_one_droplet_with_dW`` with
+``max_physical_droplets = n_droplets_exact < 1``. The rework discards the event
+as soon as ``dW > max_physical_droplets / vc_scale``. Since
+``dW = min(batch_size, W_i)`` and both are typically >= 1, that condition should
+ALWAYS hold -- meaning the branch would never deliver anything.
 
-Hier wird das direkt nachgemessen statt argumentiert.
+This script measures it rather than arguing about it.
 """
 from __future__ import annotations
 
@@ -41,7 +43,7 @@ def main():
 
     print("Direkter Aufruf mit fraktionalem Cap (wie im Fraktional-Zweig):")
     for frac in (0.999, 0.75, 0.5, 0.1, 0.01):
-        # Zustand pro Versuch neu, damit Seiteneffekte sich nicht summieren
+        # Fresh state per trial, so side effects cannot accumulate
         s2 = build(sc)
         s2.solve(maxiter=200)
         n2 = s2.nucleation

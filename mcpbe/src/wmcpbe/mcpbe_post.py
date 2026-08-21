@@ -1,4 +1,33 @@
-# Post-processing utilities
+"""Post-processing: reading results back out of a finished solver.
+
+Nothing here changes the simulation. Two pieces:
+
+``MCPBEPost``
+    Mixin on the solver. Turns the saved snapshots (``V_save``, ``W_save``,
+    ``Vc_save``) into the quantities a result is reported in: mixed moments
+    ``mu(i, j, t)``, particle size distributions, and per-property statistics.
+    Every sum is weighted by ``W`` and normalised by the control volume
+    ``Vc(t)`` of that snapshot, so results stay comparable across a run in
+    which ``Vc`` doubled.
+
+``ParticlePropertyContainer``
+    A plain array container for correlated analysis -- porosity against
+    volume, saturation against size. Snapshots have different particle counts,
+    so the shorter ones are padded; padding reads as ``NaN`` (or ``0`` for
+    weights) and must be masked before aggregating.
+
+Which volume the moments use
+----------------------------
+``calc_moments_over_time`` reads ``V_save[t][0]`` (and ``[1]`` for ``dim > 1``)
+-- the **solid** rows, not the dry volume in the last row. ``mu(1, 0, t) * Vc``
+is therefore the conserved solid volume and should stay flat over a run.
+
+That only holds if the solid rows were filled at initialisation, which
+``framework.builder`` does.
+
+The PSD helpers below are unaffected -- they read the dry volume, which is the
+size a particle actually has.
+"""
 from __future__ import annotations
 
 from typing import Tuple, List, Optional, Sequence, Any

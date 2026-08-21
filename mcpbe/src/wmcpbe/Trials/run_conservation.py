@@ -1,8 +1,8 @@
-"""Stufe 1 + 2 ohne pytest: Gewichts-Invariante und Masseerhaltung.
+"""Stages 1 and 2 without pytest: weight invariant and mass conservation.
 
-Nutzt dieselben Szenarien wie mcpbe/tests/test_conservation.py, prueft aber
-zusaetzlich die neue Gewichts-Invariante (kein Partikel darf mit 0 < W < eps
-ueberleben, jedes entfernte Partikel muss exakt W == 0.0 gehabt haben).
+Uses the same scenarios as ``mcpbe/tests/test_conservation.py`` but adds the
+weight invariant: no particle may survive with ``0 < W < eps``, and every
+removed particle must have had exactly ``W == 0.0``.
 """
 
 from __future__ import annotations

@@ -1,3 +1,16 @@
+"""Standalone Monte Carlo check of the weighted batch-packet formulation.
+
+Reproduces a pure death process (no aggregation, no breakage -- just
+first-order decay of each weight class) both analytically and via
+:class:`WeightedPureDeathMC`, and plots the two against each other. Useful as
+a minimal, solver-independent sanity check of the ``delta``-corrected packet
+propensity (``lambda_i = W_i * S_i / delta_i``) used throughout ``wmcpbe`` --
+if this toy case does not converge to the exact solution, the batch-packet
+math itself is wrong, independent of any kernel or solver code.
+
+Run directly: ``python weighted_pure_death_experiment.py``.
+"""
+
 from __future__ import annotations
 
 import math

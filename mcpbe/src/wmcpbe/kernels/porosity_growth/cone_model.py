@@ -1,71 +1,72 @@
 """
 Cone Model Porosity Kernel.
 
-Geometrisches Modell für Porenbildung/-verlust basierend auf Kontaktgeometrie
-zwischen sphärischen Partikeln.
+Geometric model for pore creation and loss, derived from the contact geometry
+between two spherical particles.
 
 Physical Model:
-    Wenn zwei Partikel kontaktieren, entsteht eine komplexe Geometrie zwischen ihnen:
-    - Ein Kegelstumpf verbindet die beiden Kugeln
-    - Zwei Halbkugeln schließen die Enden ab
-    - Diese "Kegelpille" hat mehr Volumen als die Summe der Einzelkugeln
-    
-    Dieses zusätzliche Volumen ΔV repräsentiert neu eingeschlossenen Porenraum.
-    
-    Bei Agglomeration: ΔV wird zum Porenvolumen HINZUGEFÜGT (Porenwachstum)
-    Bei Breakage: ΔV wird vom Porenvolumen ABGEZOGEN (Porenverlust durch neue Oberfläche)
+    Where two particles touch, the enclosing shape is not the union of two
+    spheres:
+    - a truncated cone connects them
+    - two hemispheres cap the ends
+    - this "cone pill" holds more volume than the two spheres together
+
+    That extra volume dV is the newly enclosed pore space.
+
+    On agglomeration: dV is ADDED to the pore volume (pore growth)
+    On breakage:      dV is SUBTRACTED (pore loss through new surface)
 
 Geometry:
-    Kegelpille = Kegelstumpf + 2 Halbkugeln
-    
-    V_cone = (1/3) × π × (ri + rj) × (ri² + ri×rj + rj²)
-    V_hemi = (2/3) × π × (ri³ + rj³)
+    cone pill = truncated cone + 2 hemispheres
+
+    V_cone = (1/3) x pi x (ri + rj) x (ri^2 + ri*rj + rj^2)
+    V_hemi = (2/3) x pi x (ri^3 + rj^3)
     V_pill = V_cone + V_hemi
-    
-    ΔV = V_pill - (V_i + V_j)
-    
-    Für ri = rj = r:
-        V_old = (8/3) × π × r³
-        V_cone = 2 × π × r³
-        V_hemi = (4/3) × π × r³
-        V_pill = (10/3) × π × r³
-        ΔV = (2/3) × π × r³  > 0
 
-Layering (stark ungleiche Partikel):
-    Die Kegelpille ist nur bei ähnlichen Radien eine echte Hülle beider Kugeln.
-    Bei ungleichen Radien schneidet der gerade Kegelmantel in die große Kugel
-    hinein und ΔV wird negativ (positiv nur für r_j/r_i > (3-√5)/2 ≈ 0.381966).
+    dV = V_pill - (V_i + V_j)
 
-    Dort greift stattdessen ein Layering-Modell: das kleine Partikel sitzt auf
-    der lokal ebenen Oberfläche des großen, der neue Porenraum ist der
-    umschreibende Zylinder abzüglich der Halbkugel darin:
+    For ri = rj = r:
+        V_old  = (8/3)  x pi x r^3
+        V_cone = 2      x pi x r^3
+        V_hemi = (4/3)  x pi x r^3
+        V_pill = (10/3) x pi x r^3
+        dV     = (2/3)  x pi x r^3  > 0
 
-        ΔV_layering = π × r_min³ - (2/3) × π × r_min³ = (1/3) × π × r_min³
+Layering (strongly unequal particles):
+    The cone pill only encloses both spheres while their radii are similar. For
+    unequal radii the straight cone surface cuts into the larger sphere and dV
+    turns negative -- it is positive only for r_j/r_i > (3-sqrt(5))/2 = 0.381966.
 
-    Verwendet wird ΔV = max(ΔV_kegelpille, ΔV_layering); der Übergang liegt bei
-    r_j/r_i = 0.403032 und ist stetig.
+    A layering model takes over there: the small particle sits on the locally
+    flat surface of the large one, and the new pore space is the circumscribing
+    cylinder minus the hemisphere inside it:
 
-    LAYERING ist die Anlagerung feiner Partikel an ein deutlich größeres
-    Granulat -- ein eigenständiger, wichtiger Wachstumsmechanismus der
-    Granulation neben Nukleation, Koaleszenz und Bruch.
+        dV_layering = pi x r_min^3 - (2/3) x pi x r_min^3 = (1/3) x pi x r_min^3
+
+    The kernel uses dV = max(dV_cone_pill, dV_layering). The crossover sits at
+    r_j/r_i = 0.403032 and is continuous.
+
+    Layering -- fine particles attaching to a much larger granule -- is a
+    growth mechanism in its own right, alongside nucleation, coalescence and
+    breakage.
 
 Parameters:
-    k_agg: Shape correction factor für Agglomeration [dimensionless]
-           Skaliert ΔV vor Addition zum Porenvolumen.
-           Typisch: 0.1 - 2.0 (fitbar an Experimente)
-           
-    k_break: Shape correction factor für Breakage [dimensionless]
-           Skaliert ΔV vor Subtraktion vom Porenvolumen.
-           Typisch: 0.01 - 0.5 (kleiner wegen (n-1) Kegel in Reihe)
-           
-    Why two parameters?
-        - Agglomeration: 1 Kegel zwischen 2 Partikeln → ΔV direkt anwendbar
-        - Breakage: (n-1) Kegel zwischen n Fragmenten → ΔV summiert sich stark
-          → Benötigt stärkeres Damping für physikalisch sinnvolle Ergebnisse
+    k_agg: shape correction factor for agglomeration [-]
+           Scales dV before it is added to the pore volume.
+           Typical: 0.1 - 2.0 (fitted to experiment)
+
+    k_break: shape correction factor for breakage [-]
+           Scales dV before it is subtracted from the pore volume.
+           Typical: 0.01 - 0.5 (smaller, see below)
+
+    Why two factors?
+        - Agglomeration: one cone between two particles, dV applies directly.
+        - Breakage: (n-1) cones between n fragments, so dV accumulates fast and
+          needs stronger damping to stay physically sensible.
 
 References:
-    - Kegelstumpf-Volumen: Standard geometrische Formel
-    - Anwendung auf Granulation: Neu in diesem Modell (fitbar an PSD-Daten)
+    - Truncated cone volume: standard geometry.
+    - Application to granulation: new in this model, fitted against PSD data.
 
 Example:
     >>> kernel = ConeModelKernel(k_agg=0.5, k_break=0.1)

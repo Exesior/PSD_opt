@@ -277,7 +277,7 @@ class KernelManager:
         # config file would put it (config files assign arbitrary attributes,
         # see base_solver._load_attributes), so an old config actually gets the
         # explanation instead of running with compression silently disabled.
-        # See docs/Audit_2026-08-17.md, B-14.
+        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-14.
         _legacy_compression = getattr(solver, 'compression_kernel_name', None)
         if _legacy_compression is not None:
             import warnings

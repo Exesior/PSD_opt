@@ -1,14 +1,44 @@
-# -*- coding: utf-8 -*-
+"""Breakage rates from a trained neural network instead of a closed formula.
+
+The kernels in ``kernels/breakage/`` compute a rate ``S(V)`` from an analytic
+expression. This adapter offers the alternative: a multilayer perceptron,
+trained offline on LMC bond-breaking data, predicts a breakage *energy*, which
+is converted into a rate here.
+
+The model expects the same 10-dimensional feature vector it was trained on::
+
+    [logV, log_gamma, log_NO_FRAG, int_bre, Df, MAS, X1, STR0, STR1, STR2]
+
+All entries except ``logV`` are held fixed per run and come from the
+constructor, so the adapter presents the plain ``rate(V)`` interface the solver
+expects.
+
+Requires ``torch`` and the ``breakage_rate_model`` package. Both are imported
+unconditionally, so importing this module fails outright when they are absent
+-- see ``mcpbe/docs/Befunde_2026-08-20.md``, D-20.
+"""
 
 from __future__ import annotations
 
 from typing import Callable, Optional, Sequence
 
 import numpy as np
-import torch
 
-from breakage_rate_model.base import BaseEnergyModel
-from breakage_rate_model.mlp_model import MLPEnergyModel
+try:
+    import torch
+    from breakage_rate_model.base import BaseEnergyModel
+    from breakage_rate_model.mlp_model import MLPEnergyModel
+except ImportError as exc:
+    # Both are optional: only MLPBreakageRateAdapter needs them, and this
+    # module must stay importable without them installed. The clear failure
+    # happens where they are actually used (MLPBreakageRateAdapter.__init__),
+    # not here.
+    torch = None
+    BaseEnergyModel = None
+    MLPEnergyModel = None
+    _IMPORT_ERROR = exc
+else:
+    _IMPORT_ERROR = None
 
 
 class MLPBreakageRateAdapter:
@@ -37,6 +67,11 @@ class MLPBreakageRateAdapter:
         eps_E: float = 1e-30,
         A0_run: float = 1.0,
     ):
+        if _IMPORT_ERROR is not None:
+            raise ImportError(
+                "MLPBreakageRateAdapter requires 'torch' and 'breakage_rate_model'. "
+                "Install them, e.g.: pip install torch && pip install -e breakage-rate-model/"
+            ) from _IMPORT_ERROR
         if model is None:
             if model_path is None:
                 raise ValueError("Either 'model' or 'model_path' must be provided.")

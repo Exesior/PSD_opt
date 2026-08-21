@@ -1,3 +1,41 @@
+"""Numba-compiled inner loops of the Monte Carlo PBE solvers.
+
+Everything here is on the hot path -- called once or more per Monte Carlo
+event -- and is compiled with ``@njit`` in nopython mode. Anything these
+functions call must be nopython-compatible too, which is why the aggregation
+and breakage kernels are imported from their own JIT modules rather than
+passed in as Python objects.
+
+Three groups:
+
+**Propensity rebuilds** (``nb_rebuild_ragg*``)
+    Compute ``r_i = sum_j beta(i,j)`` over all active particles -- an O(n^2)
+    double loop, parallelised across ``i`` with ``prange``. This dominates
+    solver runtime, which is why the weighted solver also offers an O(n)
+    closed form for separable kernels (see
+    ``wmcpbe/kernels/aggregation/jit_kernels.py``).
+
+**Partner selection** (``nb_pick_partner*``)
+    Draw the second particle of a pair given the first, by walking a
+    cumulative sum. The ``_weighted`` variants weight by ``W``, the
+    ``_pair_delta`` variants additionally divide by the pair batch cap
+    ``min(delta_i, delta_j)`` -- the bias correction described in the project
+    README.
+
+**Fenwick tree primitives** (``nb_fenwick_*``)
+    Binary indexed tree operations behind ``FenwickSampler``: build, point
+    update, prefix sum, append, and remove-by-swap-with-last. All O(log n),
+    all operating in place on caller-owned arrays so the hot path allocates
+    nothing.
+
+Plus ``_build_table*_jit``, which tabulate the breakage fragment CDFs.
+
+Naming: ``nb_`` marks a Numba entry point meant to be called from Python;
+a leading underscore marks a helper. The ``COLEVAL`` / ``BREAKFVAL`` integers
+select a kernel variant inside the compiled code, because a Python-level
+function object cannot cross the nopython boundary.
+"""
+
 import math
 import numpy as np
 from numba import njit, prange
@@ -501,6 +539,12 @@ def nb_pick_partner_weighted_pair_delta(
 # -----------------------------
 @njit(fastmath=True)
 def nb_fenwick_add(tree: np.ndarray, n: int, idx: int, delta: float):
+    """Add ``delta`` to leaf ``idx``, updating every node above it. O(log n).
+
+    ``tree`` is 1-based: index 0 is unused, so a leaf ``idx`` lives at ``idx+1``.
+    ``i & -i`` isolates the lowest set bit, which is the span of the current
+    node and therefore the step to its parent.
+    """
     i = idx + 1
     while i <= n:
         tree[i] += delta
@@ -509,12 +553,22 @@ def nb_fenwick_add(tree: np.ndarray, n: int, idx: int, delta: float):
 
 @njit(fastmath=True)
 def nb_fenwick_build(tree: np.ndarray, n: int, w: np.ndarray):
+    """Fill ``tree`` from the weights ``w`` by repeated point insertion.
+
+    O(n log n). The caller is expected to have zeroed ``tree`` first --
+    this adds to whatever is already there.
+    """
     for i in range(n):
         nb_fenwick_add(tree, n, i, w[i])
 
 
 @njit(fastmath=True)
 def nb_fenwick_update(tree: np.ndarray, n: int, w: np.ndarray, idx: int, new_w: float) -> float:
+    """Set weight ``idx`` to ``new_w`` and return the change applied.
+
+    Updates ``w`` and ``tree`` together, so the two can never drift apart. A
+    zero change touches nothing.
+    """
     delta = new_w - w[idx]
     if delta != 0.0:
         w[idx] = new_w
@@ -581,6 +635,12 @@ def nb_fenwick_remove_swap_last(tree: np.ndarray, w: np.ndarray, n: int, idx: in
 # -----------------------------
 @njit(fastmath=True)
 def _build_table_1d_jit(rel: np.ndarray, v: float, q: float, bf: int):
+    """Fragment-size CDF over the relative volumes ``rel``, for 1-D breakage.
+
+    Evaluates the breakage function ``bf`` (a BREAKFVAL selector) at every grid
+    point, then normalises the result into a cumulative distribution the
+    solver can invert with a single uniform draw.
+    """
     n = rel.shape[0]
     pdf = np.empty(n, dtype=np.float64)
     for k in range(n):
@@ -607,6 +667,12 @@ def _build_table_1d_jit(rel: np.ndarray, v: float, q: float, bf: int):
 
 @njit(fastmath=True)
 def _build_tables_2d_jit(rel1: np.ndarray, rel3: np.ndarray, v: float, q: float, bf: int):
+    """Two-level fragment CDFs for 2-D breakage: row sums first, then rows.
+
+    Sampling a 2-D fragment is split into two 1-D draws -- pick a row from the
+    row-sum CDF, then a column within that row. Building both levels here
+    keeps the per-event cost at two binary searches.
+    """
     n1 = rel1.shape[0]
     n3 = rel3.shape[0]
     rowsum = np.empty(n1, dtype=np.float64)

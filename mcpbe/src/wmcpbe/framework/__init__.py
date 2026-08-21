@@ -1,33 +1,31 @@
-"""Wiederholungs-Framework fuer die WMCPBE-Monte-Carlo-Simulation.
+"""Repeat framework for the WMCPBE Monte Carlo simulation.
 
-Dieses Paket ist bewusst *additiv*: es aendert keine bestehende Datei. Es kann
-komplett entfernt werden (Ordner loeschen), ohne dass am uebrigen Repository
-etwas zurueckbleibt.
+This package is deliberately *additive*: it changes no existing file, and
+deleting the folder leaves nothing behind anywhere else in the repository.
 
-Aufbau (jede Schicht kennt nur die darunter):
+Layers, each aware only of the one below it:
 
 ``builder.py``
-    Beschreibt einen Lauf als reines Datenpaket (``dict``) und baut daraus
-    einen fertig konfigurierten Solver. Das ist die Einheit, die an einen
-    Worker-Prozess geschickt wird -- nicht der Solver selbst.
+    Describes a run as a plain data packet (``dict``) and builds a fully
+    configured solver from it. That packet -- not the solver -- is what gets
+    sent to a worker process.
 ``metrics.py``
-    Reduziert einen *fertig gerechneten* Solver auf kompakte Zeitreihen und
-    Kennzahlen. Laeuft im Worker, damit nur wenige Kilobyte statt kompletter
-    Partikel-Historien zwischen den Prozessen wandern.
+    Reduces an *already solved* solver to compact time series and scalars.
+    Runs inside the worker, so only a few kilobytes travel between processes
+    instead of complete particle histories.
 ``runner.py``
-    Fuehrt N Wiederholungen mit unabhaengigen Seeds aus, seriell oder auf
-    mehreren Prozessen.
+    Executes N repeats with independent seeds, serially or across processes.
 ``statistics.py``
-    Mittelwert / Standardabweichung / Standardfehler ueber die Wiederholungen
-    plus Konvergenzpruefung.
+    Mean, standard deviation and standard error over the repeats, plus a
+    convergence check.
 ``run_reference_repeats.py``
-    Ausfuehrbares Skript: eine Konfiguration, zehn Seeds.
+    Executable script: one configuration, ten seeds.
 
-Das Paket liegt in ``wmcpbe/`` und ist damit als ``wmcpbe.framework``
-importierbar. Ausfuehrbare Studien, die darauf aufsetzen, liegen in
+The package lives inside ``wmcpbe/`` and is therefore importable as
+``wmcpbe.framework``. Executable studies built on top of it live in
 ``wmcpbe/Trials/``.
 
-Siehe ``mcpbe/docs/Parallelisierung_Wiederholungen.md``.
+See ``mcpbe/docs/historical/Parallelisierung_Wiederholungen.md``.
 """
 
 from __future__ import annotations
@@ -37,11 +35,11 @@ import sys
 
 
 def bootstrap_paths() -> None:
-    """Lege ``mcpbe/src`` und ``pbe-core/src`` auf den Importpfad.
+    """Put ``mcpbe/src`` and ``pbe-core/src`` on the import path.
 
-    Wird auch im Worker-Prozess aufgerufen: Windows startet Worker mit
-    ``spawn``, also als frischen Python-Prozess ohne den ``sys.path`` des
-    Elternprozesses. Ohne diesen Aufruf findet der Worker ``wmcpbe`` nicht.
+    Called in the worker process too: Windows starts workers with ``spawn``,
+    i.e. as a fresh interpreter without the parent's ``sys.path``. Without this
+    call the worker cannot find ``wmcpbe``.
     """
     here = os.path.dirname(os.path.abspath(__file__))
     # framework -> wmcpbe -> src -> mcpbe -> repo
@@ -53,12 +51,12 @@ def bootstrap_paths() -> None:
 
 
 def pin_threads() -> None:
-    """Begrenze BLAS-/Numba-Threads auf 1.
+    """Limit BLAS and Numba to one thread each.
 
-    In einem Worker-Prozess ist Mehrfach-Threading schaedlich: acht Prozesse
-    mit je acht Threads konkurrieren um acht Kerne und sind zusammen langsamer
-    als ein einzelner serieller Lauf. Muss vor dem Import von numpy/numba
-    wirken, deshalb wird es als Umgebungsvariable gesetzt.
+    Inside a worker process, multithreading is counterproductive: eight
+    processes with eight threads each contend for eight cores and finish slower
+    than a single serial run. It has to take effect before numpy/numba are
+    imported, hence the environment variables.
     """
     for var in (
         "OMP_NUM_THREADS",

@@ -25,7 +25,7 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `bench/golden_reference.py` | Bitgenaue Regressions-Fingerprints (SHA-256 über alle float64-Bytes). |
 | `bench/bench_wmcpbe.py` | Wandzeit-Benchmark mit Vorher/Nachher-Vergleich. |
 | `bench/profile_wmcpbe.py` | `cProfile` für ein einzelnes Szenario. |
-| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`docs/MOMENT_MODE.md`](../docs/MOMENT_MODE.md)). |
+| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`../docs/historical/MOMENT_MODE.md`](../docs/historical/MOMENT_MODE.md)). |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `golden_reference.json` | Eingecheckte Referenz-Fingerprints. |
 
@@ -49,7 +49,7 @@ python -m tests.bench.golden_reference record --out tests/golden_reference.json
 ```
 
 > Das ist ein bewusster Schritt. Vorher klären, **warum** sich Ergebnisse ändern,
-> und den Grund in `docs/old/REFACTORING_FINDINGS.md` festhalten.
+> und den Grund in `../docs/historical/REFACTORING_FINDINGS.md` festhalten.
 
 ---
 
@@ -106,7 +106,6 @@ unabhängig von den Kernelparametern in einem vorhersagbaren Rahmen
 | `agg_constant_1d` | 1 | Agglomeration | 500 | 400 | konstanter Kernel + JIT-Partnerwahl |
 | `agg_sum_1d` | 1 | Agglomeration | 500 | 400 | Summenkernel |
 | `agg_brownian_1d` | 1 | Agglomeration | 500 | 400 | Brownscher Kernel |
-| `agg_liquid_bridge_1d` | 1 | Agglomeration | 150 | 40 | zustandsabhängiger Kernel (vorher der Nicht-JIT-Fallback) |
 | `agg_shear_2d` | 2 | Agglomeration | 500 | 300 | Zweikomponentenpfad |
 | `break_powerlaw_1d` | 1 | Breakage | 500 | 1500 | Bruchrate + Fragment-CDF |
 | `mix_1d` | 1 | Mix | 500 | 300 | schlimmster Fall: beide Sampler pro Ereignis |

@@ -1,3 +1,21 @@
+"""Standalone check: does the bias-corrected packet propensity track the exact solution?
+
+Builds a 1-D uniform-breakage solver, runs repeats against the analytic
+moments from :func:`exact_moments_1d_uniform_breakage`, and plots the mean MC
+trajectory against the exact one -- the same kind of independent sanity check
+as ``weighted_pure_death_experiment.py``, but for breakage instead of pure
+death.
+
+Warning
+-------
+``from wmcpbe_backup import MCPBESolver`` does not resolve -- no
+``wmcpbe_backup`` package exists anywhere in this repository. The parameter
+names used below (``BREAKRVAL``, ``pl_P1``, ``bias_enable``, ...) also predate
+the current kernel-based API (``break_kernel_name`` / ``break_kernel_params``),
+so this script is a snapshot from an earlier development state and would need
+more than an import fix to run against the current ``wmcpbe``.
+"""
+
 from __future__ import annotations
 
 import copy

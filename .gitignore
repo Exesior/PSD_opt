@@ -57,3 +57,14 @@ poetry.lock
 # WMCPBE Trials: generated debug-run text reports (*.csv/*.log outputs are
 # already covered by the rules above). analyze_logs.py itself stays tracked.
 mcpbe/src/wmcpbe/Trials/debug_logs/*.txt
+
+# Ray Tune trial output. The two rules further up (/examples/config/Ray_Tune,
+# /optframework/examples/config/Ray_Tune) are anchored to a directory layout
+# that no longer exists; the current path is scripts/examples/config/Ray_Tune.
+# Matching on the directory name catches it wherever it ends up.
+**/Ray_Tune/
+
+# Profiling and run logs that predate the *.log / *.svg rules above and were
+# therefore committed once.
+scripts/test/parallel.log
+scripts/test/cpu_profile.svg

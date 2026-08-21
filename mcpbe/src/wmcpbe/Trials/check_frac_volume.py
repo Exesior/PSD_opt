@@ -1,6 +1,6 @@
-"""Liefert der reparierte Fraktional-Zweig exakt das gewuenschte Volumen?
+"""Does the repaired fractional branch deliver exactly the intended volume?
 
-Soll:  abgegebene physikalische Fluessigkeit == max_physical_droplets * v_droplet
+Expected: physical liquid delivered == ``max_physical_droplets * v_droplet``.
 """
 from __future__ import annotations
 
@@ -45,14 +45,14 @@ def main():
         after = liquid_total(s)
 
         ist = after - before
-        # Bei cap >= dW*vc_scale wird nicht skaliert -> volle Tropfenmenge je Partikel
+        # Cap >= dW*vc_scale means no scaling -> the full droplet per particle
         soll = min(frac, dW * vc_scale) * v_droplet  # == dW*vc_scale*v_eff
         rel = abs(ist - soll) / soll if soll > 0 else 0.0
 
-        # `ist` ist eine Differenz zweier grosser Summen (Gesamtfluessigkeit ~ before).
-        # Deren Auauschloeschungsrauschen liegt bei ~eps*before, relativ zum winzigen
-        # Sollwert also bei eps*before/soll. Ein reines rel<1e-12 waere hier kein
-        # Aussage ueber den Code, sondern ueber die Messmethode.
+        # `ist` is the difference of two large sums (total liquid ~ before), so
+        # its cancellation noise is ~eps*before -- relative to the tiny target
+        # value that is eps*before/soll. A plain rel<1e-12 would therefore test
+        # the measurement method, not the code.
         noise = 8.0 * np.finfo(float).eps * max(before, abs(after)) / soll if soll > 0 else 0.0
         ok = rel <= max(1e-12, noise)
         worst = max(worst, rel / max(noise, 1e-30))

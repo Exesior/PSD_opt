@@ -150,7 +150,7 @@ class ParticleMerger:
         # entries and lookups miss the particles that are actually there.
         # Measured at eps_0 = 0.6: merge rate 99.4 % -> 10.9 %, and 99.8 % of
         # all entries under a key that no longer matched the particle.
-        # See docs/Audit_2026-08-17.md, B-04.
+        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-04.
         self._key_of: Dict[int, tuple] = {} if use_hash_index else None
         
         # Statistics (for debugging/profiling)
@@ -165,7 +165,7 @@ class ParticleMerger:
         Resolve the effective (relative, liquid-absolute) tolerances for a lookup.
 
         The relative tolerance applies to V_dry and is the caller's rule
-        ``|ist - Kandidat| / ist <= tol``, i.e. normalised by the TARGET.
+        ``|target - candidate| / target <= tol``, i.e. normalised by the TARGET.
 
         For liquid the same relative rule applies, optionally capped against a
         reference scale (``liquid_scale_ref``, in practice the droplet volume).

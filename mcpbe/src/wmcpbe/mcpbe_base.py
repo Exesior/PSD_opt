@@ -435,44 +435,42 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         self.logger.debug(f"Logging initialized: console={console_level}, file={file_path or 'None'}")
     
     def _init_lmc(self) -> None:
-        """
-        Initialisiert LMC-Adapter fuer Fragmentverteilung und Breakage-Raten.
-        
-        Unterstuetzt vier Modi der Fragmentverteilung:
-        
-        * **Offline-Adapter** (precomputed): Tabelle, Rank, Copula, Flow
-        * **Online-LMC**: Live-Fragmentgenerator zur Laufzeit
-        * **MLP-Modell**: Neuronales Netz fuer Breakage-Ratenvorhersage
-        
-        Die Konfiguration erfolgt ueber Solver-Attribute (aus Config-Datei oder
-        __init__-Parameter). Bei `use_lmc_pre_model=True` werden die entsprechenden
-        Tabellendateien geladen und validiert.
-        
-        Attributes
-        ----------
-        use_lmc_pre_model : bool
-            Aktiviert precomputed LMC-Adapter
-        lmc_pre_model : str
-            Typ des Adapters: 'table', 'rank', 'copula', oder 'flow'
-        lmc_adapter : LMCTableAdapter | LMCRankAdapter | LMCCopulaAdapter | LMCFlowAdapter | None
-            Instanz des gewaehlten Fragmentverteilungs-Adapters
+        """Set up the optional LMC sources for fragment sizes and breakage rates.
+
+        Three independent modes, all off by default:
+
+        * **Offline adapter** (``use_lmc_pre_model``): fragment distributions
+          from precomputed tables -- ``'table'``, ``'rank'``, ``'copula'`` or
+          ``'flow'``.
+        * **Online LMC** (``use_lmc_live``): runs an actual LMC simulation per
+          breakage event.
+        * **MLP model** (``lmc_use_breakage_model``): breakage *rates* from a
+          neural network instead of a kernel formula.
+
+        Configured through solver attributes, set either from a config file or
+        as ``__init__`` parameters. With ``use_lmc_pre_model=True`` the table
+        files are loaded and validated here.
+
+        Sets
+        ----
+        lmc_adapter : LMCTableAdapter | LMCRankAdapter | LMCCopulaAdapter | None
+            The chosen offline fragment-distribution adapter.
         lmc_live : object | None
-            Online-LMC-Simulator (wenn use_lmc_live=True)
+            Online LMC simulator.
         lmc_breakage_adapter : object | None
-            MLP-Adapter fuer Breakage-Raten (wenn lmc_use_breakage_model=True)
-        
+            MLP breakage-rate adapter.
+
         Raises
         ------
         ValueError
-            Wenn required Pfade nicht gesetzt oder ungueltiger Adapter-Typ
+            Required paths not set, or unknown adapter type.
         FileNotFoundError
-            Wenn Modelldateien nicht gefunden werden
-        
+            A configured model file does not exist.
+
         See Also
         --------
-        lmc_adapter.LMCTableAdapter : Marginaltabellen-basierter Adapter
-        lmc_adapter.LMCLiveAdapter : Echtzeit-Fragmentgenerierung
-        mlp_breakage_adapter.MLPBreakageAdapter : Neuronales Breakage-Modell
+        lmc_adapter : the four offline adapters and the live one
+        mlp_breakage_adapter : the neural-network breakage rate
         """
         # Read LMC configuration
         self.use_lmc_pre_model = bool(getattr(self, "use_lmc_pre_model", False))
@@ -807,12 +805,13 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         working.
         """
         v = getattr(self, "break_frag_v", None)
-        # Der letzte Fallback weicht bewusst von `mcpbe_break.py::_prepare_break_config`
-        # ab (dort 2.0). Unerreichbar, weil base_solver.py `self.pl_v = 2` in der
-        # gemeinsamen Basisklasse setzt -- beide Stellen lesen also denselben Wert.
-        # Faellt dieser Default je weg, muessen BEIDE Stellen zusammen angefasst
-        # werden, sonst laufen Fragmentanzahl und Fragmentgroessenverteilung mit
-        # verschiedenen Werten desselben Modellparameters.
+        # The last-resort default (1.0) differs from the one in
+        # `mcpbe_break.py::_prepare_break_config` (2.0). Neither is reached,
+        # because `base_solver.py` sets `self.pl_v = 2` in the shared base
+        # class, so both sites read the same value. If that assignment ever
+        # goes away, BOTH defaults have to be changed together -- otherwise
+        # fragment count and fragment size distribution run on different values
+        # of the same model parameter.
         v = float(v) if v is not None else float(getattr(self, "pl_v", 1.0))
         bf = int(getattr(self, "BREAKFVAL", 1))
         if self.dim == 1:
@@ -906,7 +905,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         --------
         _initialize_samplers : Setup propensity samplers (call after this)
         _build_init_from_cdf : Build particles from experimental CDF
-        setup_initial_particles : Helper function in helpers.py
 
         Examples
         --------
@@ -2239,7 +2237,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # NOTE: liquid/porosity/saturation are recorded from the *current*
                 # (post-event) arrays, not from a pre-event copy. That is a known
                 # inconsistency inherited from the original implementation; it is
-                # documented in docs/old/REFACTORING_FINDINGS.md (F-07) and left
+                # documented in mcpbe/docs/historical/REFACTORING_FINDINGS.md (F-07) and left
                 # unchanged here so recorded runs stay reproducible.
                 self.V_save_left.append(V_prev_active.copy())
                 self.W_save_left.append(W_prev_active.copy())
@@ -2347,7 +2345,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # 2.5e-2 for the breakage rates by the end of a 4 s run.
                 # `_agg_sampler` is built from `_r_agg`, so this biased the
                 # event timing and the partner draw, not just a diagnostic
-                # array. See docs/Nucleation_Propensity_Blockade.md.
+                # array. See mcpbe/docs/historical/Nucleation_Propensity_Blockade.md.
                 #
                 # Deliberately NOT gated on "did compression actually change
                 # anything". The handler does know (it computes
@@ -2421,7 +2419,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # particles that are actually there -- i.e. the merger stops
             # merging, which is the whole point of having it.
             # Only particles whose binned key really moved touch a bucket.
-            # See docs/Audit_2026-08-17.md, B-04.
+            # See mcpbe/docs/historical/Audit_2026-08-17.md, B-04.
             if merger_reindex is not None:
                 merger_reindex()
 
@@ -2915,7 +2913,8 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         # ----- parallel path -----
         base_state = copy.deepcopy(self.__dict__)
 
-        # åŽ»æŽ‰ae¸€aeº›è¿è¡Œæ—¶å¯¹è±¡ï¼Œe¿å… pickling/æ–‡ae»¶å¥æŸ„/ç¼“å­˜å¯¼è‡´å·®å¼‚
+        # Drop runtime-only objects, so that pickling, open file handles
+        # and caches cannot make two otherwise identical states differ.
         base_state.pop("cancel_flag", None)
         for k_rm in ("lmc_adapter", "lmc_live", "lmc_breakage_adapter"):
             if k_rm in base_state:
@@ -3197,7 +3196,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
     #: "V_solid == V_dry", a forgotten assignment would have CREATED mass
     #: instead of failing. One default now, everywhere: 0.0 (poreless), which
     #: is the modern convention and matches ``_initialize_particles``.
-    #: See docs/Audit_2026-08-17.md, B-10.
+    #: See mcpbe/docs/historical/Audit_2026-08-17.md, B-10.
     _RELEASED_SLOT_FILL: dict[str, float] = {}
 
     def _particle_arrays(self) -> list[tuple[np.ndarray, float]]:
@@ -3284,7 +3283,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         particle, every fragment and every nucleation child carried
         ``d(V_solid)`` instead of ``d(V_dry)``, i.e. a radius too small by
         ``(1 - porosity)**(1/3)`` and a ``beta`` too small by ``(1 - porosity)``.
-        See docs/Audit_2026-08-17.md, B-01.
+        See mcpbe/docs/historical/Audit_2026-08-17.md, B-01.
         """
         self.V_flat[-1, idx] = v_dry
         self.X[idx] = float(self._vol2diam(v_dry))

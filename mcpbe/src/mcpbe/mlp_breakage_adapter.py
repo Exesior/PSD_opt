@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Adapter: using MLPEnergyModel to provide breakage rates for MCPBE.
 

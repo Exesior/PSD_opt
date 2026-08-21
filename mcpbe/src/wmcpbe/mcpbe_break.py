@@ -1,4 +1,36 @@
-﻿# Breakage mixin: breakage rates (full & single), two-level CDF builder, fragment production, single break event.
+"""Breakage mixin for the weighted MC-PBE solver.
+
+One breakage event, as executed by ``_do_one_break``:
+
+1. Draw particle ``k`` with probability proportional to ``W_k * S_k``, where
+   ``S`` is the breakage rate from the configured ``break_kernel``
+   (``power_law``, or ``powerlaw_rumpf`` for a rate that follows porosity and
+   saturation).
+2. Turn the expected fragment count into an integer by stochastic rounding.
+3. Sample fragment volumes -- from the CDF tables built here, from the LMC
+   adapter, or analytically, depending on configuration.
+4. Hand each fragment to ``ParticleMerger.find_or_create`` so an identical
+   particle is reused instead of duplicated, and reduce the parent's weight by
+   the packet size ``dW``.
+
+Rates come in two flavours: ``_calc_break_rates_full`` rebuilds the whole array
+(after reconstruction or a population change), ``_break_rate_single`` updates
+one entry after an event.
+
+Two different parameters are called ``pl_v``
+--------------------------------------------
+* the **fragment-size** exponent, cached as ``_break_pl_v`` and configured as
+  ``break_frag_v`` (falling back to the solver attribute ``pl_v``)
+* the **breakage-rate** exponent, which lives in the breakage kernel's own
+  parameter dict
+
+They are unrelated. Setting the one when the other was meant is silent, since
+both names are valid in their own scope.
+
+Volume semantics and the conservation rule are the same as in
+``mcpbe_agg.py``: ``V_flat[:dim]`` is solid volume, ``V_flat[-1]`` dry volume,
+and ``sum_i W_i * V_solid_i`` must not change across an event.
+"""
 from __future__ import annotations
 
 import math
@@ -45,12 +77,13 @@ class MCPBEBreak:
         # that one lives in the breakage kernel, also called `pl_v`.
         _frag_v = getattr(self, "break_frag_v", None)
         _frag_q = getattr(self, "break_frag_q", None)
-        # Der letzte Fallback weicht bewusst von `mcpbe_base.py::_compute_frag_num`
-        # ab (dort 1.0). Unerreichbar, weil base_solver.py `self.pl_v = 2` in der
-        # gemeinsamen Basisklasse setzt -- beide Stellen lesen also denselben Wert.
-        # Faellt dieser Default je weg, muessen BEIDE Stellen zusammen angefasst
-        # werden, sonst laufen Fragmentanzahl und Fragmentgroessenverteilung mit
-        # verschiedenen Werten desselben Modellparameters.
+        # The last-resort default (2.0) differs from the one in
+        # `mcpbe_base.py::_compute_frag_num` (1.0). Neither is reached, because
+        # `base_solver.py` sets `self.pl_v = 2` in the shared base class, so
+        # both sites read the same value. If that assignment ever goes away,
+        # BOTH defaults have to be changed together -- otherwise fragment count
+        # and fragment size distribution run on different values of the same
+        # model parameter.
         self._break_pl_v = float(_frag_v) if _frag_v is not None else float(getattr(self, "pl_v", 2.0))
         self._break_pl_q = float(_frag_q) if _frag_q is not None else float(getattr(self, "pl_q", 1.0))
 
@@ -61,7 +94,7 @@ class MCPBEBreak:
         # numerical helper to a physical configuration choice: with
         # process_type="agglomeration" this method never runs, so
         # agglomeration-only and nucleation-only setups silently had no dedup
-        # at all (see docs/Audit_2026-08-17.md, B-05/B-22). It now lives in
+        # at all (see mcpbe/docs/historical/Audit_2026-08-17.md, B-05/B-22). It now lives in
         # mcpbe_base._ensure_particle_merger(), called from
         # _initialize_samplers() regardless of process_type.
         self._ensure_particle_merger()
@@ -850,7 +883,7 @@ class MCPBEBreak:
                 # DESTROYS solid mass proportional to the fragment porosity.
                 # The agglomeration fallback (mcpbe_agg._merge_pair) always did
                 # this; this branch is a drifted copy of it.
-                # See docs/Audit_2026-08-17.md, B-17.
+                # See mcpbe/docs/historical/Audit_2026-08-17.md, B-17.
                 self.set_particle_dry_volume(new_idx, V_dry_frag)
                 if hasattr(self, "liquid_volume"):
                     self.liquid_volume[new_idx] = liq_frag
@@ -921,11 +954,11 @@ class MCPBEBreak:
         if getattr(self, 'mcpbe_debug_mass', False):
             max_events = getattr(self, '_debug_max_events', 20)
             if hasattr(self, '_break_debug_counter') and self._break_debug_counter <= max_events:
-                # Summiere Fragment-Volumina
+                # Sum the fragment volumes
                 v_solid_frags = 0.0
                 liq_frags = 0.0
-                
-                # Hole Parent-Wert fuer Vergleich (falls noch existent)
+
+                # Parent value for comparison, if the parent still exists
                 if k < self.a_tot:
                     v_solid_parent_remaining = self.V_flat[-1,k] * (1.0 - self.porosity[k]) if not np.isnan(self.porosity[k]) else self.V_flat[-1,k]
                     w_parent_remaining = self.W[k]
@@ -1232,7 +1265,7 @@ class MCPBEBreak:
         # last SUCCESSFUL event. real_break_events -- the number the
         # agglomeration/breakage balance is read from, and which is written to
         # real_break_events_save at every output time -- came out too high.
-        # See docs/Audit_2026-08-17.md, B-18.
+        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-18.
         self._last_break_dW = 0.0
 
         # DEBUG: Initialize stats EARLY (before ANY return)

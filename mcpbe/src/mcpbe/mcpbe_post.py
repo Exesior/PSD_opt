@@ -1,4 +1,4 @@
-﻿# Post-processing utilities
+# Post-processing utilities
 from __future__ import annotations
 
 from typing import Tuple, List, Optional, Sequence, Any

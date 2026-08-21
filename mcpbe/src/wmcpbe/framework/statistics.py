@@ -1,27 +1,27 @@
-"""Statistik ueber die Wiederholungen.
+"""Statistics across the repeats.
 
-Ein einzelner Monte-Carlo-Lauf ist eine Stichprobe, kein Ergebnis. Erst der
-Mittelwert ueber mehrere unabhaengige Laeufe -- zusammen mit einer Angabe,
-wie sicher dieser Mittelwert ist -- laesst eine Aussage zu.
+A single Monte Carlo run is a sample, not a result. Only the mean over several
+independent runs -- together with a statement of how certain that mean is --
+supports a claim.
 
-Die drei Groessen und was sie unterscheiden:
+The three quantities, and what separates them:
 
-``std`` (Standardabweichung)
-    Wie stark streuen die *einzelnen Laeufe*? Bleibt bei mehr Wiederholungen
-    ungefaehr gleich gross -- sie ist eine Eigenschaft des Modells.
-``sem`` (Standardfehler, ``std/sqrt(N)``)
-    Wie unsicher ist der *Mittelwert*? Schrumpft mit mehr Wiederholungen. Das
-    ist die Groesse, die als Fehlerbalken gehoert.
+``std`` (standard deviation)
+    How far do the *individual runs* scatter? Stays roughly the same as
+    repeats are added -- it is a property of the model.
+``sem`` (standard error, ``std/sqrt(N)``)
+    How uncertain is the *mean*? Shrinks as repeats are added. This is the one
+    that belongs on an error bar.
 ``ci95``
-    Naeherung ``1.96 * sem``. Bei kleinem N (unter etwa 30) ist das optimistisch;
-    fuer zehn Wiederholungen ist der Faktor nach Student eher 2.26.
+    Approximated as ``1.96 * sem``. For small N (below roughly 30) that is
+    optimistic; for ten repeats Student's factor is closer to 2.26.
 
-Konvergenzpruefung
-------------------
-Sind die Laeufe wirklich unabhaengig, muss der Standardfehler mit ``1/sqrt(N)``
-fallen -- im doppelt logarithmischen Bild also eine Gerade mit Steigung -0.5.
-Kommt deutlich weniger heraus, sind die Laeufe korreliert (typischer Fall: ein
-geteilter Zufallsgenerator), und alle Fehlerbalken waeren zu klein.
+Convergence check
+-----------------
+If the runs really are independent, the standard error must fall as
+``1/sqrt(N)`` -- a straight line of slope -0.5 on a log-log plot. Noticeably
+less than that means the runs are correlated (the usual cause: a shared random
+generator), and every error bar would be too small.
 """
 
 from __future__ import annotations
@@ -32,11 +32,10 @@ import numpy as np
 
 
 def stack_series(records: Sequence[Dict[str, Any]], key: str) -> np.ndarray:
-    """Lege die Zeitreihe ``key`` aller Wiederholungen als (N, T)-Matrix ab.
+    """Collect time series ``key`` from all repeats into an ``(N, T)`` matrix.
 
-    Unterschiedlich lange Reihen werden auf die kuerzeste gekuerzt. Das
-    passiert, wenn ein Lauf vorzeitig endet -- besser sichtbar kuerzen als
-    still mit Nullen auffuellen.
+    Series of differing length are truncated to the shortest. That happens when
+    a run ended early -- better to truncate visibly than to pad with zeros.
     """
     series = [np.asarray(r["series"][key], dtype=float) for r in records if key in r["series"]]
     if not series:
@@ -46,7 +45,7 @@ def stack_series(records: Sequence[Dict[str, Any]], key: str) -> np.ndarray:
 
 
 def summarize_series(records: Sequence[Dict[str, Any]], key: str) -> Dict[str, np.ndarray]:
-    """Mittelwert, Streuung und Unsicherheit einer Zeitreihe ueber alle Laeufe."""
+    """Mean, scatter and uncertainty of one time series across all runs."""
     stacked = stack_series(records, key)
     if stacked.size == 0:
         return {}
@@ -73,7 +72,7 @@ def summarize_series(records: Sequence[Dict[str, Any]], key: str) -> Dict[str, n
 
 
 def summarize_scalar(records: Sequence[Dict[str, Any]], key: str) -> Dict[str, float]:
-    """Mittelwert, Streuung und Unsicherheit einer Kennzahl ueber alle Laeufe."""
+    """Mean, scatter and uncertainty of one scalar across all runs."""
     values = np.asarray(
         [float(r["scalars"][key]) for r in records if key in r["scalars"]], dtype=float
     )
@@ -95,26 +94,25 @@ def summarize_scalar(records: Sequence[Dict[str, Any]], key: str) -> Dict[str, f
 
 
 def convergence_check(records: Sequence[Dict[str, Any]], key: str, at_index: int = -1) -> Dict[str, Any]:
-    """Faellt der Standardfehler wie ``1/sqrt(N)``?
+    """Does the standard error fall like ``1/sqrt(N)``?
 
-    Vorgehen: fuer N = 2, 3, ... wird der Standardfehler aus den ersten N
-    Laeufen berechnet und gegen N doppelt logarithmisch aufgetragen. Die
-    Steigung sollte nahe -0.5 liegen.
+    Method: for N = 2, 3, ... compute the standard error from the first N runs
+    and plot it against N on log-log axes. The slope should sit near -0.5.
 
-    Grenze der Aussagekraft: bei zehn Wiederholungen ist die Steigung selbst
-    verrauscht. Alles zwischen etwa -0.8 und -0.2 ist unauffaellig; ein Wert
-    nahe 0 dagegen bedeutet, dass zusaetzliche Laeufe den Mittelwert nicht
-    sicherer machen -- dann sind sie nicht unabhaengig.
+    Limits of the statement: with ten repeats the slope is itself noisy.
+    Anything between roughly -0.8 and -0.2 is unremarkable. A value near zero,
+    on the other hand, means additional runs do not make the mean any more
+    certain -- so they are not independent.
     """
     stacked = stack_series(records, key)
     if stacked.size == 0 or stacked.shape[0] < 3:
-        return {"ok": None, "reason": "zu wenige Wiederholungen fuer eine Aussage",
+        return {"ok": None, "reason": "too few repeats to say anything",
                 "slope": np.nan, "n_values": [], "sem_values": []}
 
     column = stacked[:, at_index]
     column = column[np.isfinite(column)]
     if column.size < 3:
-        return {"ok": None, "reason": "zu wenige endliche Werte",
+        return {"ok": None, "reason": "too few finite values",
                 "slope": np.nan, "n_values": [], "sem_values": []}
 
     n_values: List[int] = []
@@ -127,15 +125,15 @@ def convergence_check(records: Sequence[Dict[str, Any]], key: str, at_index: int
             sem_values.append(sem)
 
     if len(n_values) < 3:
-        # Teilmengen mit Streuung null werden uebersprungen. Bei wenigen
-        # Wiederholungen und einer quantisierten Groesse (n_phys aendert sich
-        # nur in Vielfachen der Paketgroesse dW) bleiben dann zu wenige Punkte
-        # fuer eine Steigung uebrig. Das ist kein Befund, sondern zu wenig Daten.
+        # Subsets with zero scatter are skipped. With few repeats and a
+        # quantised quantity (n_phys only moves in multiples of the packet size
+        # dW) too few points are left to fit a slope. That is a lack of data,
+        # not a finding.
         return {
             "ok": None,
             "reason": (
-                f"nur {len(n_values)} auswertbare Teilmengen -- fuer eine Steigung "
-                "werden mindestens 3 gebraucht (mehr Wiederholungen noetig)"
+                f"only {len(n_values)} usable subsets -- a slope needs at least 3 "
+                "(more repeats required)"
             ),
             "slope": np.nan,
             "n_values": n_values,
@@ -154,22 +152,22 @@ def convergence_check(records: Sequence[Dict[str, Any]], key: str, at_index: int
 
 
 def seeds_are_distinct(records: Sequence[Dict[str, Any]], key: str = "n_comp") -> Dict[str, Any]:
-    """Liefern die Seeds tatsaechlich verschiedene Laeufe?
+    """Do the seeds actually produce different runs?
 
-    Wenn alle Wiederholungen identisch sind, wirkt der Seed nicht -- typisch
-    dafuer, dass ein Untermodul einen eingefrorenen Zufallsgenerator haelt.
-    Dann waere jede Statistik wertlos, obwohl alles fehlerfrei durchlaeuft.
+    If every repeat is identical, the seed has no effect -- the typical cause
+    being a submodule holding a frozen random generator. Any statistics would
+    then be worthless even though everything ran without error.
     """
     stacked = stack_series(records, key)
     if stacked.shape[0] < 2:
-        return {"ok": None, "reason": "nur eine Wiederholung", "n_unique": stacked.shape[0]}
+        return {"ok": None, "reason": "only one repeat", "n_unique": stacked.shape[0]}
     unique_rows = np.unique(stacked, axis=0)
     n_unique = int(unique_rows.shape[0])
     return {
         "ok": n_unique == stacked.shape[0],
         "n_unique": n_unique,
         "n_total": int(stacked.shape[0]),
-        "reason": "" if n_unique == stacked.shape[0] else "mindestens zwei Laeufe sind identisch",
+        "reason": "" if n_unique == stacked.shape[0] else "at least two runs are identical",
     }
 
 
@@ -178,11 +176,11 @@ def conservation_check(
     key: str = "solid_conservation_error",
     tolerance: float = 1e-9,
 ) -> Dict[str, Any]:
-    """Bleibt eine Erhaltungsgroesse ueber alle Seeds erhalten?
+    """Is a conserved quantity conserved across every seed?
 
-    Masse darf nicht vom Zufall abhaengen. Streut dieser Fehler ueber die
-    Seeds, ist das ein starkes Signal fuer einen zustandsabhaengigen Fehler --
-    genau die Sorte, die in einem Einzellauf wie Rauschen aussieht.
+    Mass must not depend on chance. If this error scatters over the seeds, that
+    is a strong signal of a state-dependent defect -- exactly the kind that
+    looks like noise in a single run.
     """
     stats = summarize_scalar(records, key)
     worst = max(abs(stats["min"]), abs(stats["max"])) if stats["n"] > 0 else np.nan

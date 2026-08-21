@@ -54,9 +54,26 @@ test_droplet_20um_instable.py
 audit/
 
 # ---------------------------------------------------------------------------
-# Everything else in this directory (test_all_kernels.py,
-# test_breakage_rate_coleval_parity.py, test_initial_liquid_behavior.py,
-# test_sensitivity.py, ...) is intentionally NOT listed here -- these are
-# documented, general-purpose test/verification scripts, not session debris
-# or audit-specific tooling. Review and commit them normally.
+# Working studies (decision of 2026-08-20).
+#
+# These are documented, general-purpose verification scripts rather than
+# session debris -- an earlier version of this file argued for committing them
+# on exactly that ground. They stay out of the repository anyway, because the
+# supervisor needs the solver and its documentation, not the study scripts
+# built on top of it. They remain on disk and keep working.
+#
+# To include one after all: delete its line here and `git add -f <path>`.
+# ---------------------------------------------------------------------------
+test_agg_p1_sweep_highliquid.py
+test_all_kernels.py
+test_breakage_rate_coleval_parity.py
+test_dry_mixer_kernels.py
+test_initial_liquid_behavior.py
+test_kint_more_liquid.py
+test_sensitivity.py
+test_sensitivity_repeats.py
+
+# Everything else in this directory -- test_powerlaw_rumpf_full.py and the
+# other committed scripts -- stays tracked and is not affected by this file.
+# .gitignore only ever hides UNTRACKED items.
 # ---------------------------------------------------------------------------

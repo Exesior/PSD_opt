@@ -1,24 +1,23 @@
-"""N Wiederholungen desselben Setups mit unabhaengigen Seeds.
+"""N repeats of the same setup with independent seeds.
 
-Vier Bausteine, die aus ``upstream/dev_monorepo`` uebernommen sind:
+Four building blocks, taken from ``upstream/dev_monorepo``:
 
-1. **Unabhaengige Seeds.** Nicht ``seed = base + i`` (benachbarte Seeds koennen
-   korrelierte Zufallsstroeme erzeugen), sondern ``SeedSequence.spawn(N)``.
-   Nur so sind die Wiederholungen statistisch wirklich unabhaengig -- und nur
-   dann bedeutet ein Standardfehler das, was er zu bedeuten vorgibt.
-2. **Reduktion im Worker.** Der Worker gibt Kennzahlen zurueck, nicht den
-   Solver (siehe ``metrics.py``).
-3. **Backpressure.** Es liegen nie mehr als ``workers`` Auftraege gleichzeitig
-   in der Warteschlange. Bei vielen Wiederholungen bleibt der Speicherbedarf
-   damit konstant statt mit N zu wachsen.
-4. **Wiederaufsetzbarkeit.** Jede fertige Wiederholung schreibt sofort ihre
-   eigene ``.npz``-Datei -- atomar (erst ``.tmp``, dann umbenennen), damit ein
-   Abbruch nie eine halbe Datei hinterlaesst. Beim Neustart werden fertige
-   Laeufe eingelesen und nur der Rest gerechnet.
+1. **Independent seeds.** Not ``seed = base + i`` (neighbouring seeds can
+   produce correlated streams) but ``SeedSequence.spawn(N)``. Only then are the
+   repeats statistically independent -- and only then does a standard error
+   mean what it claims to mean.
+2. **Reduction in the worker.** The worker returns figures, not the solver
+   (see ``metrics.py``).
+3. **Backpressure.** Never more than ``workers`` jobs queued at once. With many
+   repeats, memory stays constant instead of growing with N.
+4. **Resumability.** Every finished repeat immediately writes its own ``.npz``
+   file, atomically (write ``.tmp``, then rename), so an abort can never leave
+   half a file behind. On restart, finished runs are read back and only the
+   remainder is computed.
 
-Unterschied zur Vorlage des Betreuers: dort wird der Solver-Zustand per
-``copy.deepcopy(self.__dict__)`` an den Worker geschickt. Hier wandert nur das
-Rezept, und der Worker baut den Solver selbst -- Begruendung in ``builder.py``.
+Difference to the supervisor's template: there the solver state is shipped to
+the worker with ``copy.deepcopy(self.__dict__)``. Here only the recipe travels
+and the worker builds the solver itself -- reasoning in ``builder.py``.
 """
 
 from __future__ import annotations
@@ -42,27 +41,27 @@ from .builder import resolve_params
 # Seeds
 # ---------------------------------------------------------------------------
 def build_seeds(n_repeats: int, base_seed: int = 42) -> List[np.random.SeedSequence]:
-    """Erzeuge N garantiert unabhaengige Seed-Sequenzen aus einem Basiswert.
+    """Create N guaranteed-independent seed sequences from one base value.
 
-    Derselbe ``base_seed`` liefert immer dieselben N Sequenzen -- die ganze
-    Kampagne ist damit reproduzierbar, obwohl jeder einzelne Lauf zufaellig ist.
+    The same ``base_seed`` always yields the same N sequences, so the whole
+    campaign is reproducible even though each individual run is random.
     """
     return list(np.random.SeedSequence(int(base_seed)).spawn(int(n_repeats)))
 
 
 def seed_label(seed_seq: np.random.SeedSequence) -> str:
-    """Kurzer, stabiler Name einer Seed-Sequenz fuer Dateinamen und CSV."""
+    """Short, stable name for a seed sequence, for filenames and CSV."""
     return "-".join(str(k) for k in seed_seq.spawn_key) or "root"
 
 
 # ---------------------------------------------------------------------------
-# Identitaet eines Laufs (fuer die Wiederaufnahme)
+# Identity of a run (for resuming)
 # ---------------------------------------------------------------------------
 def params_fingerprint(params: Dict[str, Any]) -> str:
-    """Kurzer Hash ueber die Parameterwerte.
+    """Short hash over the parameter values.
 
-    Aendert sich ein Parameter, aendert sich der Fingerabdruck -- alte
-    Ergebnisse werden dann nicht faelschlich wiederverwendet.
+    Change a parameter and the fingerprint changes -- old results are then not
+    reused by mistake.
     """
     resolved = resolve_params(params)
     payload = json.dumps(resolved, sort_keys=True, default=str)
@@ -77,16 +76,16 @@ def task_id(params: Dict[str, Any], index: int, seed_seq: np.random.SeedSequence
 # Worker
 # ---------------------------------------------------------------------------
 def _worker_init() -> None:
-    """Laeuft einmal je Worker-Prozess, bevor der erste Auftrag kommt."""
+    """Runs once per worker process, before the first job arrives."""
     pin_threads()
     bootstrap_paths()
 
 
 def run_single(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Ein kompletter Lauf. Laeuft im Worker-Prozess (oder seriell im Haupt).
+    """One complete run. Executes in a worker process (or serially in the main one).
 
-    Wichtig: Modulebene, keine Methode. Windows startet Worker mit ``spawn``,
-    dabei muss die Funktion ueber ihren Modulpfad auffindbar sein.
+    Must stay at module level, not become a method: Windows starts workers with
+    ``spawn``, which requires the function to be findable by its module path.
     """
     _worker_init()
 
@@ -97,13 +96,13 @@ def run_single(payload: Dict[str, Any]) -> Dict[str, Any]:
     seed_seq = payload["seed"]
     index = int(payload["index"])
 
-    # Zwei Zeitmessungen, weil sie Verschiedenes aussagen:
-    #   wall_time_s -- verstrichene Uhrzeit. Bei mehreren Workern auf zu wenigen
-    #                  Kernen enthaelt sie Wartezeit und ist fuer Vergleiche
-    #                  zwischen Konfigurationen unbrauchbar.
-    #   cpu_time_s  -- tatsaechlich verbrauchte Rechenzeit dieses Prozesses.
-    #                  Bleibt unter Konkurrenz belastbar; das ist die Groesse
-    #                  fuer "welche Einstellung ist teurer".
+    # Two timings, because they say different things:
+    #   wall_time_s -- elapsed clock time. With several workers on too few
+    #                  cores it includes waiting, and is useless for comparing
+    #                  configurations.
+    #   cpu_time_s  -- CPU time this process actually consumed. Stays
+    #                  meaningful under contention; this is the one that
+    #                  answers "which setting costs more".
     t_wall = time.time()
     t_cpu = time.process_time()
     solver = build_reference_solver(params, seed=seed_seq, verbose=bool(payload.get("verbose", False)))
@@ -126,15 +125,15 @@ def run_single(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Persistenz
+# Persistence
 # ---------------------------------------------------------------------------
 def _save_record(record: Dict[str, Any], npz_path: str) -> None:
-    """Schreibe eine Wiederholung atomar auf die Platte.
+    """Write one repeat to disk atomically.
 
-    Erst in eine ``.tmp``-Datei, dann umbenennen: ``os.replace`` ist atomar,
-    also existiert die Zieldatei entweder vollstaendig oder gar nicht. Ein
-    Abbruch mitten im Schreiben kann so keine halbe Datei hinterlassen, die
-    beim naechsten Start als "fertig" gelesen wuerde.
+    First into a ``.tmp`` file, then rename: ``os.replace`` is atomic, so the
+    target file either exists complete or not at all. An abort mid-write can
+    therefore not leave a half file that the next start would read as
+    "finished".
     """
     os.makedirs(os.path.dirname(npz_path), exist_ok=True)
     payload: Dict[str, Any] = {}
@@ -146,15 +145,15 @@ def _save_record(record: Dict[str, Any], npz_path: str) -> None:
     payload["meta__seed_label"] = np.asarray(str(record["seed_label"]))
     payload["meta__task_id"] = np.asarray(str(record["task_id"]))
 
-    # Die Endung ".npz" muss stehen bleiben: np.savez_compressed haengt sie
-    # sonst selbst an und schreibt in eine andere Datei als erwartet.
+    # The ".npz" suffix has to stay: otherwise np.savez_compressed appends it
+    # itself and writes to a different file than intended.
     tmp_path = npz_path[: -len(".npz")] + ".tmp.npz"
     np.savez_compressed(tmp_path, **payload)
     os.replace(tmp_path, npz_path)
 
 
 def _load_record(npz_path: str) -> Optional[Dict[str, Any]]:
-    """Lies eine gespeicherte Wiederholung zurueck; ``None`` bei Defekt."""
+    """Read one stored repeat back; ``None`` if it is unreadable."""
     try:
         with np.load(npz_path, allow_pickle=False) as data:
             series = {
@@ -179,15 +178,13 @@ def _load_record(npz_path: str) -> Optional[Dict[str, Any]]:
 
 
 def _warn_about_foreign_fingerprints(output_dir: str, current: str, n_repeats: int) -> None:
-    """Melde, wenn im Pool Ergebnisse mit anderem Fingerabdruck liegen.
+    """Report results in the pool that carry a different fingerprint.
 
-    Ohne diesen Hinweis sieht ein vollstaendiger Neustart der Rechnung
-    aus wie ein Fehler. Tatsaechlich ist es die richtige Reaktion: der
-    Fingerabdruck deckt ALLE Parameter ab, also macht schon das Hinzufuegen
-    eines neuen Schluessels zu ``REFERENCE_PARAMS`` die alten Ergebnisse
-    formal ungueltig -- auch wenn der neue Wert dem bisherigen Verhalten
-    entspricht. Lieber einmal zu viel rechnen als zwei Konfigurationen
-    stillschweigend vermischen.
+    Without this note, a complete recomputation looks like a failure. It is in
+    fact the correct response: the fingerprint covers ALL parameters, so merely
+    adding a new key to ``REFERENCE_PARAMS`` formally invalidates the old
+    results -- even when the new value matches the previous behaviour. Better
+    to compute once too often than to silently mix two configurations.
     """
     pool_dir = os.path.join(output_dir, "repeats")
     if not os.path.isdir(pool_dir):
@@ -201,24 +198,23 @@ def _warn_about_foreign_fingerprints(output_dir: str, current: str, n_repeats: i
             others[prefix] = others.get(prefix, 0) + 1
     if not others:
         return
-    listed = ", ".join(f"{key} ({count} Dateien)" for key, count in sorted(others.items()))
+    listed = ", ".join(f"{key} ({count} files)" for key, count in sorted(others.items()))
     print(
-        f"[repeats] HINWEIS: im Pool liegen Ergebnisse mit anderem Parameter-Fingerabdruck "
-        f"({listed}), aktuell ist '{current}'. Es wird deshalb komplett neu gerechnet "
-        f"({n_repeats} Laeufe). Ursache ist eine geaenderte oder neu hinzugefuegte "
-        f"Parameterangabe -- nicht ein Fehler im Cache.",
+        f"[repeats] NOTE: the pool holds results with a different parameter fingerprint "
+        f"({listed}); the current one is '{current}'. Everything is therefore recomputed "
+        f"({n_repeats} runs). The cause is a changed or newly added parameter -- "
+        f"not a broken cache.",
         flush=True,
     )
 
 
 def _run_single_process_entry(payload: Dict[str, Any]) -> None:
-    """Prozess-Einstiegspunkt fuer den Zeitlimit-Pfad.
+    """Process entry point for the timeout path.
 
-    Gibt bewusst nichts ueber IPC zurueck: ``run_single`` speichert sein
-    Ergebnis bereits selbst atomar als ``.npz`` (siehe ``_save_record``). Der
-    Elternprozess erkennt Erfolg daran, dass genau diese Datei nach Prozessende
-    existiert -- unabhaengig davon, ob der Prozess sauber durchgelaufen oder
-    per Zeitlimit hart beendet wurde.
+    Deliberately returns nothing over IPC: ``run_single`` already stores its
+    result atomically as ``.npz`` (see ``_save_record``). The parent recognises
+    success by that file existing after the process ends -- regardless of
+    whether the process finished cleanly or was killed by the time limit.
     """
     _worker_init()
     try:
@@ -236,23 +232,21 @@ def _run_repeats_with_timeout(
     n_repeats: int,
     on_progress: Optional[Callable[[Dict[str, Any], int, int], None]],
 ) -> int:
-    """Wie der normale Parallelpfad, aber mit hartem Zeitlimit je Wiederholung.
+    """Like the normal parallel path, but with a hard time limit per repeat.
 
-    ``ProcessPoolExecutor`` eignet sich dafuer nicht: ``future.result(timeout=...)``
-    gibt zwar die Kontrolle an den Aufrufer zurueck, die haengende Berechnung
-    laeuft im Worker-Prozess des Pools unbegrenzt weiter und blockiert diesen
-    Platz fuer den Rest der Kampagne -- bei 250 geplanten Laeufen wuerde ein
-    einziger haengender Fall einen von wenigen parallelen Slots dauerhaft
-    kosten. Deshalb bekommt hier jede Wiederholung einen eigenen
-    ``multiprocessing.Process``, der bei Ueberschreitung hart beendet wird
-    (``terminate()``, nach kurzer Frist ``kill()``) und den Platz danach frei
-    gibt.
+    ``ProcessPoolExecutor`` is not suitable here: ``future.result(timeout=...)``
+    does return control to the caller, but the hung computation keeps running
+    in the pool's worker process indefinitely and blocks that slot for the rest
+    of the campaign -- with 250 planned runs, a single hung case would
+    permanently cost one of the few parallel slots. Each repeat therefore gets
+    its own ``multiprocessing.Process`` here, which is killed on overrun
+    (``terminate()``, then ``kill()`` after a short grace period) and frees the
+    slot afterwards.
 
-    Eine per Zeitlimit abgebrochene Wiederholung hinterlaesst keine ``.npz``
-    (der letzte Schreibschritt ist atomar, siehe ``_save_record`` -- entweder
-    ganz oder gar nicht). Sie taucht deshalb im Ergebnis einfach nicht auf,
-    genau wie eine Wiederholung, die nie gestartet wurde. Bei ``resume=True``
-    wird sie beim naechsten Aufruf automatisch erneut versucht.
+    A repeat aborted by the time limit leaves no ``.npz`` behind (the final
+    write is atomic, see ``_save_record`` -- all or nothing). It therefore
+    simply does not appear in the result, exactly like a repeat that was never
+    started. With ``resume=True`` it is retried automatically on the next call.
     """
     ctx = mp.get_context("spawn")
     active: Dict[int, tuple] = {}  # index -> (process, payload, start_time)
@@ -286,9 +280,9 @@ def _run_repeats_with_timeout(
                 proc.kill()
                 proc.join(timeout=10)
             print(
-                f"[repeats] Wiederholung {idx} hat das Zeitlimit von "
-                f"{max_wall_time_s / 3600.0:.2f} h ueberschritten und wurde abgebrochen. "
-                f"Wird bei einem spaeteren Aufruf mit resume=True erneut versucht.",
+                f"[repeats] repeat {idx} exceeded the time limit of "
+                f"{max_wall_time_s / 3600.0:.2f} h and was aborted. "
+                f"It will be retried on a later call with resume=True.",
                 flush=True,
             )
             finished_now.append(idx)
@@ -304,14 +298,13 @@ def _run_repeats_with_timeout(
                 if on_progress is not None:
                     on_progress(record, done_count, n_repeats)
             elif idx not in timed_out_now:
-                # Prozess ist beendet, aber keine .npz vorhanden: run_single
-                # ist mit einem Fehler abgebrochen (siehe traceback oben in
-                # der Ausgabe). Kein RuntimeError hier -- ein einzelner
-                # fehlgeschlagener Fall soll bei einem grossen Sweep nicht die
-                # gesamte Kampagne stoppen; die Luecke bleibt sichtbar, weil
-                # dieser Index in `records` leer bleibt.
-                print(f"[repeats] Wiederholung {idx} ist ohne Ergebnisdatei beendet "
-                      f"(vermutlich Fehler im Lauf, siehe Ausgabe oben).", flush=True)
+                # Process ended but no .npz exists: run_single aborted with an
+                # error (its traceback is above in the output). No RuntimeError
+                # here -- a single failed case should not stop a large sweep,
+                # and the gap stays visible because this index remains empty in
+                # `records`.
+                print(f"[repeats] repeat {idx} ended without a result file "
+                      f"(probably an error in the run, see output above).", flush=True)
 
             if next_idx < len(payloads):
                 new_payload = payloads[next_idx]
@@ -322,7 +315,7 @@ def _run_repeats_with_timeout(
 
 
 # ---------------------------------------------------------------------------
-# Kampagne
+# Campaign
 # ---------------------------------------------------------------------------
 def run_repeats(
     params: Optional[Dict[str, Any]] = None,
@@ -335,61 +328,58 @@ def run_repeats(
     warn_on_foreign_results: bool = False,
     max_wall_time_s: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Fuehre ``n_repeats`` Wiederholungen aus und gib die Ergebnisse zurueck.
+    """Run ``n_repeats`` repeats and return the results.
 
     Parameters
     ----------
     params
-        Rezept, siehe ``builder.REFERENCE_PARAMS``.
+        Recipe, see ``builder.REFERENCE_PARAMS``.
     n_repeats
-        Anzahl unabhaengiger Wiederholungen (= Anzahl Seeds).
+        Number of independent repeats (= number of seeds).
     base_seed
-        Basiswert; bestimmt reproduzierbar alle N Seeds.
+        Base value; reproducibly determines all N seeds.
     workers
-        1 = seriell (gut zum Debuggen, volle Fehlermeldungen).
-        >1 = so viele Prozesse gleichzeitig.
+        1 = serial (good for debugging, full error messages).
+        >1 = that many processes at once.
     output_dir
-        Ablage der ``.npz``-Dateien. ``None`` = nichts speichern.
+        Where the ``.npz`` files go. ``None`` = store nothing.
     resume
-        Bereits vorhandene, gueltige ``.npz``-Dateien wiederverwenden.
+        Reuse existing, valid ``.npz`` files.
     on_progress
-        Rueckruf ``(record, fertig, gesamt)`` nach jeder Wiederholung.
+        Callback ``(record, done, total)`` after each repeat.
     warn_on_foreign_results
-        Nur fuer Aufrufer, die **eine einzige** Konfiguration in einem eigenen
-        Verzeichnis rechnen. Dort heisst ein fremder Fingerabdruck im Pool
-        tatsaechlich "die Parameter haben sich geaendert", und der Hinweis
-        erklaert, warum neu gerechnet wird.
+        Only for callers that compute **a single** configuration in their own
+        directory. There, a foreign fingerprint in the pool really does mean
+        "the parameters changed", and the note explains why everything is being
+        recomputed.
 
-        Eine Studie mit vielen Zellen teilt sich dagegen absichtlich einen
-        Pool -- dort hat jede Zelle ihren eigenen Fingerabdruck, und der
-        Hinweis waere fuer jede neue Zelle ein Fehlalarm. Deshalb standardmaessig
-        aus.
+        A study with many cells deliberately shares one pool -- there each cell
+        has its own fingerprint, and the note would be a false alarm for every
+        new cell. Hence off by default.
     max_wall_time_s
-        Hartes Zeitlimit je Wiederholung [s]. ``None`` (Default) = kein Limit,
-        wie bisher. Ist gesetzt, bekommt jede Wiederholung einen eigenen
-        Prozess statt einen geteilten Pool-Platz, damit ein haengender Lauf
-        hart beendet werden kann, ohne einen Worker-Slot fuer den Rest der
-        Kampagne zu blockieren. Erfordert ``output_dir`` (das Ergebnis eines
-        rechtzeitig fertigen Laufs wird ueber die gespeicherte ``.npz``-Datei
-        erkannt, nicht ueber einen Rueckgabewert -- ein per Zeitlimit
-        beendeter Prozess kann keinen regulaeren Rueckgabewert mehr liefern).
-        Ein abgebrochener Lauf fehlt anschliessend einfach im Ergebnis (wie
-        einer, der nie gestartet wurde) und wird bei ``resume=True`` spaeter
-        automatisch nachgeholt.
+        Hard time limit per repeat [s]. ``None`` (default) = no limit. When
+        set, each repeat gets its own process instead of a shared pool slot, so
+        a hung run can be killed without blocking a worker slot for the rest of
+        the campaign. Requires ``output_dir``: the result of a run that
+        finished in time is recognised through its stored ``.npz`` file, not
+        through a return value -- a process killed by the time limit can no
+        longer return one. An aborted run simply is missing from the result
+        (like one that never started) and is picked up later with
+        ``resume=True``.
 
     Returns
     -------
     list of dict
-        Ein Eintrag je Wiederholung, sortiert nach Index. Unvollstaendige
-        Laeufe fehlen -- die Liste kann also kuerzer als ``n_repeats`` sein.
+        One entry per repeat, ordered by index. Incomplete runs are missing, so
+        the list may be shorter than ``n_repeats``.
     """
     params = resolve_params(params)
     workers = max(1, int(workers))
     if max_wall_time_s is not None and not output_dir:
         raise ValueError(
-            "max_wall_time_s erfordert output_dir: ein per Zeitlimit hart beendeter "
-            "Prozess kann keinen Rueckgabewert mehr liefern, das Ergebnis wird stattdessen "
-            "ueber die gespeicherte .npz-Datei erkannt."
+            "max_wall_time_s requires output_dir: a process killed by the time limit "
+            "can no longer return a value, so the result is recognised through the "
+            "stored .npz file instead."
         )
     seeds = build_seeds(n_repeats, base_seed)
 
@@ -409,7 +399,7 @@ def run_repeats(
 
     records: List[Optional[Dict[str, Any]]] = [None] * n_repeats
 
-    # --- Wiederaufnahme ---------------------------------------------------
+    # --- resume -----------------------------------------------------------
     pending_payloads = payloads
     if resume and output_dir:
         recovered = 0
@@ -423,8 +413,8 @@ def run_repeats(
                 still_open.append(payload)
         pending_payloads = still_open
         if recovered:
-            print(f"[repeats] {recovered}/{n_repeats} Wiederholungen bereits vorhanden, "
-                  f"es werden noch {len(pending_payloads)} gerechnet.", flush=True)
+            print(f"[repeats] {recovered}/{n_repeats} repeats already present, "
+                  f"{len(pending_payloads)} still to compute.", flush=True)
         elif pending_payloads and warn_on_foreign_results:
             _warn_about_foreign_fingerprints(output_dir, params_fingerprint(params), n_repeats)
 
@@ -433,14 +423,14 @@ def run_repeats(
 
     done_count = n_repeats - len(pending_payloads)
 
-    # Threads schon im Elternprozess begrenzen: die Worker erben die
-    # Umgebungsvariablen, und sie muessen vor dem numpy-Import wirken.
+    # Pin threads in the parent already: workers inherit the environment
+    # variables, and they must take effect before numpy is imported.
     pin_threads()
 
     if max_wall_time_s is not None:
-        # Eigener Pfad fuer BEIDE Faelle (workers==1 und workers>1): siehe
-        # Docstring von _run_repeats_with_timeout fuer die Begruendung, warum
-        # ProcessPoolExecutor dafuer nicht reicht.
+        # Separate path for BOTH cases (workers==1 and workers>1): see the
+        # docstring of _run_repeats_with_timeout for why ProcessPoolExecutor
+        # is not enough.
         done_count = _run_repeats_with_timeout(
             pending_payloads, workers, float(max_wall_time_s),
             records, done_count, n_repeats, on_progress,
@@ -475,7 +465,7 @@ def run_repeats(
                         for other in queue:
                             other.cancel()
                         raise RuntimeError(
-                            f"[repeats] Wiederholung {index} ist fehlgeschlagen: {exc}\n"
+                            f"[repeats] repeat {index} failed: {exc}\n"
                             + traceback.format_exc()
                         ) from exc
                     records[record["index"]] = record
@@ -493,14 +483,14 @@ def compare_serial_parallel(
     base_seed: int = 42,
     workers: int = 2,
 ) -> Dict[str, Any]:
-    """Abnahmepruefung: liefert der Parallelbetrieb dieselben Zahlen?
+    """Acceptance check: does parallel execution produce the same numbers?
 
-    Bei gleichem Seed muss ein Lauf im Worker-Prozess bitgenau dasselbe
-    ergeben wie im Hauptprozess. Weicht etwas ab, ist Zustand ueber die
-    Prozessgrenze gewandert, der dort nicht hingehoert.
+    With the same seed, a run in a worker process must give bit-for-bit the
+    same result as one in the main process. Any deviation means state crossed
+    the process boundary that should not have.
 
-    Zusaetzlich wird geprueft, dass verschiedene Seeds *unterschiedliche*
-    Ergebnisse liefern -- sonst wirkt der Seed gar nicht.
+    Also checks that different seeds give *different* results -- otherwise the
+    seed has no effect at all.
     """
     serial = run_repeats(params, n_repeats, base_seed, workers=1, output_dir=None, resume=False)
     parallel = run_repeats(params, n_repeats, base_seed, workers=workers, output_dir=None, resume=False)
@@ -514,7 +504,7 @@ def compare_serial_parallel(
             if a.shape != b.shape:
                 return {
                     "identical": False,
-                    "reason": f"unterschiedliche Laenge in '{key}': {a.shape} vs {b.shape}",
+                    "reason": f"different length in '{key}': {a.shape} vs {b.shape}",
                     "seeds_differ": None,
                 }
             both = np.isfinite(a) & np.isfinite(b)

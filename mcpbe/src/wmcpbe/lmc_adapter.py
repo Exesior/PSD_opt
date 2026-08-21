@@ -1,9 +1,51 @@
-﻿from __future__ import annotations
+"""Fragment size distributions from Lattice Monte Carlo, instead of a formula.
+
+When a particle breaks, ``mcpbe_break.py`` needs the size distribution of the
+fragments. The built-in route samples it from an analytic power law. This
+module is the alternative: the distribution comes from Lattice Monte Carlo
+(LMC) simulations of bond breaking in an actual aggregate.
+
+Four adapters, in increasing order of how much they compute at runtime:
+
+``LMCTableAdapter``
+    Precomputed CDF tables on a grid over ``(A, X1)`` -- aggregate size and
+    composition. Sampling is a table lookup plus interpolation. Cheapest.
+
+``LMCRankAdapter``
+    Tables of rank statistics rather than full CDFs; reconstructs the
+    distribution from order statistics.
+
+``LMCCopulaAdapter``
+    Marginals (empirical or Beta) plus a copula (Gaussian or vine) for the
+    dependence between fragments. Reproduces correlations a per-fragment
+    marginal cannot.
+
+``LMCLiveAdapter``
+    Runs an actual LMC simulation per breakage event. Most faithful, by far
+    the most expensive. Raises :class:`LMCLiveFallback` when a case is outside
+    what it can handle, so the caller can drop back to a table.
+
+All four share :class:`LMCBaseAdapter`, which owns the ``(A, X1)`` grid,
+interpolation in ``(log A, X1)``, and the conversion between the table's
+aggregate scale ``A0_tab`` and the run's ``A0_run``.
+
+Requires the ``lmc`` package, imported unconditionally below -- see
+``mcpbe/docs/Befunde_2026-08-20.md``, D-20.
+"""
+
+from __future__ import annotations
 import numpy as np
 from typing import Tuple, Dict, Any, Optional, List
 import math
 from numba import njit
-from lmc import LMCSimulator
+try:
+    from lmc import LMCSimulator
+except ImportError:
+    # Only LMCLiveAdapter needs this; the table/rank/copula adapters below do
+    # not, and must stay importable without the optional `lmc` package
+    # installed. The clear failure happens where LMCSimulator is actually
+    # instantiated (LMCLiveAdapter.configure), not here.
+    LMCSimulator = None
 
 
 # ==============================
@@ -1298,6 +1340,11 @@ class LMCLiveAdapter:
             self.delta_cells = float(delta_cells)
 
         if rebuild or (self._sim is None):
+            if LMCSimulator is None:
+                raise ImportError(
+                    "LMCLiveAdapter requires the 'lmc' package. "
+                    "Install it from the repo: pip install -e lmc/"
+                )
             self._sim = LMCSimulator(
                 STR=self.STR,
                 NO_FRAG=self.NO_FRAG,
@@ -2083,6 +2130,12 @@ try:
 except Exception:
     _TORCH_OK = False
 
+# Base class for the nn.Module subclasses below. Falls back to `object` so the
+# class statements themselves stay import-safe without torch; instantiating
+# them still fails with a clear NameError on the first `torch.` call inside
+# __init__, since `torch` itself is never bound in that case.
+_TorchModule = torch.nn.Module if _TORCH_OK else object
+
 
 class LMCFlowAdapter(LMCBaseAdapter):
     """
@@ -2137,7 +2190,7 @@ class LMCFlowAdapter(LMCBaseAdapter):
             self.K = int(self.mix_meta["K"])
 
     # ====== ä¸‹é¢æ˜¯å’Œè®­ç»ƒè„šæœ¬åŒæž„çš„å‡ ä¸ªå°æ¨¡å— ======
-    class _CondMLP(torch.nn.Module):
+    class _CondMLP(_TorchModule):
         def __init__(self, in_dim: int, out_dim: int, hidden: int = 128, n_layers: int = 3):
             super().__init__()
             layers = []
@@ -2152,7 +2205,7 @@ class LMCFlowAdapter(LMCBaseAdapter):
         def forward(self, x):
             return self.net(x)
 
-    class _RealNVPCoupling(torch.nn.Module):
+    class _RealNVPCoupling(_TorchModule):
         def __init__(self, dim: int, cond_dim: int, mask: torch.Tensor, hidden: int = 128):
             super().__init__()
             self.dim = dim
@@ -2187,7 +2240,7 @@ class LMCFlowAdapter(LMCBaseAdapter):
             logdet = -((1.0 - m) * s).sum(dim=1)
             return x, logdet
 
-    class _CondRealNVP(torch.nn.Module):
+    class _CondRealNVP(_TorchModule):
         def __init__(self, dim: int, cond_dim: int, n_flows: int = 6, hidden: int = 128):
             super().__init__()
             masks = []

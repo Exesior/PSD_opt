@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Solving multi-component population balance equations for agglomerating systems via MONTE CARLO method.
 @author: Frank Rhein, frank.rhein@kit.edu, Luzia Gramling, Institute of Mechanical Process Engineering and Mechanics

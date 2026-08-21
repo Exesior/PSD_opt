@@ -1,10 +1,10 @@
-"""Stufe 0 gegen die produktiven JIT-Kernel.
+"""Stage 0 against the production JIT kernels.
 
-Prueft:
-  (a) rebuild_r_pairdelta_moment == rebuild_r_pairdelta_pairwise  (die Herleitung)
-  (b) parallel == serial                                          (Dispatch-Zwillinge)
-  (c) separable_tables reproduziert kernel.compute_beta            (die f_k/g_k-Tabellen)
-  (d) pick_partner_pairdelta summiert auf partner_total == R_i*/W_i (Sampler-Konsistenz)
+Checks:
+  (a) rebuild_r_pairdelta_moment == rebuild_r_pairdelta_pairwise  (the derivation)
+  (b) parallel == serial                                          (dispatch twins)
+  (c) separable_tables reproduces kernel.compute_beta              (the f_k/g_k tables)
+  (d) pick_partner_pairdelta sums to partner_total == R_i*/W_i     (sampler consistency)
 """
 
 from __future__ import annotations
@@ -161,24 +161,23 @@ def main():
         ok &= max(e1, e2) <= 1e-13
 
     print("\n(c2) _beta_of vs. kernel.compute_beta")
-    # Fuer die separablen Kernel deckt (c) den Weg ueber die f_k/g_k-Tabellen ab.
-    # Die nicht separablen erreichen den kompilierten Pfad NUR ueber _beta_of,
-    # also muss genau dort die Gleichheit mit compute_beta geprueft werden.
+    # For the separable kernels, (c) already covers the route through the
+    # f_k/g_k tables. The non-separable ones reach the compiled path ONLY via
+    # _beta_of, so equality with compute_beta has to be checked exactly there.
     #
-    # Massstab: relative Uebereinstimmung fuer alle, Bitgleichheit nur fuer die
-    # Kernel in _BITEXACT. Der Unterschied ist Absicht, nicht Nachlaessigkeit:
-    #   * `sum` rechnet in _beta_sum_jit `4/3*pi*r**3`, in _beta_of dagegen
-    #     `_PI43*r*r*r`;
-    #   * `brownian` multipliziert corr_beta in _beta_brownian_jit separat,
-    #     waehrend _beta_of alles in p0 faltet.
-    # Beides ist algebraisch identisch und weicht nur im letzten Bit ab -
-    # dieselbe Klasse von Abweichung, die (a) fuer die Momentenform mit 1e-13
-    # zulaesst. Eine Bitgleichheit zu fordern wuerde diese beiden Kernel
-    # grundlos rot faerben.
+    # Standard: relative agreement for all, bit equality only for the kernels
+    # in _BITEXACT. The difference is deliberate, not sloppiness:
+    #   * `sum` computes `4/3*pi*r**3` in _beta_sum_jit but `_PI43*r*r*r` in
+    #     _beta_of;
+    #   * `brownian` multiplies corr_beta separately in _beta_brownian_jit,
+    #     while _beta_of folds everything into p0.
+    # Both are algebraically identical and differ only in the last bit -- the
+    # same class of deviation that (a) allows at 1e-13 for the moment form.
+    # Demanding bit equality would flag these two kernels red for no reason.
     #
-    # EKE und ETM sind dagegen bewusst so geschrieben, dass beide Seiten
-    # dieselbe Formel in derselben Klammerung rechnen. Dort IST Bitgleichheit
-    # die Zusage, und ein Bruch davon soll auffallen.
+    # EKE and ETM, by contrast, are written so that both sides evaluate the
+    # same formula with the same bracketing. There bit equality IS the promise,
+    # and a break of it should show up.
     _BITEXACT = {"eke_darelius2005", "etm_darelius2005"}
     for name, kid in KERNEL_IDS.items():
         kernel = get_aggregation_kernel(name, **KERNEL_ARGS[name])
@@ -214,8 +213,8 @@ def main():
                     if W[i] <= 0 or d[i] <= 0 or r[i] <= 0:
                         continue
                     total = r[i] / W[i]
-                    # u_sel -> 1 laeuft den kompletten Loop durch; acc endet auf
-                    # der Gesamtsumme, also muss der letzte Treffer existieren.
+                    # u_sel -> 1 walks the whole loop; acc ends on the total
+                    # sum, so the last hit is guaranteed to exist.
                     acc = 0.0
                     for j in range(n):
                         jj, wj = pick_partner_pairdelta(

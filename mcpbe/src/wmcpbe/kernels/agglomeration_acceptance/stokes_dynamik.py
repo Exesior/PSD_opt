@@ -69,7 +69,7 @@ Velocity model:
     (`U_coll_ref`'s de-facto meaning already depended on which `n_ref` was
     picked). Taking the DEM number directly is more honest about being a
     placeholder, and it is one free parameter fewer for the eventual joint fit
-    against experimental data - see `docs/Nucleation_Propensity_Blockade.md`
+    against experimental data - see `mcpbe/docs/historical/Nucleation_Propensity_Blockade.md`
     and `kernels/README.md` for the same reasoning applied to the mixer-speed
     exponents generally.
 
