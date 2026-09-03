@@ -9,16 +9,26 @@ be significantly reduced without affecting mass conservation.
 
 Key Features
 ------------
-- Hash-based index for O(1) average-case lookup (configurable)
+- Two lookup strategies (``use_hash_index``): a vectorised linear scan over the
+  active slice (default) or a hash index with O(1) average-case lookup. The
+  solver picks via ``merger_lookup`` -- see ``mcpbe_base._MERGER_LOOKUP_MODES``.
 - Tolerance-based matching for intensive properties (default: 0.0001% relative)
 - Unified API for breakage fragments and agglomeration children
 - Mass-conserving by design: only W is modified, never volumes or liquid
 
 Performance Characteristics
 ---------------------------
-- Direct overhead per check: ~100-150 CPU cycles (hash lookup + key computation)
-- Break-even merge probability: ~84% for net cycle savings per event
-- Long-term benefit: Reduced n_comp leads to O(n²) savings in propensity rebuilds
+- The hash index is O(1) per lookup but its key is built from
+  V_dry/porosity/saturation, which the continuous processes rewrite for almost
+  every particle every event -- so the whole index is re-keyed every event, and
+  that scalar re-keying dwarfs the lookup saving. The linear scan compares the
+  target against all active particles in one vectorised pass (~100 us at
+  n~=3000) and has zero upkeep. Measured on powerlaw_rumpf_dynamic_full:
+  431 s (hash) vs 55 s (scan). The two are statistically equivalent (mass
+  exact, PSD within ~1 %) and usually bit-identical; they diverge only when
+  several particles match within tolerance and the two lookups break the tie
+  differently. See docs/historical/Merger_Lookup_Strategy_2026-09.md.
+- Long-term benefit: reduced n_comp leads to O(n^2) savings in propensity rebuilds
 
 Mass Conservation Note
 ----------------------
@@ -94,9 +104,9 @@ class ParticleMerger:
     edge cases from binning approximation.
     """
     
-    def __init__(self, 
+    def __init__(self,
                  solver: 'MCPBEBase',
-                 use_hash_index: bool = True,
+                 use_hash_index: bool = False,
                  tol_rel: float = 1e-6,
                  tol_abs_liquid: float = 1e-30,
                  tol_abs_frac: float = 1e-6,
@@ -104,14 +114,16 @@ class ParticleMerger:
                  bin_digits_poro: int = 4):
         """
         Initialize the particle merger.
-        
+
         Parameters
         ----------
         solver : MCPBEBase
             Parent solver instance that holds particle arrays
         use_hash_index : bool, optional
-            Enable hash-based O(1) lookup (default: True). Disable for very
-            small systems (<100 particles) where linear scan is faster.
+            Hash-based O(1) lookup (default: False -> vectorised linear scan).
+            The solver normally sets this via ``merger_lookup``; the hash index
+            only pays off when its key is stable, which it is not while the
+            continuous processes are active. See the module docstring.
         tol_rel : float, optional
             Relative tolerance for matching intensive properties (default: 1e-6)
         tol_abs_liquid : float, optional
@@ -207,7 +219,13 @@ class ParticleMerger:
         This is the main entry point for breakage and agglomeration code. It
         attempts to find an existing particle with matching intensive properties.
         If found, the weight is increased; otherwise, a new particle is created.
-        
+
+        Determinism: the linear scan returns the LOWEST matching index, so a run
+        is reproducible regardless of dict/set ordering. The hash path iterates a
+        Python set and may return a different (still valid) match. This is why
+        the default ``merger_lookup`` is ``"scan"`` -- see
+        ``mcpbe_base._MERGER_LOOKUP_MODES``.
+
         Parameters
         ----------
         V_solid_target : np.ndarray

@@ -97,7 +97,7 @@ REFERENCE_PARAMS: Dict[str, Any] = {
     # reference run uses the solver default of 1e-6. That value is repeated
     # here so the reference stays bit-for-bit reproducible.
     "merger_tolerance": 1e-6,        # -> solver._fragment_merge_tol
-    "merger_use_hash_index": True,   # -> solver._merger_use_hash_index
+    "merger_lookup": "scan",         # -> solver.merger_lookup (scan|hash|hash_lazy)
     "enable_particle_merging": True, # -> solver._enable_particle_merging
 }
 
@@ -202,9 +202,12 @@ def build_reference_solver(params: Dict[str, Any], seed: int, verbose: bool = Fa
 
     # Merger settings: read by the solver in _ensure_particle_merger(), which
     # in turn runs from _initialize_samplers(). They therefore have to be set
-    # BEFORE _initialize_samplers().
+    # BEFORE _initialize_samplers(). MCPBESolver(init=True) already builds a
+    # merger in the constructor; _ensure_particle_merger() rebuilds it here when
+    # the config below no longer matches, so setting these after construction
+    # takes effect.
     solver._fragment_merge_tol = float(p["merger_tolerance"])
-    solver._merger_use_hash_index = bool(p["merger_use_hash_index"])
+    solver.merger_lookup = str(p["merger_lookup"])
     solver._enable_particle_merging = bool(p["enable_particle_merging"])
 
     # V_flat layout for dim=1:

@@ -1,5 +1,10 @@
 """Bit-exact regression fingerprints for the WMCPBE solver.
 
+.. note::
+   ``tests/golden_reference.OUTDATED.json`` (2026-07-31) is stale -- it no longer
+   matches any scenario after the mixer-speed integration, F-07 and later work.
+   Record a fresh baseline on a known-good state before relying on ``check``.
+
 Usage
 -----
 Record a baseline (run this on the *unmodified* code first)::

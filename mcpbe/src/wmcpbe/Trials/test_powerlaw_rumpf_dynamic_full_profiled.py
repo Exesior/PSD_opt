@@ -1,0 +1,869 @@
+"""
+Profiled variant of ``test_powerlaw_rumpf_dynamic_full.py``.
+
+Physically this is the SAME run, line for line, as
+``test_powerlaw_rumpf_dynamic_full.py`` (same seed, same config, same kernels,
+same T_TOTAL). The only additions are:
+
+    1. a ``cProfile`` wrapper around ``solver.solve(...)`` -- the call that runs
+       the whole Monte-Carlo loop, i.e. the "MCPBESolver_run()" of the task
+       description;
+    2. a ``pstats`` report printed after the run: the top functions by
+       cumulative time (cumtime) and by own time (tottime);
+    3. a ``.prof`` dump so the same data can be opened later in snakeviz / tuna
+       / ``python -m pstats``.
+
+Nothing in the project is touched -- this is a stand-alone script in Trials/.
+
+    aggregation   eke_darelius2005      (mixer-speed driven)
+    acceptance    stokes_dynamik
+    breakage      powerlaw_rumpf_dynamic
+
+!! NOT CALIBRATED !!  AGG_COEFFICIENT and PL_P1 are carried over unchanged from
+the shear run; see the docstring of the non-profiled script. This harness exists
+to measure WHERE the time goes, not to produce a physical result.
+
+cProfile caveat for this codebase
+---------------------------------
+cProfile only sees Python-level calls. Numba ``@njit`` kernels (the propensity
+rebuild ``rebuild_r_array_*``, the Fenwick sampler, JIT mass helpers) show up as
+ONE opaque call each -- their internal time is attributed to that single call,
+not broken down further. The first hit of each JIT function also still includes
+its one-off compilation cost. So read the report as "how much time is spent in
+Python glue vs. handed off to compiled code", and expect a numba/compiler blip
+near the top from first-call compilation.
+
+This script deliberately does NOT warm up the JIT first (it mirrors the
+non-profiled test, which runs the solver exactly once). The repo's own timing
+harness, ``mcpbe/tests/bench/profile_wmcpbe.py``, calls ``warmup()`` before
+profiling for a compile-free picture -- run that if the numba/LLVM frames here
+crowd out the real hot paths.
+
+Usage
+-----
+    PYTHONIOENCODING=utf-8 python -m wmcpbe.Trials.test_powerlaw_rumpf_dynamic_full_profiled
+
+Or from the wmcpbe directory:
+    PYTHONIOENCODING=utf-8 python Trials/test_powerlaw_rumpf_dynamic_full_profiled.py
+
+Optional env vars (physics config is unchanged; these only bound the run):
+    PROFILE_OUT           path for the .prof dump (default: <tempdir>/rumpf_dynamic_full.prof)
+    PROFILE_ROWS          rows printed per table (default: 20)
+    PROFILE_T_TOTAL       simulated seconds (default: 100.0, same as the reference test)
+    PROFILE_MAXITER       MC-event budget passed to solve() (default: 1e9 = time-bounded)
+    PROFILE_MAX_PARTICLES n_comp safety cap passed to solve(max_particles=...)
+                          (default: none). solve() stops gracefully if n_comp
+                          exceeds it -- a guard for the merger-off case where
+                          dedup no longer holds n_comp down.
+    PROFILE_MERGER        ParticleMerger mode (default: "scan", the package default):
+                            "scan"      -> solver.merger_lookup = "scan"
+                            "hash"      -> solver.merger_lookup = "hash"
+                            "hash_lazy" -> solver.merger_lookup = "hash_lazy"
+                            "off"       -> solver._enable_particle_merging = False
+                          Set before _initialize_samplers(); see
+                          MCPBEBase._MERGER_LOOKUP_MODES.
+    PROFILE_MERGE_TOL    override the merge tolerance (default: code default 1e-6 /
+                          nucleation 1e-5). e.g. 1e-10.
+
+The hotspot breakdown (which function eats which fraction of the time) is
+essentially the same whether the run does 5 000 or 25 000 events, so a shorter
+PROFILE_T_TOTAL / PROFILE_MAXITER gives the same picture much faster.
+"""
+
+import numpy as np
+import sys
+import os
+import time
+import cProfile
+import pstats
+import tempfile
+import traceback
+from typing import Dict, Any
+
+# Add parent directory to path for imports
+# Robust approach that works with %runfile, direct execution, and module execution
+script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+parent_dir = os.path.dirname(script_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+from wmcpbe import MCPBESolver
+from wmcpbe.kernels.mixer_speed import C_VEL as _C_VEL_DEFAULT
+
+
+# =============================================================================
+# Profiling configuration
+# =============================================================================
+
+PROFILE_OUT = os.environ.get(
+    "PROFILE_OUT",
+    os.path.join(tempfile.gettempdir(), "rumpf_dynamic_full.prof"),
+)
+PROFILE_ROWS = int(os.environ.get("PROFILE_ROWS", "20"))
+PROFILE_T_TOTAL = float(os.environ.get("PROFILE_T_TOTAL", "100.0"))
+PROFILE_MAXITER = int(float(os.environ.get("PROFILE_MAXITER", "1e9")))
+
+_max_particles_env = os.environ.get("PROFILE_MAX_PARTICLES", "").strip()
+PROFILE_MAX_PARTICLES = int(float(_max_particles_env)) if _max_particles_env else None
+
+# PROFILE_MERGER selects the merger mode (default: the package default "scan"):
+#   "scan"      -> solver.merger_lookup = "scan"      (linear-scan dedup, no hash)
+#   "hash"      -> solver.merger_lookup = "hash"      (hash index, full reindex)
+#   "hash_lazy" -> solver.merger_lookup = "hash_lazy" (hash index, no reindex_all)
+#   "off"       -> solver._enable_particle_merging = False (no dedup at all)
+PROFILE_MERGER = os.environ.get("PROFILE_MERGER", "scan").strip().lower()
+if PROFILE_MERGER not in ("scan", "hash", "hash_lazy", "off"):
+    raise SystemExit(
+        f"PROFILE_MERGER must be scan|hash|hash_lazy|off, got {PROFILE_MERGER!r}"
+    )
+
+# Optional override of the merge tolerance (default: leave the code defaults,
+# i.e. merger tol_rel=1e-6, nucleation similarity_tol=1e-5). Set e.g. 1e-10 to
+# test whether the merges are exact-duplicate collapses or tolerance-driven
+# coarse-graining: if n_comp barely moves, the merged particles were identical.
+_merge_tol_env = os.environ.get("PROFILE_MERGE_TOL", "").strip()
+PROFILE_MERGE_TOL = float(_merge_tol_env) if _merge_tol_env else None
+
+
+# =============================================================================
+# Test Configuration  (identical to test_powerlaw_rumpf_dynamic_full.py)
+# =============================================================================
+
+class TestConfig:
+    """Physical and numerical parameters for comprehensive test."""
+
+    # Seed for reproducibility
+    SEED = 205
+
+    # Time settings
+    T_TOTAL = 100.0      # Total simulation time [s] - EXTENDED RUN
+    T_WRITE = 0.2       # Output interval [s]
+
+    # Particle properties (initial)
+    PARTICLE_DIAMETER = 34e-6            # 700 µm
+    PARTICLE_DENSITY = 600.0             # kg/m³ (solid material)
+    INITIAL_POROSITY = 0.0                # 80% void fraction
+
+    # Droplet properties
+    DROPLET_DIAMETER = 20e-6             # 200 µm
+    DROPLET_DENSITY = 1000.0              # kg/m³ (water)
+
+    # Process parameters
+    VOLUMETRIC_FLOW_RATE = 1.635e-10       # m³/s
+    NUCLEATION_DURATION = 20.0         # s
+    AGG_COEFFICIENT = 5e-8           # Constant kernel coefficient [m³/s] - HIGH for testing
+    BATCH_SIZE = 20                   # How many droplets are distributed identically per event
+
+    # Breakage parameters (PowerLaw-Rumpf)
+    BREAKAGE_ENABLED = True
+    PL_P1 = 1e13                         # Pre-factor [1/s·Pa·m^(-3*alpha)]
+    PL_P2 = 1.0                       # Volume exponent in S = P1*n^c*V^P2
+
+    # --- Mischerdrehzahl statt Scherrate -------------------------------
+    # One value for the whole run: agglomeration, acceptance and breakage
+    # lesen alle dasselbe n_mixer. Weichen sie ab, bricht der Solver beim
+    # Aufbau mit einem Fehler ab (assert_consistent_mixer_speed).
+    # In the underlying DEM a tip speed in m/s,
+    # range 5-40; 20.0 is the midpoint.
+    N_MIXER = 20.0                    # Mischergeschwindigkeit m/s
+    # stokes_dynamik nimmt seit 20.08.2026 KEIN n_ref mehr (nicht identifizierbar
+    # alongside U_coll_ref, see kernels/README.md). COLLISION_VELOCITY below is
+    # direkt als Vorfaktor U_coll_ref gelesen: U_coll = U_coll_ref * n_mixer^c_vel.
+    # Exponenten: None = Kernel-Default aus kernels/mixer_speed.py.
+    # C_FREQ = 0.0995 (Agglomeration), C_VEL = 0.2852 (Stossgeschwindigkeit),
+    # C_BREAK = 0.6699 (Bruch, Frequenz x Stossenergie).
+    C_MIXER_AGG = None
+    C_MIXER_BREAK = None
+    C_VEL = None
+    BREAKRVAL = 4                     # Volume-based power law
+    # Rumpf strength parameters
+    RUMPF_K = 2.5                     # Fitting parameter dry [2.2-2.8] - MIN VALUE
+    RUMPF_ALPHA = 1.0                 # Fitting parameter wet [1.0-1.33] - MIN VALUE
+    RUMPF_GAMMA = 0.072               # Surface tension [N/m] - REDUCED (surfactant)
+    RUMPF_DELTA = 0.0                 # Contact angle [rad] (perfect wetting)
+
+    # Compression parameters
+    COMPRESSION_ENABLED = True
+    COMPRESSION_RATE = 0.1             # Porosity decay rate [1/s]
+    MIN_POROSITY = 0.2                # Minimum achievable porosity
+
+    # Liquid internalization parameters
+    LIQ_INTERN_ENABLED = True
+    LIQ_INTERN_RATE = 1e11             # Rate constant [1/(m³·s)]
+
+    # Liquid internalization during agglomeration
+    LIQ_INTERN_AGG_ENABLED = True
+
+    # Agglomeration acceptance (Stokes criterion)
+    STOKES_ENABLED = True
+    BINDER_VISCOSITY = 0.1            # Pa·s
+    COLLISION_VELOCITY = 0.0794       # [m/s] U_coll_ref, direkter Vorfaktor (kein n_ref mehr)
+    H_A = 500e-9                      # m (half-distance of closest approach)
+
+    # Numerical settings
+    INITIAL_PARTICLES = 1000          # Computational particles
+    INITIAL_WEIGHT = 600              # Weight per particle
+    CONTROL_VOLUME = 1              # m³
+
+    # Merger configuration
+    MERGER_TOLERANCE = 1e-4               # Relative tolerance for matching (0.0001%)
+    USE_HASH_INDEX = True
+
+    #Solver parameters
+    AGG_DW_MIN = 1.0
+    AGG_DW_MAX = 20.0
+    BREAK_DW_MAX = 50.0
+    SIZEEVAL = 0
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def format_scientific(value: float, unit: str = "") -> str:
+    """Format value in scientific notation with unit."""
+    return f"{value:.3e} {unit}".strip()
+
+
+def format_percentage(value: float) -> str:
+    """Format value as percentage with sign."""
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value*100:+.4f}%"
+
+
+def print_section(title: str, char: str = "=") -> None:
+    """Print a formatted section header."""
+    print(f"\n{char * 80}")
+    print(title)
+    print(char * 80)
+
+
+def print_profiling_report(profiler: cProfile.Profile, elapsed_real: float) -> None:
+    """Print the cProfile / pstats analysis of the solve() call.
+
+    Two tables:
+      * by cumulative time (cumtime): total time spent in a function AND
+        everything it called -- this is the recipe from the task description,
+        good for seeing which high-level phase dominates.
+      * by own time (tottime): time spent in the function ITSELF, excluding
+        sub-calls -- this points at the actual hot lines.
+    """
+    print_section("PROFILING REPORT (cProfile / pstats)", "=")
+    print(f"  Wall-clock solve(): {elapsed_real:.2f} s")
+    print(f"  .prof dump:         {PROFILE_OUT}")
+    print(f"  Rows per table:     {PROFILE_ROWS}")
+    print("\n  Note: numba @njit kernels appear as ONE opaque call each; the")
+    print("  first hit of each also includes its one-off JIT compilation cost.")
+
+    # --- exactly the snippet from the task description --------------------
+    #   stats = pstats.Stats(profiler).strip_dirs().sort_stats("cumtime")
+    #   stats.print_stats(20)
+    print_section("Top functions by CUMULATIVE time (cumtime)", "-")
+    stats = pstats.Stats(profiler).strip_dirs().sort_stats("cumtime")
+    stats.print_stats(PROFILE_ROWS)
+
+    print_section("Top functions by OWN time (tottime)", "-")
+    stats.sort_stats("tottime").print_stats(PROFILE_ROWS)
+
+    # --- callers of the biggest own-time functions ----------------------
+    print_section("Callers of the top-10 own-time functions", "-")
+    stats.sort_stats("tottime").print_callers(10)
+
+    # --- machine-readable dump for snakeviz / tuna / pstats -------------
+    try:
+        profiler.dump_stats(PROFILE_OUT)
+        print(f"\n  Saved {PROFILE_OUT}")
+        print(f"  Explore with:  python -m pstats {PROFILE_OUT}")
+        print(f"            or:  snakeviz {PROFILE_OUT}")
+    except OSError as exc:
+        print(f"\n  Could not write {PROFILE_OUT}: {exc}")
+
+
+# =============================================================================
+# Main Test Function
+# =============================================================================
+
+def run_comprehensive_test() -> Dict[str, Any]:
+    """
+    Run comprehensive MCPBE simulation with PowerLaw-Rumpf breakage and full physics.
+
+    Returns:
+        Dictionary containing test results and statistics
+    """
+
+    # -------------------------------------------------------------------------
+    # Setup & Initialization
+    # -------------------------------------------------------------------------
+
+    print_section("COMPREHENSIVE MCPBE TEST: POWERLAW-RUMPF + FULL PHYSICS (PROFILED)", "=")
+    print("Physics Modules:")
+    print("  - Nucleation: Liquid droplet addition")
+    print("  - Agglomeration: Constant kernel")
+    print("  - Agglomeration Acceptance: Stokes criterion")
+    print("  - Breakage: PowerLaw-Rumpf (porosity/saturation-dependent)")
+    print("  - Porosity Growth: Cone model")
+    print("  - Compression: Exponential decay")
+    print("  - Liquid Internalization: Continuous (capillary-driven)")
+    print("  - Liquid Internalization (Agg): Event-based (contact pores)")
+
+    cfg = TestConfig()
+    # Run-length overrides (physics parameters are untouched). Default values
+    # reproduce test_powerlaw_rumpf_dynamic_full.py exactly.
+    cfg.T_TOTAL = PROFILE_T_TOTAL
+
+    # Derived quantities
+    particle_radius = cfg.PARTICLE_DIAMETER / 2.0
+    particle_volume = (4.0 / 3.0) * np.pi * particle_radius ** 3
+
+    droplet_radius = cfg.DROPLET_DIAMETER / 2.0
+    droplet_volume = (4.0 / 3.0) * np.pi * droplet_radius ** 3
+
+    expected_liquid = cfg.VOLUMETRIC_FLOW_RATE * cfg.NUCLEATION_DURATION
+    expected_droplets = expected_liquid / droplet_volume
+
+    # -------------------------------------------------------------------------
+    # Print Configuration
+    # -------------------------------------------------------------------------
+
+    print_section("PARTICLE PROPERTIES")
+    print(f"  Diameter:           {cfg.PARTICLE_DIAMETER*1e6:.1f} µm")
+    print(f"  Volume:             {format_scientific(particle_volume, 'm³')}")
+    print(f"  Density:            {cfg.PARTICLE_DENSITY:.1f} kg/m³")
+    print(f"  Initial porosity:   {cfg.INITIAL_POROSITY*100:.1f} %")
+
+    print_section("DROPLET PROPERTIES")
+    print(f"  Diameter:           {cfg.DROPLET_DIAMETER*1e6:.1f} µm")
+    print(f"  Volume:             {format_scientific(droplet_volume, 'm³')}")
+    print(f"  Density:            {cfg.DROPLET_DENSITY:.1f} kg/m³")
+
+    print_section("PROCESS PARAMETERS")
+    print(f"  Volumetric flow:    {format_scientific(cfg.VOLUMETRIC_FLOW_RATE, 'm³/s')}")
+    print(f"  Nucleation window:  [0.0 s, {cfg.NUCLEATION_DURATION:.1f} s]")
+    print(f"  Agg. coefficient:   {format_scientific(cfg.AGG_COEFFICIENT, 'm^(5/2)/s')}")
+    print(f"  Mixer speed:        {cfg.N_MIXER:.1f}")
+    print("  !! AGG_COEFFICIENT and PL_P1 are NOT calibrated for this branch !!")
+
+    print_section("BREAKAGE (POWERLAW-RUMPF)")
+    print(f"  Enabled:            {cfg.BREAKAGE_ENABLED}")
+    print(f"  P1:                 {format_scientific(cfg.PL_P1)}")
+    print(f"  P2:                 {cfg.PL_P2}")
+    print(f"  n_mixer:            {cfg.N_MIXER:.1f}  (c_mixer={cfg.C_MIXER_BREAK or 'Default 0.6699'})")
+    print(f"  BREAKRVAL:          {cfg.BREAKRVAL}")
+    print(f"  Rumpf k:            {cfg.RUMPF_K}")
+    print(f"  Rumpf alpha:        {cfg.RUMPF_ALPHA}")
+    print(f"  Gamma:              {cfg.RUMPF_GAMMA:.3f} N/m")
+    print(f"  Delta:              {cfg.RUMPF_DELTA:.2f} rad")
+
+    print_section("COMPRESSION")
+    print(f"  Enabled:            {cfg.COMPRESSION_ENABLED}")
+    print(f"  Rate:               {cfg.COMPRESSION_RATE:.2f} 1/s")
+    print(f"  Min porosity:       {cfg.MIN_POROSITY:.2f}")
+
+    print_section("LIQUID INTERNALIZATION")
+    print(f"  Continuous:         {cfg.LIQ_INTERN_ENABLED} (rate={cfg.LIQ_INTERN_RATE:.1e})")
+    print(f"  During Agg:         {cfg.LIQ_INTERN_AGG_ENABLED}")
+
+    print_section("AGGLOMERATION ACCEPTANCE (STOKES)")
+    print(f"  Enabled:            {cfg.STOKES_ENABLED}")
+    print(f"  Binder viscosity:   {cfg.BINDER_VISCOSITY:.2f} Pa·s")
+    _c_vel_eff = cfg.C_VEL if cfg.C_VEL is not None else _C_VEL_DEFAULT
+    print(f"  Collision velocity: U_coll_ref={cfg.COLLISION_VELOCITY:.4f} m/s "
+          f"-> U_coll={cfg.COLLISION_VELOCITY * cfg.N_MIXER ** _c_vel_eff:.4f} m/s "
+          f"bei n_mixer={cfg.N_MIXER:.1f} (c_vel={_c_vel_eff:.4f})")
+    print(f"  h_a:                {cfg.H_A*1e9:.1f} nm")
+
+    print_section("EXPECTED RESULTS")
+    print(f"  Total liquid:       {format_scientific(expected_liquid, 'm³')}")
+    print(f"  Total droplets:     {expected_droplets:.2f}")
+    print(f"  Simulation time:    {cfg.T_TOTAL:.1f} s")
+    print(f"  Initial particles:  {cfg.INITIAL_PARTICLES:,}")
+
+    # -------------------------------------------------------------------------
+    # Solver Initialization
+    # -------------------------------------------------------------------------
+
+    print_section("INITIALIZING SOLVER", "-")
+
+    # Time vector
+    t_vec = np.linspace(0.0, cfg.T_TOTAL, int(cfg.T_TOTAL / cfg.T_WRITE) + 1)
+
+    # Create RNG with fixed seed
+    rng = np.random.default_rng(cfg.SEED)
+
+    print(f"\nCreating solver (seed={cfg.SEED})...")
+
+    print("\nKernel configuration:")
+    print("  - Aggregation: eke_darelius2005 (mixer-speed driven)")
+    print("  - Agg. Acceptance: stokes_dynamik (U_coll ~ n^c_vel)")
+    print("  - Breakage: powerlaw_rumpf_dynamic (mixer-speed driven)")
+    print("  - Porosity Growth: cone_model")
+    print("  - Porosity Compression: porosity_compression kernel")
+    print("  - Liq. Internalization: continuous")
+    print("  - Liq. Internalization (Agg): braumann_2007")
+    print("  - Propensity mode: moment angefordert -- EKE ist nicht separierbar,")
+    print("    faellt daher intern auf den kompilierten O(n^2)-Pfad zurueck.")
+
+    solver = MCPBESolver(
+        dim=1,
+        t_vec=t_vec,
+        verbose=True,
+        load_attr=False,
+        init=True,
+        rng=rng,
+        # Aggregation kernel
+        # EKE: kinetische Gastheorie statt Scherstroemung. Fuer die
+        # Alternativhypothese hier auf 'etm_darelius2005' umstellen -- gleiche
+        # Parameternamen, anderer Geschwindigkeitsterm.
+        agg_kernel_name='eke_darelius2005',
+        agg_kernel_params={
+            'corr_beta': cfg.AGG_COEFFICIENT,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_mixer': cfg.C_MIXER_AGG} if cfg.C_MIXER_AGG is not None else {}),
+        },
+        # Agglomeration acceptance kernel
+        agg_acceptance_kernel_name='stokes_dynamik',
+        agg_acceptance_kernel_params={
+            'U_coll_ref': cfg.COLLISION_VELOCITY,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_vel': cfg.C_VEL} if cfg.C_VEL is not None else {}),
+            'binder_viscosity': cfg.BINDER_VISCOSITY,
+            'rho_solid': cfg.PARTICLE_DENSITY,
+            'rho_liquid': cfg.DROPLET_DENSITY,
+            'h_a': cfg.H_A,
+        },
+        # Breakage kernel (PowerLaw-Rumpf)
+        break_kernel_name='powerlaw_rumpf_dynamic',
+        break_kernel_params={
+            'p1': cfg.PL_P1,
+            'p2': cfg.PL_P2,
+            'n_mixer': cfg.N_MIXER,
+            **({'c_mixer': cfg.C_MIXER_BREAK} if cfg.C_MIXER_BREAK is not None else {}),
+            'breakrval': cfg.BREAKRVAL,
+            'k': cfg.RUMPF_K,
+            'alpha': cfg.RUMPF_ALPHA,
+            'gamma': cfg.RUMPF_GAMMA,
+            'delta': cfg.RUMPF_DELTA,
+            'x_s': None,  # Compute from X0
+        },
+        # Porosity growth kernel
+        porosity_growth_kernel_name='cone_model',
+        porosity_growth_kernel_params={},
+        # Continuous processes kernels (compression + liquid internalization)
+        porosity_compression_kernel_name='porosity_compression',
+        porosity_compression_kernel_params={
+            'rate': cfg.COMPRESSION_RATE,
+            'min_porosity': cfg.MIN_POROSITY,
+        },
+        liquid_internalization_kernel_name='liquid_internalization',
+        liquid_internalization_kernel_params={
+            'k_int': cfg.LIQ_INTERN_RATE,
+        },
+        # Liquid internalization during agglomeration (event-based)
+        liq_internalisation_agglomeration_kernel_name='liq_internalisation_agglomeration',
+        liq_internalisation_agglomeration_kernel_params={},
+    )
+    solver.mcpbe_debug = False
+    # Enable moment-based propensity calculation for O(n) acceleration
+    # (instead of default O(n²) pairwise evaluation)
+    solver.agg_propensity_mode = "moment"
+
+    # Configure process type
+    solver.process_type = "mix"  # Agglomeration + Breakage
+    solver.recon_enable = False
+
+    # MC packet sizes -- must be set before _initialize_samplers() reads them.
+    # See TestConfig.AGG_DW_MIN/_MAX/BREAK_DW_MAX above (B-06).
+    solver.agg_dW_min = cfg.AGG_DW_MIN
+    solver.agg_dW_max = cfg.AGG_DW_MAX
+    solver.break_dW_max = cfg.BREAK_DW_MAX
+    solver.SIZEEVAL = cfg.SIZEEVAL
+
+    # Initialize particles with custom properties
+    # IMPORTANT: V_flat structure for dim=1:
+    #   V_flat[0, :] = V_solid (solid volume only, conserved during compression!)
+    #   V_flat[1, :] = V_dry (total dry volume = V_solid + V_pore)
+    # Relation: V_solid = V_dry × (1 - porosity)
+    V_flat = np.zeros((2, cfg.INITIAL_PARTICLES), dtype=float)
+    V_flat[0, :] = particle_volume * (1.0 - cfg.INITIAL_POROSITY)  # V_solid
+    V_flat[1, :] = particle_volume  # V_dry (geometric volume of particle)
+
+    W_init = np.full(cfg.INITIAL_PARTICLES, cfg.INITIAL_WEIGHT, dtype=float)
+
+    solver.Vc = cfg.CONTROL_VOLUME
+
+    print("\nInitializing particles...")
+    solver._initialize_particles(
+        init_Vc=False,
+        V_flat=V_flat,
+        W_init=W_init,
+    )
+
+    # Initialize porosity for all particles
+    solver.porosity[:solver.a_tot] = cfg.INITIAL_POROSITY
+    solver.liquid_volume[:solver.a_tot] = 0.0
+    solver.saturation[:solver.a_tot] = 0.0
+
+    # Calculate initial solid mass (before any physics)
+    v_dry = solver.V_flat[-1, :solver.a_tot]
+    porosity = solver.porosity[:solver.a_tot]
+    weights = solver.W[:solver.a_tot]
+
+    valid_poro = ~np.isnan(porosity)
+    v_solid = np.zeros_like(v_dry)
+    v_solid[valid_poro] = v_dry[valid_poro] * (1.0 - porosity[valid_poro])
+    v_solid[~valid_poro] = v_dry[~valid_poro]  # Vollkörper
+
+    initial_solid_volume = np.sum(v_solid * weights)
+    initial_solid_mass = initial_solid_volume * cfg.PARTICLE_DENSITY
+
+    print(f"  a_tot:      {solver.a_tot}")
+    print(f"  Vc:         {format_scientific(solver.Vc, 'm³')}")
+    print(f"  W[0:5]:     {solver.W[:5]}")
+    print(f"  porosity:   {solver.porosity[0]:.3f}")
+    print(f"  saturation: {solver.saturation[0]:.3f}")
+
+    # -----------------------------------------------------------------
+    # ParticleMerger mode (PROFILE_MERGER). merger_lookup is a first-class solver
+    # knob; _ensure_particle_merger() rebuilds the constructor's merger when the
+    # config changes, so setting it here (before _initialize_samplers()) works.
+    # -----------------------------------------------------------------
+    if PROFILE_MERGE_TOL is not None:
+        solver._fragment_merge_tol = PROFILE_MERGE_TOL
+        print(f"\nMerge tolerance override: tol_rel = {PROFILE_MERGE_TOL:.1e} "
+              f"(merger + nucleation similarity_tol)")
+
+    if PROFILE_MERGER == "off":
+        solver._enable_particle_merging = False
+        print("\nParticleMerger: DISABLED (solver._enable_particle_merging = False)")
+        print("  -> no dedup; every agg child / fragment / nucleated particle")
+        print("     gets its own column. recon_enable is False, so nothing")
+        print("     brings n_comp back down -- expect it to grow.")
+    else:
+        solver.merger_lookup = PROFILE_MERGER
+        print(f"\nParticleMerger: solver.merger_lookup = {PROFILE_MERGER!r}")
+
+    # Initialize samplers
+    print("\nInitializing samplers...")
+    solver._initialize_samplers()
+
+    # Guard: confirm the requested mode actually took effect.
+    _m = getattr(solver, "_particle_merger", None)
+    if PROFILE_MERGER == "off":
+        assert _m is None, "PROFILE_MERGER=off but a merger still exists"
+    else:
+        _want_hash = PROFILE_MERGER in ("hash", "hash_lazy")
+        assert _m is not None and _m.use_hash_index == _want_hash, (
+            f"PROFILE_MERGER={PROFILE_MERGER} but merger={_m!r}, "
+            f"use_hash_index={getattr(_m, 'use_hash_index', None)}"
+        )
+
+    _merger = getattr(solver, "_particle_merger", None)
+    print(f"  _particle_merger:      {_merger!r}")
+    if _merger is not None:
+        print(f"  use_hash_index:        {_merger.use_hash_index}")
+
+    # Configure nucleation
+    print("\nConfiguring nucleation...")
+    solver.create_nucleation_handler(
+        enabled=True,
+        volumetric_flow_rate=cfg.VOLUMETRIC_FLOW_RATE,
+        droplet_diameter=cfg.DROPLET_DIAMETER,
+        liquid_addition_start=0.0,
+        liquid_addition_duration=cfg.NUCLEATION_DURATION,
+        batch_size = cfg.BATCH_SIZE,
+        **({'similarity_tol': PROFILE_MERGE_TOL} if PROFILE_MERGE_TOL is not None else {}),
+    )
+
+    # Configure continuous processes (liquid internalization + compression)
+    # Note: Compression is now handled here, NOT via create_compression_handler()
+    if cfg.LIQ_INTERN_ENABLED or cfg.COMPRESSION_ENABLED:
+        print("Configuring continuous processes...")
+        solver.create_continuous_processes_handler(
+            enabled=True,
+            k_int=cfg.LIQ_INTERN_RATE if cfg.LIQ_INTERN_ENABLED else 0.0,
+            compression_enabled=cfg.COMPRESSION_ENABLED,
+            compression_rate=cfg.COMPRESSION_RATE,
+            min_porosity=cfg.MIN_POROSITY,
+        )
+
+    # -------------------------------------------------------------------------
+    # Run Simulation  (this is the profiled section)
+    # -------------------------------------------------------------------------
+
+    print_section("RUNNING SIMULATION (under cProfile)", "=")
+    print(f"Simulating {cfg.T_TOTAL:.1f} s with all physics modules active "
+          f"(maxiter={PROFILE_MAXITER:.0e}, "
+          f"max_particles={PROFILE_MAX_PARTICLES}, merger={PROFILE_MERGER})...\n")
+
+    profiler = cProfile.Profile()
+    solve_error = None
+    start_time = time.time()
+
+    profiler.enable()
+    try:
+        solver.solve(maxiter=PROFILE_MAXITER, max_particles=PROFILE_MAX_PARTICLES)
+    except Exception as e:  # noqa: BLE001 - report and still emit the profile
+        solve_error = e
+    finally:
+        profiler.disable()
+
+    elapsed_real = time.time() - start_time
+
+    if solve_error is not None:
+        print(f"\n❌ ERROR during solve: {solve_error}")
+        traceback.print_exception(type(solve_error), solve_error, solve_error.__traceback__)
+        print_profiling_report(profiler, elapsed_real)
+        return {'success': False, 'error': str(solve_error)}
+
+    # -------------------------------------------------------------------------
+    # Collect Results
+    # -------------------------------------------------------------------------
+
+    print_section("RESULTS", "=")
+
+    # Nucleation statistics
+    nuc_stats = solver.nucleation.get_statistics()
+    actual_liquid = nuc_stats['liquid_volume_added_total']
+    actual_droplets = nuc_stats['droplets_added_total']
+
+    # Event counts
+    agg_events = solver.real_agg_events
+    break_events = solver.real_break_events
+    total_events = agg_events + break_events
+
+    # Accepted/rejected agglomeration events (if Stokes criterion active)
+    if hasattr(solver, '_agg_accepted_count'):
+        agg_accepted = solver._agg_accepted_count
+        agg_rejected = solver._agg_rejected_count if hasattr(solver, '_agg_rejected_count') else 0
+    else:
+        agg_accepted = agg_events
+        agg_rejected = 0
+
+    # Liquid in system (sum over all particles)
+    liquid_in_system = np.sum(solver.liquid_volume[:solver.a_tot] * solver.W[:solver.a_tot])
+
+    # Internal vs external liquid
+    liquid_internal = np.sum(solver.liquid_volume[:solver.a_tot] * solver.W[:solver.a_tot])
+    # External liquid would need separate tracking
+
+    # Solid mass conservation check
+    v_dry = solver.V_flat[-1, :solver.a_tot]
+    porosity = solver.porosity[:solver.a_tot]
+    weights = solver.W[:solver.a_tot]
+
+    valid_poro = ~np.isnan(porosity)
+    v_solid = np.zeros_like(v_dry)
+    v_solid[valid_poro] = v_dry[valid_poro] * (1.0 - porosity[valid_poro])
+    v_solid[~valid_poro] = v_dry[~valid_poro]  # Vollkörper
+
+    final_solid_volume = np.sum(v_solid * weights)
+    final_solid_mass = final_solid_volume * cfg.PARTICLE_DENSITY
+    solid_mass_error = (final_solid_mass - initial_solid_mass) / initial_solid_mass
+
+    print(f"\n[SOLID MASS DEBUG]")
+    print(f"  Initial solid mass: {initial_solid_mass:.6e} kg")
+    print(f"  Final solid mass:   {final_solid_mass:.6e} kg")
+    print(f"  Δ Mass:             {final_solid_mass - initial_solid_mass:.6e} kg")
+    print(f"  Error:              {format_percentage(solid_mass_error)}")
+    print(f"  n_comp:             {solver.a_tot}")
+    print(f"  n_Vollkörper:       {np.sum(~valid_poro)}")
+    print(f"  n_porous:           {np.sum(valid_poro)}")
+
+    # Porosity statistics
+    porosity_active = solver.porosity[:solver.a_tot]
+    porosity_mean = np.mean(porosity_active[~np.isnan(porosity_active)])
+    porosity_min = np.nanmin(porosity_active)
+    porosity_max = np.nanmax(porosity_active)
+
+    # Saturation statistics
+    saturation_active = solver.saturation[:solver.a_tot]
+    sat_valid = ~np.isnan(saturation_active)
+    saturation_mean = np.mean(saturation_active[sat_valid]) if np.any(sat_valid) else 0.0
+    saturation_min = np.nanmin(saturation_active)
+    saturation_max = np.nanmax(saturation_active)
+
+    # Particle diameter statistics [µm]. Mean is weight-averaged (W = number of
+    # physical particles per computational particle); an unweighted mean over
+    # computational particles would not represent the physical population.
+    diameter_active_um = solver.X[:solver.a_tot] * 1e6
+    diameter_weights = solver.W[:solver.a_tot]
+    diameter_mean_um = np.average(diameter_active_um, weights=diameter_weights)
+    diameter_min_um = np.min(diameter_active_um)
+    diameter_max_um = np.max(diameter_active_um)
+
+    # Errors
+    error_liquid = (actual_liquid - expected_liquid) / expected_liquid
+    error_system = (liquid_in_system - expected_liquid) / expected_liquid
+
+    # -------------------------------------------------------------------------
+    # Print Results
+    # -------------------------------------------------------------------------
+
+    print(f"\n{'Liquid Addition:':<25}")
+    print(f"  {'Expected:':<20} {format_scientific(expected_liquid, 'm³')}")
+    print(f"  {'Added (stats):':<20} {format_scientific(actual_liquid, 'm³')}")
+    print(f"  {'In system:':<20} {format_scientific(liquid_in_system, 'm³')}")
+    print(f"  {'Error (added):':<20} {format_percentage(error_liquid)}")
+    print(f"  {'Error (system):':<20} {format_percentage(error_system)}")
+
+    print(f"\n{'Solid Mass Conservation:' :<25}")
+    print(f"  {'Initial:':<20} {format_scientific(initial_solid_mass, 'kg')}")
+    print(f"  {'Final:':<20} {format_scientific(final_solid_mass, 'kg')}")
+    print(f"  {'Error:':<20} {format_percentage(solid_mass_error)}")
+
+    print(f"\n{'Event Statistics:':<25}")
+    print(f"  {'Agglomeration:':<20} {agg_events:,.0f} events")
+    print(f"  {'Accepted:':<20} {agg_accepted:,.0f} events")
+    if agg_rejected > 0:
+        print(f"  {'Rejected (Stokes):':<20} {agg_rejected:,.0f} events")
+    print(f"  {'Breakage:':<20} {break_events:,.0f} events")
+    print(f"  {'Total:':<20} {total_events:,.0f} events")
+    if break_events > 0:
+        print(f"  {'Agg/Break ratio:':<20} {agg_events/break_events:.2f}")
+    else:
+        print(f"  {'Agg/Break ratio:':<20} N/A (no breakage)")
+
+    print(f"\n{'Droplet Count:':<25}")
+    print(f"  {'Expected:':<20} {expected_droplets:.2f}")
+    print(f"  {'Actual:':<20} {actual_droplets:.2f}")
+    print(f"  {'Accuracy:':<20} {actual_droplets/expected_droplets*100:.2f}%")
+
+    print(f"\n{'Porosity Evolution:':<25}")
+    print(f"  {'Initial:':<20} {cfg.INITIAL_POROSITY:.3f}")
+    print(f"  {'Final (mean):':<20} {porosity_mean:.3f}")
+    print(f"  {'Final (min/max):':<20} {porosity_min:.3f} / {porosity_max:.3f}")
+    print(f"  {'Δ Porosity:':<20} {cfg.INITIAL_POROSITY - porosity_mean:.3f}")
+
+    print(f"\n{'Saturation Evolution:':<25}")
+    print(f"  {'Initial:':<20} 0.000")
+    print(f"  {'Final (mean):':<20} {saturation_mean:.3f}")
+    print(f"  {'Final (min/max):':<20} {saturation_min:.3f} / {saturation_max:.3f}")
+
+    print(f"\n{'Particle Evolution:':<25}")
+    print(f"  {'Initial n_comp:':<20} {cfg.INITIAL_PARTICLES:,}")
+    print(f"  {'Final n_comp:':<20} {solver.a_tot:,}")
+    print(f"  {'Final n_phys:':<20} {np.sum(solver.W[:solver.a_tot])/solver.Vc:,.0f}")
+    print(f"  {'Hit n_comp cap:':<20} {getattr(solver, '_hit_particle_limit', False)}")
+
+    print(f"\n{'ParticleMerger:':<25}")
+    print(f"  {'Mode:':<20} {PROFILE_MERGER}")
+    _mrg = getattr(solver, '_particle_merger', None)
+    if _mrg is None:
+        print(f"  {'Object:':<20} None (disabled)")
+    else:
+        try:
+            _ms = _mrg.get_statistics()
+            print(f"  {'use_hash_index:':<20} {_mrg.use_hash_index}")
+            print(f"  {'Lookups:':<20} {_ms.get('lookups', 0):,}")
+            print(f"  {'Merges (W bumped):':<20} {_ms.get('merges', 0):,}")
+            print(f"  {'Creates (new col):':<20} {_ms.get('creates', 0):,}")
+            print(f"  {'Merge rate:':<20} {_ms.get('merge_rate', 0.0)*100:.2f}%")
+        except Exception as _e:  # noqa: BLE001
+            print(f"  {'(stats unavailable:':<20} {_e})")
+
+    print(f"\n{'Particle Diameter [µm]:':<25}")
+    print(f"  {'Initial:':<20} {cfg.PARTICLE_DIAMETER*1e6:.2f}")
+    print(f"  {'Final (mean, W-avg):':<20} {diameter_mean_um:.2f}")
+    print(f"  {'Final (min/max):':<20} {diameter_min_um:.2f} / {diameter_max_um:.2f}")
+
+    print(f"\n{'Performance:':<25}")
+    print(f"  {'Real time:':<20} {elapsed_real:.2f} s")
+    print(f"  {'Simulated time:':<20} {cfg.T_TOTAL:.1f} s")
+    print(f"  {'Speedup:':<20} {cfg.T_TOTAL/elapsed_real:.1f}x")
+    print(f"  {'Events/sec:':<20} {total_events/elapsed_real:,.0f}")
+
+    # -------------------------------------------------------------------------
+    # Validation
+    # -------------------------------------------------------------------------
+
+    print_section("VALIDATION", "-")
+
+    # Check liquid conservation
+    liquid_tolerance = 0.05  # 5% (more lenient for long runs)
+    liquid_ok = abs(error_liquid) < liquid_tolerance
+
+    # Check droplet count
+    droplet_tolerance = 0.05  # 5%
+    droplet_ok = abs(actual_droplets/expected_droplets - 1.0) < droplet_tolerance
+
+    # Check solid mass conservation (should be EXACT - no creation/destruction)
+    solid_tolerance = 1e-8  # Slightly relaxed for long runs
+    solid_ok = abs(solid_mass_error) < solid_tolerance
+
+    # Check events occurred
+    events_ok = agg_events > 0
+
+    # Check breakage occurred (if enabled)
+    breakage_ok = break_events > 0 if cfg.BREAKAGE_ENABLED else True
+
+    # Check that compression happened: porosity must have CHANGED, not
+    # necessarily decreased. Two real effects compete here -- compression pulls
+    # eps towards MIN_POROSITY at `rate`, while cone_model adds pore volume on
+    # every agglomeration -- so the mean may move either way. Requiring
+    # porosity_mean < INITIAL_POROSITY would only hold while nucleation reset
+    # porosity to 0, which it no longer does.
+    poro_delta = abs(porosity_mean - cfg.INITIAL_POROSITY)
+    comp_ok = poro_delta > 1e-6 if cfg.COMPRESSION_ENABLED else True
+
+    # Summary
+    all_ok = liquid_ok and droplet_ok and solid_ok and events_ok and breakage_ok and comp_ok
+
+    print(f"\n  {'Liquid conservation:':<25} {'✓ PASS' if liquid_ok else '✗ FAIL'} ({format_percentage(error_liquid)})")
+    print(f"  {'Droplet accuracy:':<25} {'✓ PASS' if droplet_ok else '✗ FAIL'} ({actual_droplets/expected_droplets*100:.2f}%)")
+    print(f"  {'Solid mass conservation:':<25} {'✓ PASS' if solid_ok else '✗ FAIL'} ({format_percentage(solid_mass_error)})")
+    print(f"  {'Agglomeration active:':<25} {'✓ PASS' if events_ok else '✗ FAIL'} ({agg_events:,.0f} events)")
+    if agg_rejected > 0:
+        print(f"  {'Stokes rejection active:':<25} {'✓ PASS' if agg_rejected > 0 else '✗ FAIL'} ({agg_rejected:,.0f} rejected)")
+    if cfg.BREAKAGE_ENABLED:
+        print(f"  {'Breakage active:':<25} {'✓ PASS' if breakage_ok else '✗ FAIL'} ({break_events:,.0f} events)")
+    if cfg.COMPRESSION_ENABLED:
+        print(f"  {'Porosity evolved:':<25} {'✓ PASS' if comp_ok else '✗ FAIL'} (|Δporo| = {poro_delta:.3f}, {cfg.INITIAL_POROSITY:.3f} → {porosity_mean:.3f})")
+
+    print(f"\n{'OVERALL:':<25} {'✓ ALL TESTS PASSED' if all_ok else '✗ SOME TESTS FAILED'}")
+
+    # -------------------------------------------------------------------------
+    # Profiling Report
+    # -------------------------------------------------------------------------
+
+    print_profiling_report(profiler, elapsed_real)
+
+    # -------------------------------------------------------------------------
+    # Return Results Dictionary
+    # -------------------------------------------------------------------------
+
+    return {
+        'success': all_ok,
+        'liquid_error': float(error_liquid),
+        'system_error': float(error_system),
+        'solid_mass_error': float(solid_mass_error),
+        'initial_solid_mass': float(initial_solid_mass),
+        'final_solid_mass': float(final_solid_mass),
+        'droplet_accuracy': float(actual_droplets / expected_droplets),
+        'agg_events': int(agg_events),
+        'agg_accepted': int(agg_accepted),
+        'agg_rejected': int(agg_rejected),
+        'break_events': int(break_events),
+        'total_events': int(total_events),
+        'final_n_comp': int(solver.a_tot),
+        'final_n_phys': float(np.sum(solver.W[:solver.a_tot]) / solver.Vc),
+        'porosity_mean': float(porosity_mean),
+        'porosity_change': float(cfg.INITIAL_POROSITY - porosity_mean),
+        'saturation_mean': float(saturation_mean),
+        'elapsed_real': float(elapsed_real),
+        'speedup': float(cfg.T_TOTAL / elapsed_real),
+        'events_per_sec': float(total_events / elapsed_real),
+        'profile_path': PROFILE_OUT,
+    }
+
+
+# =============================================================================
+# Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    results = run_comprehensive_test()
+
+    print_section("TEST COMPLETE", "=")
+
+    # Exit with appropriate code
+    sys.exit(0 if results['success'] else 1)

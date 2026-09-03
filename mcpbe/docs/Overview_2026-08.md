@@ -169,7 +169,7 @@ Statistik verlieren.
 | `kernels/` | Die austauschbaren Physikmodelle | ~5000 |
 | `fenwick_new.py` | `FenwickSampler` – O(log n) gewichtetes Ziehen | 216 |
 | `mcpbe_time_helper.py` | Zeitschritt- und Paketgrößen-Logik | 251 |
-| `helpers.py` | Fertige Solver-Konfigurationen, Massecheck | 739 |
+| `framework/builder.py` | Beschreibt einen Lauf als `dict` und baut daraus den Solver | 260 |
 | `lmc_adapter.py` | Lattice-MC-Fragmentverteilungen (optional) | 2390 |
 | `mlp_breakage_adapter.py` | Neuronales Netz für Bruchraten (optional) | 220 |
 
@@ -714,24 +714,41 @@ mit der bereits vorhandenen Flüssigkeitsmenge: späte Merges würden immer grö
 Unterschiede schlucken, während die Statistik weiterhin ganze Tropfen bucht. Der
 Deckel kann die Toleranz nur verschärfen, nie lockern.
 
-### Hash-Index
+### Wie das ähnliche Partikel gefunden wird: `merger_lookup`
 
-Statt linear zu scannen, gruppiert ein Dictionary die Partikel nach *gebinnten*
-Eigenschaften:
+Zwei Strategien, gewählt über `solver.merger_lookup` (vor `_initialize_samplers()`),
+siehe `mcpbe_base._MERGER_LOOKUP_MODES`:
 
-```python
-key = (round(log10(V_dry), 8), round(log10(liquid), 8), round(poro, 4), round(sat, 4))
-```
+| `merger_lookup` | Lookup | `reindex_all()` je Event |
+|---|---|---|
+| `"scan"` **(Default)** | vektorisierter linearer Scan über die aktive Slice | – (kein Index) |
+| `"hash"` | Hash-Index, O(1) je Lookup | ja |
+| `"hash_lazy"` | Hash-Index | übersprungen (nur die gezielten Re-Keys der kontinuierlichen Prozesse) |
 
-Volumina logarithmisch (viele Größenordnungen), Brüche linear (beschränkt).
-Da Binning nur eine Näherung ist, wird jeder Kandidat aus dem Bucket **noch einmal
-exakt** gegen die Toleranzen geprüft (`_matches_exact`). Der Hash ist damit reine
-Beschleunigung und kann für sich genommen kein falsches Ergebnis erzeugen.
+**Hash-Index:** ein Dictionary gruppiert die Partikel nach *gebinnten*
+Eigenschaften — `key = (round(log10(V_dry),8), round(log10(liquid),8),
+round(poro,4), round(sat,4))`. Volumina logarithmisch, Brüche linear. Jeder
+Kandidat aus dem Bucket wird **noch einmal exakt** gegen die Toleranzen geprüft
+(`_matches_exact`).
 
-Es gibt einen `force_linear_scan`-Schalter: Der Hash binnt die Flüssigkeit
-logarithmisch, ein Treffer innerhalb einer *absoluten* Toleranz kann also im
-Nachbar-Bin liegen und übersehen werden. Der lineare Scan liefert außerdem
-immer den **kleinsten** passenden Index, was Läufe reproduzierbar hält.
+**Warum `"scan"` der Default ist:** der Key hängt von V_dry / Porosität /
+Sättigung ab — genau den Größen, die die kontinuierlichen Prozesse bei *jedem*
+Event für *fast jedes* Partikel neu schreiben. Der Index muss also jedes Event
+neu aufgebaut werden, und *eine* skalare Key-Berechnung (`np.log10` + `round`
+×3–4) kostet mehr als *ein* vektorisierter Vergleich gegen alle aktiven
+Partikel. Gemessen an `powerlaw_rumpf_dynamic_full` (n_comp ≈ 2 700):
+**431 s (hash) → 55 s (scan)**. Details:
+[`historical/Merger_Lookup_Strategy_2026-09.md`](historical/Merger_Lookup_Strategy_2026-09.md).
+
+Der lineare Scan liefert außerdem immer den **kleinsten** passenden Index; der
+Hash iteriert ein Set. Wenn mehrere Partikel innerhalb der Toleranz liegen,
+wählen die beiden also *unterschiedliche* — meist tritt das nicht auf und die
+Modi sind bitgleich (8 von 10 Benchmark-Szenarien), sonst bleibt das Ergebnis
+statistisch gleich (Masse exakt, Merge-Rate und PSD auf ~1 %). `"scan"` ist damit
+auch die reproduzierbare Wahl (unabhängig von Set-Iterationsreihenfolge /
+Python-Version). Für Nucleation ist der lineare Scan über `merge_linear_scan=True`
+ohnehin fest verdrahtet (die logarithmische Flüssigkeits-Binnung verfehlt sonst
+Treffer im Nachbar-Bin).
 
 ## 3.8 `ReconstructionMixin` – Partikelzahl senken
 
@@ -1080,16 +1097,21 @@ Zielmethode durch einen Wrapper ersetzen, der vor und nach dem Originalaufruf
 `Σ(V_solid·W)` misst. So lässt sich jede Abweichung kategorienweise
 (AGG/BREAK/NUC/COMP/VC) zuordnen, ohne eine einzige Repo-Datei zu ändern.
 
-### Nützliche Helfer
+### Konfigurationshilfen
 
-`helpers.py` enthält `setup_initial_particles`, `compute_moments` und
-`validate_mass_conservation(solver)` für einen schnellen Bilanzcheck.
+Es gibt keine `create_*_solver`-Templates und keine `helpers.py` mehr – beide
+wurden am 20.08.2026 entfernt. Die Templates verdrahteten einen festen
+Kernelsatz für einen festen Falltyp; die Fälle in diesem Projekt unterscheiden
+sich zu stark, als dass das genutzt hätte, und aufgerufen hat sie niemand.
+`helpers.py` (`setup_initial_particles`, `compute_moments`,
+`validate_mass_conservation`) fiel im selben Zug weg – die Setup-Hilfen waren
+fehlerhaft (Feststoffzeile blieb auf Null) und wurden außerhalb der Datei nicht
+mehr aufgerufen.
 
-> Die drei `create_*_solver`-Konfigurationstemplates wurden am 20.08.2026
-> entfernt: sie verdrahteten einen festen Kernelsatz für einen festen Falltyp,
-> und die Fälle in diesem Projekt unterscheiden sich zu stark, als dass das
-> genutzt hätte – aufgerufen hat sie niemand. Solver explizit bauen oder über
-> `framework/builder.py`.
+Solver stattdessen explizit bauen (siehe Anhang „Typische
+Initialisierungsreihenfolge") oder über `framework/builder.py`, das einen Lauf
+als reines `dict` beschreibt und daraus den fertig konfigurierten Solver
+erzeugt. Massenbilanz-Checks: `mcpbe/tests/test_conservation.py`.
 
 ---
 

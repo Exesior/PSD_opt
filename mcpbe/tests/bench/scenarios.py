@@ -81,6 +81,9 @@ def build(scenario: Scenario) -> MCPBESolver:
     solver.alpha_prim = np.ones(dim**2)
     solver.maybe_double_control_volume = False
 
+    # solver_attrs are applied before _initialize_samplers(), so anything the
+    # merger reads there takes effect -- e.g. solver_attrs={"merger_lookup":
+    # "hash"} to compare the hash index against the default linear scan.
     for key, value in scenario.solver_attrs.items():
         setattr(solver, key, value)
 

@@ -29,7 +29,7 @@ Massenerhaltungs-Verifikation in [`CONSERVATION.md`](CONSERVATION.md).
 | [F-04](#f-04) | Agglomerations-Propensity ist O(n²) pro Ereignis | hoch (Performance) | nein |
 | [F-05](#f-05) | `liquid_bridge`-Kernel fällt auf n² Python-Aufrufe zurück | hoch (Performance) | nein |
 | [F-06](#f-06) | Kontinuierliche Prozesse als Python-Schleife pro Ereignis | hoch (Performance) | nein |
-| [F-07](#f-07) | „Links“-Snapshots mischen Vor- und Nach-Ereignis-Zustand | mittel | nein (dokumentiert) |
+| [F-07](#f-07) | „Links“-Snapshots mischen Vor- und Nach-Ereignis-Zustand | mittel | nein (behoben) |
 | [F-08](#f-08) | `u_sel` wird doppelt verwendet (Partnerwahl + Akzeptanz) | mittel | nein (dokumentiert) |
 | [F-09](#f-09) | Reine 2D-Agglomeration bricht an Breakage-Parameter ab | mittel | nein |
 | [F-10](#f-10) | Toter Code-Zweig mit garantiertem `NameError` | mittel | nein |
@@ -419,7 +419,7 @@ Granulation **12.9× schneller**, Fingerprint bitgenau identisch.
 <a name="f-07"></a>
 ## F-07 — „Links“-Snapshots mischen Vor- und Nach-Ereignis-Zustand
 
-**Schweregrad:** mittel · **Datei:** `src/wmcpbe/mcpbe_base.py` (`solve()`)
+**Schweregrad:** mittel · **Datei:** `src/wmcpbe/mcpbe_base.py` (`solve()`) · **Status:** behoben
 
 ### Problem
 
@@ -433,13 +433,38 @@ self.V_save_left.append(V_prev_active.copy())                          # vorher
 self.liquid_volume_save_left.append(self.liquid_volume[:self.a_tot].copy())  # nachher!
 ```
 
-### Lösung
+### Lösung (behoben)
 
-Unverändert gelassen und im Code kommentiert, weil eine Korrektur die
-gespeicherten Arrays und damit jede aufgezeichnete Auswertung ändern würde.
-Die betroffenen Felder werden im aktuellen Post-Processing nicht ausgewertet.
-**Zu klären, ob die Left-Snapshots für Flüssigkeit/Porosität überhaupt gebraucht
-werden** — wenn nein, ersatzlos streichen.
+Die Left-Snapshots werden **nicht** gestrichen (der post-Processing-Pfad
+`compute_psd_cdf_over_time` mit `time_scheme` ∈ `left`/`nearest`/`interp` — und
+`"interp"` ist der Default der Repeat-PSD-Pipeline — bracketet bewusst zwischen
+`t_left` und `t_right`).
+
+Stattdessen werden jetzt **alle** Left-Snapshots vor dem Ereignis erfasst.
+Unter demselben `will_save`-Guard, der bereits `V_prev_active` / `W_prev_active`
+kopiert, werden zusätzlich `poro_prev_active`, `sat_prev_active`,
+`liq_prev_active` als Vorher-Kopien von `self.porosity` / `self.saturation` /
+`self.liquid_volume` gezogen (im `else`-Zweig `None`, wie `V_prev_active`). Im
+Snapshot-Block werden diese Locals angehängt statt der aktuellen
+(Nachher-)Arrays:
+
+```python
+self.V_save_left.append(V_prev_active.copy())          # vorher
+self.W_save_left.append(W_prev_active.copy())          # vorher
+self.liquid_volume_save_left.append(liq_prev_active.copy())   # jetzt: vorher
+self.porosity_save_left.append(poro_prev_active.copy())       # jetzt: vorher
+self.saturation_save_left.append(sat_prev_active.copy())      # jetzt: vorher
+```
+
+Der bestehende `RuntimeError`-Guard (Snapshot fällig, aber kein Vorher-Zustand
+gecached) prüft jetzt zusätzlich die drei neuen Vorher-Kopien, damit nie ein
+still falscher Snapshot geschrieben wird.
+
+Die t=0-Initialeinträge bleiben unverändert (dort gilt vorher == nachher).
+`V_save_left`, `W_save_left`, `t_left`, `t_right` und alle `*_save`
+(Rechts-)Arrays wurden nicht angefasst.
+
+Test: `mcpbe/tests/test_left_snapshot_time_consistency.py`.
 
 ---
 

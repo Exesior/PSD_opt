@@ -222,7 +222,7 @@ def create_solver(
     solver._enable_particle_merging = enable_merger
     if enable_merger:
         solver._fragment_merge_tol = merger_tol
-        solver._use_merger_hash_index = use_hash
+        solver.merger_lookup = "hash" if use_hash else "scan"
     
     return solver
 

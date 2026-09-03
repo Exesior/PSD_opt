@@ -581,21 +581,25 @@ class NucleationHandler:
         self.print_debug_status(force=True)
         self._log("Simulation complete", "INFO")
     
-    def _distribute_remaining_liquid(self, final_time: float) -> None:
+    def _distribute_remaining_liquid(self, at_time: float) -> None:
         """
         Distribute remaining liquid accumulated in _liquid_remainder.
-        
-        Called at simulation end to ensure all accumulated liquid is distributed,
-        even if the nucleation window has closed. Uses fractional droplet distribution
+
+        Called once the accumulated liquid must be placed even though no further
+        whole droplet will be triggered: at window close (from :meth:`step`) for a
+        run whose window ends before ``t_total``, otherwise at simulation end
+        (from :meth:`finalize_after_solve`). Uses fractional droplet distribution
         for remainders between 0.5 and 1.0 droplets to avoid systematic under-addition.
-        
+
         Physical Model:
             Instead of discarding sub-droplet remainders (e.g., 0.82 droplets),
             distribute the EXACT remaining volume as a "fractional droplet".
             This avoids systematic bias while maintaining mass conservation.
-        
+
         Args:
-            final_time: Final simulation time [s]
+            at_time: Simulated time this placement is attributed to [s]. Used only
+                for the debug log; particle selection and the DSMC ``vc_scale``
+                read the live solver state, not this value.
         """
         if not hasattr(self, '_liquid_remainder') or self._liquid_remainder <= 0:
             return
@@ -616,7 +620,7 @@ class NucleationHandler:
         # Case 2: Fractional remainder (0.1-1.0 droplets) - distribute exact volume
         if n_droplets_exact >= 1.0:
             n_droplets_full = int(n_droplets_exact)
-            self._log(f"Distributing {n_droplets_full} remaining droplets (exact: {n_droplets_exact:.2f}) at t={final_time:.4f}s", "DEBUG")
+            self._log(f"Distributing {n_droplets_full} remaining droplets (exact: {n_droplets_exact:.2f}) at t={at_time:.4f}s", "DEBUG")
             
             v_target = n_droplets_full * v_droplet
             v_distributed = 0.0
@@ -652,7 +656,7 @@ class NucleationHandler:
             # Fractional droplet: distribute exact remaining volume
             # Note: _liquid_remainder is PHYSICAL volume (already scaled by flow_rate_per_particle).
             # We distribute it as a single computational event with capped dW.
-            self._log(f"Distributing fractional droplet ({n_droplets_exact:.2f} × {v_droplet:.3e} m^3) at t={final_time:.4f}s", "DEBUG")
+            self._log(f"Distributing fractional droplet ({n_droplets_exact:.2f} × {v_droplet:.3e} m^3) at t={at_time:.4f}s", "DEBUG")
             
             # CRITICAL: Pass ACTUAL droplet volume and cap max_physical_droplets!
             # This ensures dW is capped correctly: dW <= n_droplets_exact / vc_scale
@@ -695,6 +699,10 @@ class NucleationHandler:
         ``flow_rate * dt_overlap``. An event entirely outside the window adds
         nothing.
 
+        The event whose interval straddles ``window_end`` additionally flushes
+        the sub-droplet ``_liquid_remainder``, so the last fraction of a droplet
+        is placed at window close rather than at ``t_total``.
+
         Parameters
         ----------
         current_time : float
@@ -705,6 +713,7 @@ class NucleationHandler:
         See Also
         --------
         _distribute_liquid_volume : places the computed volume
+        _distribute_remaining_liquid : places the sub-droplet remainder
         """
         if not self.config.enabled:
             return
@@ -742,7 +751,31 @@ class NucleationHandler:
         
         # Distribute liquid volume
         self._distribute_liquid_volume(v_liquid, is_manual_trigger=False)
-        
+
+        # If this event's interval straddles the end of the addition window,
+        # flush the sub-droplet remainder NOW instead of leaving it to
+        # finalize_after_solve(). That path timestamps it at t_total, so for a
+        # run whose window closes well before the end the leftover (< 1 droplet)
+        # would sit unadded through the entire post-window granulation/breakage
+        # phase and then land where nothing can act on it any more. Placed here
+        # it enters the population at window close and takes part in every
+        # subsequent event, exactly like the in-window droplets -- the weight
+        # changes mark the propensities stale (see _record_weight_change), which
+        # solve() rebuilds right after this step().
+        #
+        # Single-shot by construction: MC event intervals are contiguous, so
+        # exactly one of them contains window_end. The `_liquid_remainder > 0`
+        # guard additionally absorbs the rare floating-point case where the next
+        # interval's recomputed start lands exactly on window_end.
+        #
+        # `not _manual_trigger_done`: when the first event already lay past the
+        # window, _trigger_manual_full_window() has placed the whole window in one
+        # go (and flushed its own remainder) -- mirrors finalize_after_solve Case 2.
+        if (event_start < window_end <= event_end
+                and self._liquid_remainder > 0.0
+                and not self._manual_trigger_done):
+            self._distribute_remaining_liquid(window_end)
+
         # Print debug status
         self.print_debug_status(force=False)
     
@@ -1082,7 +1115,7 @@ class NucleationHandler:
         See Also
         --------
         _distribute_one_droplet_with_dW : places a single droplet
-        _distribute_remaining_liquid : places the remainder at end of run
+        _distribute_remaining_liquid : places the remainder at window close / end of run
         """
         # Initialize remainder accumulator if needed
         if not hasattr(self, '_liquid_remainder'):

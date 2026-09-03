@@ -30,6 +30,30 @@ from .fenwick_new import FenwickSampler, rebuild_sampler
 from .mcpbe_time_helper import MCPBETimeHelper
 
 
+# ParticleMerger duplicate-lookup strategy. ``solver.merger_lookup`` selects one;
+# it translates to the low-level pair (use_hash_index, run reindex_all() per event).
+#
+#   "scan"      linear scan, no hash index          <- DEFAULT
+#   "hash"      hash index, re-keyed every event
+#   "hash_lazy" hash index, per-event reindex_all() skipped (targeted re-key only)
+#
+# Why "scan" is the default: the hash key is derived from V_dry/porosity/
+# saturation, which the continuous processes rewrite for almost the whole
+# population on every event -- so the index has to be re-keyed every event, and
+# one scalar key computation costs more than one vectorised comparison against
+# all active particles. Measured on powerlaw_rumpf_dynamic_full: 431 s -> 55 s.
+# scan and hash are statistically equivalent (mass exact, PSD within ~1 %) and
+# usually bit-identical; scan is also the more deterministic path (it returns the
+# lowest matching index, the hash iterates a set).
+# See docs/historical/Merger_Lookup_Strategy_2026-09.md.
+_MERGER_LOOKUP_MODES = {
+    # merger_lookup : (use_hash_index, full_reindex)
+    "scan":      (False, True),
+    "hash":      (True,  True),
+    "hash_lazy": (True,  False),
+}
+
+
 class MCPBEBase(MCPBETimeHelper, BaseSolver):
     """
     Base MC-PBE solver with DSMC weighting.
@@ -1283,8 +1307,47 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         return V_init, w_rep
 
 
+    def _apply_merger_lookup_mode(self) -> None:
+        """Translate ``self.merger_lookup`` into the low-level merger booleans.
+
+        ``merger_lookup`` (``"scan"`` | ``"hash"`` | ``"hash_lazy"``) is the
+        canonical knob and, when set, wins. It expands to
+        ``_merger_use_hash_index`` / ``_merger_full_reindex``, which the
+        ParticleMerger constructor and ``solve()`` read directly.
+
+        If ``merger_lookup`` is left unset (``None``), those two booleans keep
+        whatever a script assigned -- or their built-in default, which is
+        scan mode (``_merger_use_hash_index=False``). That is the back-compat
+        path for code that predates the enum.
+        """
+        mode = getattr(self, "merger_lookup", None)
+        if mode is not None:
+            try:
+                use_hash, full_reindex = _MERGER_LOOKUP_MODES[mode]
+            except (KeyError, TypeError):
+                import difflib
+                hint = difflib.get_close_matches(
+                    str(mode), list(_MERGER_LOOKUP_MODES), n=1
+                )
+                raise ValueError(
+                    f"merger_lookup={mode!r} is invalid. "
+                    f"Current value: {mode!r}.\n"
+                    f"Fix: merger_lookup must be one of "
+                    f"{sorted(_MERGER_LOOKUP_MODES)}"
+                    + (f" (did you mean {hint[0]!r}?)" if hint else "")
+                )
+            self._merger_use_hash_index = use_hash
+            self._merger_full_reindex = full_reindex
+        else:
+            self._merger_use_hash_index = bool(
+                getattr(self, "_merger_use_hash_index", False)
+            )
+            self._merger_full_reindex = bool(
+                getattr(self, "_merger_full_reindex", True)
+            )
+
     def _ensure_particle_merger(self):
-        """Create the :class:`ParticleMerger`, unless one already exists.
+        """Create the :class:`ParticleMerger`, unless a matching one exists.
 
         The merger is a purely numerical device: it keeps ``n_comp`` down by
         adding weight to an existing particle instead of appending a duplicate.
@@ -1294,19 +1357,28 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         ``mcpbe_break._prepare_break_config``, so an agglomeration-only run had
         no dedup at all, neither for merge children nor for nucleation.)
 
-        Knobs, both read from the solver so scripts can set them before
+        Knobs, all read from the solver so scripts can set them before
         ``_initialize_samplers()``:
 
+        ``merger_lookup``
+            Duplicate-lookup strategy: ``"scan"`` (default -- vectorised linear
+            scan, no hash index), ``"hash"`` (O(1) hash index, re-keyed every
+            event) or ``"hash_lazy"`` (hash index, per-event ``reindex_all()``
+            skipped). See ``_MERGER_LOOKUP_MODES``.
         ``_enable_particle_merging``
             ``False`` disables the merger entirely; every new particle gets its
             own column. Nothing is maintained in that case.
-        ``_merger_use_hash_index``
-            ``False`` keeps the merger but replaces the O(1) hash lookup with a
-            linear scan over the active slice. Worth it while ``n_comp`` stays
-            small: the scan is vectorised NumPy, whereas the hash path pays key
-            computation plus dict traffic per lookup AND per property change.
+        ``_merger_use_hash_index`` / ``_merger_full_reindex``
+            Low-level booleans that ``merger_lookup`` expands to. Set them
+            directly only for back-compat; ``merger_lookup`` is the front door.
         ``_fragment_merge_tol``
             Relative matching tolerance (default 1e-6).
+
+        A merger built by ``MCPBESolver(init=True)`` in the constructor -- before
+        a script can set ``merger_lookup`` -- is rebuilt here if its
+        configuration no longer matches. ``_ensure_particle_merger()`` only runs
+        from ``_initialize_samplers()`` / ``_prepare_break_config()`` (setup,
+        never during ``solve()``), so a rebuild is safe.
         """
         # Disable check comes FIRST so that setting the flag after a merger was
         # already built (scripts that flip it between _initialize_samplers()
@@ -1315,15 +1387,23 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             self._particle_merger = None
             return None
 
-        if getattr(self, "_particle_merger", None) is not None:
-            return self._particle_merger
+        self._apply_merger_lookup_mode()
+        want_hash = bool(self._merger_use_hash_index)
+        want_tol = float(getattr(self, "_fragment_merge_tol", 1e-6))
+
+        existing = getattr(self, "_particle_merger", None)
+        if existing is not None:
+            if existing.use_hash_index == want_hash and existing.tol_rel == want_tol:
+                return existing
+            # Config changed since the merger was built -> drop and rebuild.
+            self._particle_merger = None
 
         from .particle_merger import ParticleMerger
 
         self._particle_merger = ParticleMerger(
             self,
-            use_hash_index=bool(getattr(self, "_merger_use_hash_index", True)),
-            tol_rel=float(getattr(self, "_fragment_merge_tol", 1e-6)),
+            use_hash_index=want_hash,
+            tol_rel=want_tol,
             tol_abs_liquid=1e-30,
             bin_digits_volume=8,
             bin_digits_poro=4,
@@ -2142,9 +2222,19 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             if will_save:
                 V_prev_active = self.V_flat[:, :self.a_tot].copy()
                 W_prev_active = self.W[:self.a_tot].copy()
+                # Pre-event copies of the continuous-phase state, so that ALL
+                # *_save_left snapshots below are recorded at the same instant
+                # (t_left) as V_save_left / W_save_left. See F-07 in
+                # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
+                poro_prev_active = self.porosity[:self.a_tot].copy()
+                sat_prev_active = self.saturation[:self.a_tot].copy()
+                liq_prev_active = self.liquid_volume[:self.a_tot].copy()
             else:
                 V_prev_active = None
                 W_prev_active = None
+                poro_prev_active = None
+                sat_prev_active = None
+                liq_prev_active = None
 
             if pt == "agglomeration":
                 sum_prop_before = agg_total_propensity()
@@ -2215,7 +2305,11 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # wrong we would have no "left" state to record, so fail loudly
             # instead of writing a silently wrong snapshot.
             if next_save_idx < len(self.t_vec) and elapsed_time >= self.t_vec[next_save_idx]:
-                if V_prev_active is None:
+                if (V_prev_active is None
+                        or W_prev_active is None
+                        or poro_prev_active is None
+                        or sat_prev_active is None
+                        or liq_prev_active is None):
                     raise RuntimeError(
                         "[MC-PBE] internal error: snapshot due but no pre-event state was "
                         f"cached (pt={pt!r}, t={elapsed_time!r}). The `will_save` prediction "
@@ -2233,17 +2327,16 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 self.Vc_save.append(float(self.Vc))
                 self.step += 1
 
-                # left snapshots (state before this event)
-                # NOTE: liquid/porosity/saturation are recorded from the *current*
-                # (post-event) arrays, not from a pre-event copy. That is a known
-                # inconsistency inherited from the original implementation; it is
-                # documented in mcpbe/docs/historical/REFACTORING_FINDINGS.md (F-07) and left
-                # unchanged here so recorded runs stay reproducible.
+                # left snapshots (state before this event). All of these are
+                # pre-event copies captured under the `will_save` guard above, so
+                # V/W/liquid_volume/porosity/saturation on the left side are all
+                # consistent with each other (state at t_left). See F-07 in
+                # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
                 self.V_save_left.append(V_prev_active.copy())
                 self.W_save_left.append(W_prev_active.copy())
-                self.liquid_volume_save_left.append(self.liquid_volume[:self.a_tot].copy())
-                self.porosity_save_left.append(self.porosity[:self.a_tot].copy())
-                self.saturation_save_left.append(self.saturation[:self.a_tot].copy())
+                self.liquid_volume_save_left.append(liq_prev_active.copy())
+                self.porosity_save_left.append(poro_prev_active.copy())
+                self.saturation_save_left.append(sat_prev_active.copy())
 
                 self.t_left.append(t_prev)
                 self.t_right.append(elapsed_time)

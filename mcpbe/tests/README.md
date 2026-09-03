@@ -27,11 +27,19 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `bench/profile_wmcpbe.py` | `cProfile` für ein einzelnes Szenario. |
 | `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`../docs/historical/MOMENT_MODE.md`](../docs/historical/MOMENT_MODE.md)). |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
-| `golden_reference.json` | Eingecheckte Referenz-Fingerprints. |
+| `test_merger_lookup_equivalence.py` | `merger_lookup` in {scan, hash, hash_lazy} bleibt physikalisch äquivalent. |
+| `golden_reference.OUTDATED.json` | **Veraltet** (Stand 2026-07-31). Stimmt seit Mixer-Speed-Integration / F-07 usw. mit keinem Szenario mehr überein. Nur als historischer Diff-Anker behalten — vor Nutzung neu aufnehmen (s. u.). |
 
 ---
 
 ## Regression prüfen (das Wichtigste)
+
+> **Zuerst eine frische Baseline aufnehmen.** `golden_reference.OUTDATED.json`
+> (2026-07-31) ist überholt — sie stimmt schon vor jeder aktuellen Änderung mit
+> keinem Szenario überein. Auf einem als gut bekannten Stand:
+> ```bash
+> python -m tests.bench.golden_reference record --out tests/golden_reference.json
+> ```
 
 ```bash
 python -m tests.bench.golden_reference check --ref tests/golden_reference.json
@@ -42,11 +50,8 @@ Jede Änderung, die numerische Ergebnisse *nicht* verändern soll, muss hier
 Snapshot **und** den finalen Live-Zustand ab, also auch Läufe, die vom
 Ereignisbudget statt von der Zeit begrenzt werden.
 
-Referenz nach einer *beabsichtigten* Ergebnisänderung neu aufnehmen:
-
-```bash
-python -m tests.bench.golden_reference record --out tests/golden_reference.json
-```
+Referenz nach einer *beabsichtigten* Ergebnisänderung neu aufnehmen (gleiches
+`record`-Kommando wie oben).
 
 > Das ist ein bewusster Schritt. Vorher klären, **warum** sich Ergebnisse ändern,
 > und den Grund in `../docs/historical/REFACTORING_FINDINGS.md` festhalten.
