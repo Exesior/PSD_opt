@@ -46,6 +46,16 @@ SOLID_SCENARIOS = [
     "break_powerlaw_1d",
     "mix_1d",
     "granulation_1d",
+    # The production wet-granulation configuration. Costs ~4 minutes across the
+    # five checks that run over this list, and it is worth it: it is the only
+    # scenario exercising the EKE kernel, `stokes_dynamik`,
+    # `powerlaw_rumpf_dynamic` and `cone_model`, and the only one where a
+    # breakage event fires while the nucleation and continuous-process handlers
+    # are live. Everything else here runs `shear_chin1998`, so without it the
+    # suite never touched the non-separable O(n^2) propensity path at all --
+    # only the golden-reference fingerprint did, and a hash says nothing about
+    # mass conservation, sampler consistency or state bounds.
+    "granulation_rumpf_dynamic_1d",
 ]
 
 
