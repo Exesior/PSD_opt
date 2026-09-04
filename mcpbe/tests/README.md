@@ -28,22 +28,23 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`../docs/historical/MOMENT_MODE.md`](../docs/historical/MOMENT_MODE.md)). |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `test_merger_lookup_equivalence.py` | `merger_lookup` in {scan, hash, hash_lazy} bleibt physikalisch äquivalent. |
-| `golden_reference.OUTDATED.json` | **Veraltet** (Stand 2026-07-31). Stimmt seit Mixer-Speed-Integration / F-07 usw. mit keinem Szenario mehr überein. Nur als historischer Diff-Anker behalten — vor Nutzung neu aufnehmen (s. u.). |
+| `golden_reference.json` | **Aktuelle Baseline**, aufgenommen auf `a4aa35a` + Referenzszenario. Zehn Szenarien, Gesamtlaufzeit ~190 s. |
+| `golden_reference.OUTDATED.json` | Veraltet (Stand 2026-07-31), stimmt seit der Mixer-Speed-Integration mit keinem Szenario überein. Nur noch als historischer Diff-Anker. |
 
 ---
 
 ## Regression prüfen (das Wichtigste)
 
-> **Zuerst eine frische Baseline aufnehmen.** `golden_reference.OUTDATED.json`
-> (2026-07-31) ist überholt — sie stimmt schon vor jeder aktuellen Änderung mit
-> keinem Szenario überein. Auf einem als gut bekannten Stand:
-> ```bash
-> python -m tests.bench.golden_reference record --out tests/golden_reference.json
-> ```
-
 ```bash
 python -m tests.bench.golden_reference check --ref tests/golden_reference.json
 ```
+
+> Die Baseline gilt für den Codestand, auf dem sie aufgenommen wurde. Nach einer
+> Änderung, die numerische Ergebnisse **absichtlich** verschiebt, neu aufnehmen —
+> auf einem als gut bekannten Stand:
+> ```bash
+> python -m tests.bench.golden_reference record --out tests/golden_reference.json
+> ```
 
 Jede Änderung, die numerische Ergebnisse *nicht* verändern soll, muss hier
 `all fingerprints match` liefern. Der Fingerprint deckt jeden gespeicherten
@@ -101,8 +102,13 @@ python -m tests.bench.profile_wmcpbe granulation_1d --top 15
 Jedes Szenario ist über ein **festes Ereignisbudget** begrenzt
 (`Scenario.maxiter`), nicht über die simulierte Zeit. Damit ist die Wandzeit
 direkt proportional zu den Kosten pro Monte-Carlo-Ereignis, und die Suite bleibt
-unabhängig von den Kernelparametern in einem vorhersagbaren Rahmen
-(kompletter Durchlauf < 1 min bei `--scale 1`).
+unabhängig von den Kernelparametern in einem vorhersagbaren Rahmen.
+
+Zwei Szenarien dominieren die Wandzeit: `agg_shear_2d` (~110 s, 2D hat keinen
+kompilierten Batch-Pfad) und `granulation_rumpf_dynamic_1d` (~76 s, EKE ist
+nicht separierbar und laeuft daher über den O(n²)-Pfad). Alle übrigen zusammen
+bleiben unter einer Sekunde; ein kompletter Golden-Reference-Durchlauf liegt bei
+~190 s.
 
 | Szenario | dim | Prozess | n₀ | Ereignisse | Deckt ab |
 |---|---|---|---|---|---|
@@ -115,6 +121,15 @@ unabhängig von den Kernelparametern in einem vorhersagbaren Rahmen
 | `break_powerlaw_1d` | 1 | Breakage | 500 | 1500 | Bruchrate + Fragment-CDF |
 | `mix_1d` | 1 | Mix | 500 | 300 | schlimmster Fall: beide Sampler pro Ereignis |
 | `granulation_1d` | 1 | Agglomeration | 400 | 300 | + Nucleation, Internalisierung, Kompression |
+| `granulation_rumpf_dynamic_1d` | 1 | Mix | 1000 | 1600 | **Produktionsfall**: EKE + stokes_dynamik + powerlaw_rumpf_dynamic + cone_model, mit allen Handlern. Einziges Szenario mit **Bruchereignis bei aktiven Handlern**. ~76 s |
+
+`granulation_rumpf_dynamic_1d` spiegelt
+[`Trials/test_powerlaw_rumpf_dynamic_full.py`](../src/wmcpbe/Trials/test_powerlaw_rumpf_dynamic_full.py)
+(gleicher Seed, gleiche Kernelparameter, gleiche monodisperse Initialisierung).
+Das grosse Ereignisbudget ist Absicht: das Rumpf-Festigkeitsmodell laesst
+Partikel erst brechen, wenn sie poroes und nass geworden sind — das erste
+Bruchereignis faellt auf Iteration ~495 (t ≈ 35 s). Ein kleineres Budget deckt
+nur den Agglomerationspfad ab.
 
 **Warum JIT-Warmup?** Ohne den `warmup()`-Aufruf zahlt der erste gemessene Lauf
 mehrere hundert Millisekunden LLVM-Kompilierzeit und die Zahlen sind wertlos.
