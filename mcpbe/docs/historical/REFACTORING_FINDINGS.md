@@ -26,7 +26,7 @@ Massenerhaltungs-Verifikation in [`CONSERVATION.md`](CONSERVATION.md).
 | [F-01](#f-01) | 2D-Agglomeration schreibt Feststoffvolumen skalar in alle Komponenten | kritisch | ja (nur `dim=2`) |
 | [F-02](#f-02) | Rekonstruktion verwirft Flüssig-/Porositätszustand | kritisch | nein (jetzt Fehler statt stiller Fehlrechnung) |
 | [F-03](#f-03) | Nucleation-Resttropfen zerstört die Flüssigkeit des Elternpartikels | kritisch | ja (nur Granulation) |
-| [F-04](#f-04) | Agglomerations-Propensity ist O(n²) pro Ereignis | hoch (Performance) | nein |
+| [F-04](#f-04) | Agglomerations-Propensity ist O(n²) pro Ereignis | hoch (Performance) | teilweise (Momentenform + Aufrufzahl halbiert, s. Nachtrag) |
 | [F-05](#f-05) | `liquid_bridge`-Kernel fällt auf n² Python-Aufrufe zurück | hoch (Performance) | nein |
 | [F-06](#f-06) | Kontinuierliche Prozesse als Python-Schleife pro Ereignis | hoch (Performance) | nein |
 | [F-07](#f-07) | „Links“-Snapshots mischen Vor- und Nach-Ereignis-Zustand | mittel | nein (behoben) |
@@ -333,6 +333,41 @@ Summationsreihenfolge über n Terme erwarten lässt.
 
 Ensemble-Vergleich über 8 Seeds (`agg_shear_1d`): die Momente M0/M1/M2 stimmen
 in beiden Modi überein, `|Δ| / MC-Streuung = 0.000`.
+
+### Nachtrag 04.09.2026 — Aufrufzahl halbiert (commit `155af96`)
+
+Die Momentenform senkt die Kosten *eines* Rebuilds. Unabhängig davon lief der
+Rebuild **zweimal pro angenommenem Ereignis**: einmal aus `_do_one_agg` /
+`_do_one_break` heraus, und danach noch einmal in `solve()`, nachdem die
+Handler (Kompression, Internalisierung, Nucleation) den Zustand erneut
+verändert hatten.
+
+Die Ereignismethoden bauen jetzt nicht mehr selbst auf; `solve()` tut es
+**einmal pro Iteration, bedingungslos** am Ende. Gemessen auf
+`granulation_rumpf_dynamic_1d` (EKE, nicht separierbar → O(n²)-Pfad, alle
+Handler aktiv, 1599 Ereignisse, n_comp 2889):
+
+| | vorher | nachher |
+|---|---:|---:|
+| `_rebuild_all_propensities` Aufrufe | 3010 | **1600** (= 1/Iteration) |
+| Wandzeit (min von 3 Läufen) | 63,4 s | **33,5 s** (1,90×) |
+| Anteil am Lauf | 72,7 % | 58,1 % |
+
+Bewusst ohne Bedingung — ein Gate wäre ein zweiter Mechanismus, den man beim
+nächsten Codepfad vergessen kann, und das Vergessen scheitert *still*. Preis:
+ein Rebuild auch bei abgelehnten Ereignissen, wodurch Handler-freie Läufe
+langsamer werden (`agg_shear_2d` 113 s → 143 s). Für Läufe mit Handlern ist der
+Preis null, weil dort ohnehin jede Iteration aufgebaut werden musste.
+
+Neun von zehn Golden-Fingerprints blieben bitgleich. `break_powerlaw_1d` änderte
+sich absichtlich: reiner Bruch ohne Handler bekam vorher **gar keinen** vollen
+Rebuild (der Bruch-Sampler wurde rein inkrementell gepflegt), jetzt läuft
+`_calc_break_rates_full` jede Iteration — der volle Rebuild ist die Referenz,
+die inkrementelle Akkumulation driftet.
+
+**Falle für später:** das Timer-Inkrement darf **nicht** hinter den Rebuild
+wandern. `dt_agg_from_sum_prop(a_tot, Vc, sum_prop)` liest `self.a_tot` *live*,
+und die Nucleation hängt danach Partikel an → anderes `dt`, andere Trajektorie.
 
 ---
 

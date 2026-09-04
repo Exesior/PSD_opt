@@ -328,12 +328,33 @@ falls sie es je nicht wäre.
 Handler können während `solve()` nicht angehängt werden, also spart das drei
 Attributsuchen pro Ereignis.
 
-**Propensity-Auffrischung nach Nucleation.** Nucleation legt Partikel an und
-verschiebt Gewicht. Ein frisch angehängter Slot hat `_r_agg = 0` und wäre für die
-Paarziehung unerreichbar. Deshalb meldet der Handler über
-`consume_population_changed()`, ob er tatsächlich etwas verändert hat – und nur
-dann wird einmal pro Ereignis (nicht pro Tropfen!) aufgefrischt. Das hält die
-Kosten bei O(n) je Ereignis statt O(n) je Tropfen.
+**Genau ein Propensity-Rebuild pro Iteration.** Am Ende jeder Schleifenrunde –
+nach dem MC-Ereignis *und* nach beiden Handlern – werden `_r_agg` und
+`_break_rate` **bedingungslos** einmal neu aufgebaut. Alles, was sie ungültig
+machen kann, ist bis dahin passiert: das Ereignis (Gewicht verschoben, Partikel
+angelegt oder gelöscht), die Kompression (schreibt Porosität und `V_dry` für
+fast die ganze Population um) und die Nucleation (hängt Partikel an, ein frisch
+angehängter Slot hat `_r_agg = 0` und wäre sonst für die Paarziehung
+unerreichbar).
+
+Bis zum 04.09.2026 frischten `_do_one_agg` / `_do_one_break` *zusätzlich* selbst
+auf – der teuerste Vorgang des Solvers lief damit zweimal pro angenommenem
+Ereignis. Das Zusammenlegen brachte auf `granulation_rumpf_dynamic_1d` Faktor
+1,9 (63,4 s → 33,5 s) bei identischem Fingerprint.
+
+Bewusst **ohne** Bedingung: ein Gate wäre ein zweiter Mechanismus, der mit der
+Physik synchron bleiben muss. Jeder künftige Codepfad, der Gewicht bewegt,
+müsste daran denken, ein Flag zu setzen – und das Vergessen scheitert *still*,
+der Lauf rechnet auf veralteten Propensities weiter. Der Preis ist ein Rebuild
+auch bei abgelehnten Ereignissen; in Läufen mit Handlern ist er null, weil dort
+ohnehin jede Iteration aufbauen musste.
+
+`consume_population_changed()` wird weiterhin gerufen, obwohl der Rückgabewert
+nicht mehr gelesen wird – der Aufruf setzt das Handler-Flag zurück.
+
+Wer `_do_one_agg` / `_do_one_break` **außerhalb** von `solve()` in einer Schleife
+aufruft (Tests, Diagnoseskripte), muss `_refresh_samplers_after_agg()` selbst
+aufrufen; sonst zieht ab dem zweiten Durchlauf aus veralteten Propensities.
 
 **Abbruchbedingungen.** `maxiter`, `t_vec[-1]`, optional `max_particles`
 (wichtig bei bruchdominierten Läufen, sonst kann die Partikelzahl explodieren) und
@@ -419,8 +440,10 @@ und es braucht keine Epsilon-Schwelle.
 2. _compute_agg_dW(i, j, …)   → Paketgröße
 3. _merge_pair(i, j, dW)      → Kind erzeugen
 4. _consume_parent_weight     → W_i, W_j reduzieren, ggf. löschen
-5. _refresh_samplers_after_agg → Propensities neu
 ```
+
+Der Propensity-Rebuild gehört **nicht** dazu: `solve()` baut einmal pro
+Iteration auf, nach dem Ereignis und nach den Handlern (siehe 3.1).
 
 Jede Ablehnung führt zu einem **No-Op-Ereignis**: die Zeit schreitet fort, es
 passiert nichts. Das ist statistisch korrekt (Rejection Sampling) und der Grund,
@@ -605,7 +628,8 @@ absichtlich **nicht** `mcpbe_agg::_merge_pair`. Innerhalb der Tropfenschleife da
 kein Propensity-Rebuild laufen – das wäre O(n) *pro Tropfen* statt pro Ereignis.
 Der Preis dafür ist, dass diese Routine dieselben Regeln nachbilden muss
 (insbesondere die `i == j`-Kappung auf `min(δ_i, W_i/2)`). Nachgeholt wird der
-Rebuild einmal pro MC-Ereignis über `consume_population_changed()` (siehe 3.1).
+Rebuild vom bedingungslosen Einzel-Rebuild am Ende der `solve()`-Iteration
+(siehe 3.1).
 
 **Index-Nachverfolgung.** Weil die Zwangsagglomeration Eltern löschen kann und
 dabei Swap-with-last greift, wird der Index des frisch erzeugten Kindes über

@@ -327,7 +327,14 @@ Ablauf pro Ereignis (`_do_one_agg`):
    kommen vom `porosity_growth_kernel`.
 4. **`_consume_parent_weight(i, j, dW)`** — `W[i] -= dW`, `W[j] -= dW` (bzw.
    `W[i] -= 2·dW` bei `i == j`). Partikel mit `W <= 0` werden entfernt.
-5. **`_refresh_samplers_after_agg()`** — Propensities neu berechnen.
+
+Die Propensities werden dabei **nicht** angefasst. `solve()` baut sie einmal pro
+Iteration bedingungslos neu auf — nach dem Ereignis *und* nach den Handlern, die
+Porosität, `V_dry` und Gewichte erneut verändern. Bis 04.09.2026 frischte das
+Ereignis zusätzlich selbst auf; das Zusammenlegen brachte Faktor 1,9 auf dem
+Produktionsfall bei identischem Fingerprint. Wer `_do_one_agg` außerhalb von
+`solve()` in einer Schleife aufruft, muss `_refresh_samplers_after_agg()` selbst
+aufrufen.
 
 **Bias-Korrektur (Ji & Rhein, Gl. 33/36–41):** Weil das ausgeführte Paket durch
 das verfügbare Gewicht *beider* Partner begrenzt ist, muss die

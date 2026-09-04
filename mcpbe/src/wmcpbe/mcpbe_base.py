@@ -2510,12 +2510,15 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # would save the rebuild on a rejected event, but it would also be a
             # second mechanism that has to stay in sync with the physics: every
             # future code path that moves weight would have to remember to set
-            # the flag, and forgetting it fails SILENTLY -- the run continues on
-            # stale propensities, which is precisely the class of bug that
-            # F-04 / the nucleation propensity blockade already cost days to
-            # find. The cost is bounded (one rebuild per rejected event) and
-            # zero whenever a continuous-process handler is attached, since that
-            # made the old `state_changed` gate true on every iteration anyway.
+            # the flag, and forgetting it fails SILENTLY -- the run just carries
+            # on with stale propensities. That is exactly how the nucleation
+            # propensity blockade happened (see
+            # mcpbe/docs/historical/Nucleation_Propensity_Blockade.md), and it
+            # cost days to find. The price here is one rebuild per REJECTED
+            # event; with a continuous-process handler attached it is zero,
+            # because the old `state_changed` gate was true on every iteration
+            # anyway. Halving the call count is finding F-04 in
+            # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
             if pt in ("agglomeration", "mix"):
                 self._rebuild_all_propensities()
                 self._agg_sampler = rebuild_sampler(
