@@ -8,7 +8,7 @@
     "sum_W": 259.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.05060030000095139
+    "seconds": 0.0816013000003295
   },
   {
     "scenario": "agg_shear_1d_large",
@@ -19,7 +19,7 @@
     "sum_W": 1854.0,
     "solid_volume": 1.0471975511965975e-15,
     "liquid_volume": 0.0,
-    "seconds": 0.0494133000029251
+    "seconds": 0.061049700001603924
   },
   {
     "scenario": "agg_constant_1d",
@@ -30,7 +30,7 @@
     "sum_W": 239.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.04550149999704445
+    "seconds": 0.0624074000006658
   },
   {
     "scenario": "agg_sum_1d",
@@ -41,7 +41,7 @@
     "sum_W": 257.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.04701600000043982
+    "seconds": 0.06452699999863398
   },
   {
     "scenario": "agg_brownian_1d",
@@ -52,7 +52,7 @@
     "sum_W": 499.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.0003738000013981946
+    "seconds": 0.0004662000028474722
   },
   {
     "scenario": "agg_shear_2d",
@@ -63,18 +63,18 @@
     "sum_W": 286.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 113.34217070000159
+    "seconds": 199.86765949999972
   },
   {
     "scenario": "break_powerlaw_1d",
-    "hash": "5543957bd89f0dadfcb365a449f4ec69b83963faa796d0b37920aca597e3cbed",
+    "hash": "a824e04e1035c0e930075a6c15264bb62731f2393cac1bf3c0e033ddb544cce8",
     "events": 1499,
-    "a_tot": 1868,
-    "sim_time": 148.7273602227435,
-    "sum_W": 2015.0,
-    "solid_volume": 2.6179938780348164e-16,
+    "a_tot": 1826,
+    "sim_time": 151.1144163767832,
+    "sum_W": 2244.0,
+    "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.2776025999992271
+    "seconds": 0.5658556000016688
   },
   {
     "scenario": "mix_1d",
@@ -85,7 +85,7 @@
     "sum_W": 517.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.0796784000012849
+    "seconds": 0.21519930000067689
   },
   {
     "scenario": "granulation_1d",
@@ -96,7 +96,7 @@
     "sum_W": 381.0,
     "solid_volume": 2.0943951023931952e-16,
     "liquid_volume": 1.0000000000000005e-18,
-    "seconds": 0.03991409999798634
+    "seconds": 0.09091039999839268
   },
   {
     "scenario": "granulation_rumpf_dynamic_1d",
@@ -107,6 +107,6 @@
     "sum_W": 566607.0,
     "solid_volume": 1.2347715765669322e-08,
     "liquid_volume": 3.2700000007301148e-09,
-    "seconds": 75.7538628000002
+    "seconds": 51.949522400002024
   }
 ]

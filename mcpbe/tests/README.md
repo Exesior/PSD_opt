@@ -29,7 +29,6 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `test_merger_lookup_equivalence.py` | `merger_lookup` in {scan, hash, hash_lazy} bleibt physikalisch äquivalent. |
 | `golden_reference.json` | **Aktuelle Baseline**, aufgenommen auf `a4aa35a` + Referenzszenario. Zehn Szenarien, Gesamtlaufzeit ~190 s. |
-| `golden_reference.OUTDATED.json` | Veraltet (Stand 2026-07-31), stimmt seit der Mixer-Speed-Integration mit keinem Szenario überein. Nur noch als historischer Diff-Anker. |
 
 ---
 

@@ -719,7 +719,16 @@ class MCPBEAgg:
 
         new_idx = self._merge_pair(i, j, dW)
         self._consume_parent_weight(i, j, dW)
-        self._refresh_samplers_after_agg()
+        # NOTE: the propensities are NOT rebuilt here. `solve()` rebuilds
+        # unconditionally once at the end of every iteration, after the
+        # continuous-process and nucleation handlers have run -- those change
+        # porosity, V_dry and the weights again, so rebuilding here as well
+        # meant doing the single most expensive operation in the solver twice
+        # per accepted event (measured on `granulation_rumpf_dynamic_1d`:
+        # 1387 of 3010 rebuilds, 36 % of the run).
+        #
+        # Callers OUTSIDE `solve()` must call
+        # :meth:`_refresh_samplers_after_agg` themselves before drawing again.
         del new_idx  # merged particle index is not needed by the caller
 
     def _select_pair(self, a: int) -> tuple[int, int, float] | None:

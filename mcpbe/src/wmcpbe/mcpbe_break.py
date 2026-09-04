@@ -944,12 +944,19 @@ class MCPBEBreak:
                 self._particle_merger.remove_from_hash_index(k)
             self._remove_particle_column(k)
 
-        # 3) Agglomeration maintenance (mix mode): full weighted rebuild for consistency
-        pt = self.process_type
-        if pt in ("agglomeration", "mix") and self._agg_sampler is not None:
-            self._rebuild_all_propensities()
-            self._agg_sampler = rebuild_sampler(self._agg_sampler, self._r_agg[:self.a_tot])
-        
+        # 3) Agglomeration maintenance (mix mode).
+        # The fragments changed the size distribution, so every beta(i,j) moved
+        # and the agglomeration propensities need a FULL rebuild -- but not
+        # here. `solve()` rebuilds unconditionally at the end of every
+        # iteration, after the handlers have run (same reasoning as in
+        # mcpbe_agg._do_one_agg).
+        #
+        # The breakage sampler above is different: it is updated INCREMENTALLY,
+        # per touched particle, and that has to stay inside the event -- the
+        # fragment rates must be in place before this method draws its next
+        # particle from `_break_sampler`.
+
+
         # === DEBUG BREAK: NACH ANWENDUNG ===
         if getattr(self, 'mcpbe_debug_mass', False):
             max_events = getattr(self, '_debug_max_events', 20)

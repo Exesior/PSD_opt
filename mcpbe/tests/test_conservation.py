@@ -137,6 +137,10 @@ def test_solid_mass_conserved_per_agglomeration_event():
             break
         before = solid_volume(solver)
         solver._do_one_agg()
+        # `_do_one_agg` does not refresh the samplers -- `solve()` rebuilds once
+        # per iteration instead. A bare loop like this one has to do it itself,
+        # otherwise every draw after the first uses stale propensities.
+        solver._refresh_samplers_after_agg()
         worst = max(worst, _rel(solid_volume(solver), before))
 
     assert worst < CONSERVATION_RTOL, f"worst per-event solid drift {worst:.3e}"
@@ -181,6 +185,7 @@ def test_liquid_conserved_by_agglomeration():
             break
         prev = liquid_volume(solver)
         solver._do_one_agg()
+        solver._refresh_samplers_after_agg()  # see the note above
         worst = max(worst, _rel(liquid_volume(solver), prev))
 
     assert worst < CONSERVATION_RTOL, f"worst per-event liquid drift {worst:.3e}"

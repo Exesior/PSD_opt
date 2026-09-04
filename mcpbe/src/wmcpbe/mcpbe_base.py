@@ -2242,10 +2242,16 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 self.real_agg_events += float(max(0.0, float(getattr(self, "_last_agg_dW", 0.0))))
                 sum_prop_after = agg_total_propensity()
                 elapsed_time = timer_agg
+                # The clock is advanced HERE, not after the rebuild below.
+                # `agg_event_dt` does not only consume the two propensity sums:
+                # `dt_agg_from_sum_prop` also reads `self.a_tot` and `self.Vc`
+                # live, and nucleation appends particles further down. Moving
+                # this past the handlers therefore changes dt and with it the
+                # whole trajectory -- verified against the golden reference.
                 dtd_agg = agg_event_dt(sum_prop_before, sum_prop_after)
                 timer_agg += dtd_agg
             elif pt == "breakage":
-                # total propensity BEFORE the event (Î"t uses event Î"W over pre-event propensity)
+                # total propensity BEFORE the event (dt uses event dW over pre-event propensity)
                 sum_prop_before = break_total_propensity()
                 self._do_one_break()  # sets self._last_break_dW for packeted events
                 self.real_break_events += float(max(0.0, float(getattr(self, "_last_break_dW", 0.0))))
@@ -2253,7 +2259,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 elapsed_time = timer_break
                 dtd_break = break_event_dt(sum_prop_before, sum_prop_after)
                 timer_break += dtd_break
-                
+
                 # Check particle limit after breakage (increases particle count)
                 if max_particles is not None and self.a_tot > max_particles:
                     self._hit_particle_limit = True
@@ -2409,12 +2415,10 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # affect this event's timing.
             dt_event = elapsed_time - t_prev  # time since the previous MC event
 
-            # Both the continuous processes and nucleation invalidate the
-            # stored agglomeration/breakage propensities. Collect that in one
-            # flag and rebuild ONCE, after both have run -- rebuilding inside
-            # each block would do the work twice in every event where both
-            # fire, which is most of them while liquid is being added.
-            state_changed = False
+            # Both the continuous processes and nucleation invalidate the stored
+            # agglomeration/breakage propensities -- as does the MC event above.
+            # All three are covered by the single unconditional rebuild further
+            # down, so nothing in this region rebuilds on its own.
 
             # Liquid internalization and/or porosity compression via kernels.
             if continuous_processes is not None:
@@ -2450,7 +2454,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # per changed QUANTITY would be worse still: it would have to
                 # know which kernels read saturation, and would silently go
                 # wrong the first time an aggregation kernel does.
-                state_changed = True
 
             # Nucleation follows its own time schedule.
             if nucleation is not None:
@@ -2467,43 +2470,63 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 nucleation.step(float(current_time), float(dt_event))
 
                 # Nucleation appends particles and moves weight around, so the
-                # agglomeration/breakage propensities are stale afterwards --
-                # exactly as after an agglomeration or breakage event, which
-                # both refresh them (see mcpbe_agg._refresh_samplers_after_agg
-                # and mcpbe_break). Nucleation never did, and nothing else
-                # covers it: `_append_particle_column` hands the new column to
-                # the sampler as `_r_agg[idx]`, which for a fresh slot is 0.
+                # agglomeration/breakage propensities are stale afterwards. The
+                # unconditional rebuild below covers that; historically it hung
+                # off this flag alone, which is how the propensity blockade
+                # happened: `_append_particle_column` hands the new column to
+                # the sampler as `_r_agg[idx]`, which for a fresh slot is 0, so
+                # a nucleated particle was UNREACHABLE for the pair draw until
+                # something rebuilt. With `INITIAL_POROSITY = 0` nothing did --
+                # measured 0 agglomerations across 13 parameter variants, one of
+                # them with 21812 collisions. See
+                # mcpbe/docs/historical/Nucleation_Propensity_Blockade.md.
                 #
-                # A nucleated particle was therefore UNREACHABLE for the pair
-                # draw -- with `INITIAL_POROSITY = 0` (no breakage, hence no
-                # refresh from that side either) this locked itself in place:
-                # every drawn pair consisted of the original, still dry
-                # particles, the Stokes criterion rejected it as "both dry",
-                # no agglomeration happened, and so nothing ever refreshed the
-                # propensities. Measured: 0 agglomerations across 13 parameter
-                # variants, including one with 21812 collisions.
-                #
-                # `consume_population_changed()` RESETS the handler's flag, so
-                # it has to be called on every event regardless of what
-                # `state_changed` already holds. Writing
-                # `state_changed = state_changed or nucleation.consume_...()`
-                # would short-circuit and leave the flag set, leaking into the
+                # The call stays even though its return value is no longer read:
+                # `consume_population_changed()` RESETS the handler's flag, and
+                # skipping it would leave that flag set and leaking into the
                 # next event.
-                if nucleation.consume_population_changed():
-                    state_changed = True
+                nucleation.consume_population_changed()
 
-            # One rebuild per event, covering both causes above.
-            if state_changed:
-                if pt in ("agglomeration", "mix"):
-                    self._rebuild_all_propensities()
-                    self._agg_sampler = rebuild_sampler(
-                        self._agg_sampler, self._r_agg[: self.a_tot]
-                    )
-                if pt in ("breakage", "mix"):
-                    self._calc_break_rates_full()
-                    self._break_sampler = rebuild_sampler(
-                        self._break_sampler, self._break_rate[: self.a_tot]
-                    )
+            # EXACTLY ONE rebuild per iteration, UNCONDITIONALLY.
+            #
+            # This is the single point where the agglomeration and breakage
+            # propensities are brought up to date. Everything that can
+            # invalidate them has happened by now: the MC event itself
+            # (_do_one_agg / _do_one_break moved weight, created particles,
+            # removed particles) and both handlers (compression rewrites
+            # porosity and V_dry for nearly the whole population, nucleation
+            # appends particles and shifts weight).
+            #
+            # The event methods used to rebuild on their own, which meant a
+            # SECOND full rebuild here on every accepted event -- and the
+            # rebuild is by far the most expensive thing the solver does
+            # (72 % of `granulation_rumpf_dynamic_1d`). Collapsing the two is
+            # numerically identical, because nothing between the event and this
+            # point reads the propensities: the snapshot block copies only
+            # V_flat, W, liquid_volume, porosity and saturation, and neither
+            # handler touches `_r_agg` / `_break_rate` / the samplers.
+            #
+            # Deliberately NOT gated on "did anything actually change". A gate
+            # would save the rebuild on a rejected event, but it would also be a
+            # second mechanism that has to stay in sync with the physics: every
+            # future code path that moves weight would have to remember to set
+            # the flag, and forgetting it fails SILENTLY -- the run continues on
+            # stale propensities, which is precisely the class of bug that
+            # F-04 / the nucleation propensity blockade already cost days to
+            # find. The cost is bounded (one rebuild per rejected event) and
+            # zero whenever a continuous-process handler is attached, since that
+            # made the old `state_changed` gate true on every iteration anyway.
+            if pt in ("agglomeration", "mix"):
+                self._rebuild_all_propensities()
+                self._agg_sampler = rebuild_sampler(
+                    self._agg_sampler, self._r_agg[: self.a_tot]
+                )
+            if pt in ("breakage", "mix"):
+                self._calc_break_rates_full()
+                self._break_sampler = rebuild_sampler(
+                    self._break_sampler, self._break_rate[: self.a_tot]
+                )
+
 
             # Keep the ParticleMerger's hash index current. Its key is built
             # from V_dry/liquid/porosity/saturation, and several sites above
@@ -2527,6 +2550,24 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             if self.a_tot < 2 and pt in ("agglomeration", "mix"):
                 break
         
+        # The `max_particles` guards break out of the loop BEFORE the rebuild
+        # block, so on those exits the stored propensities would describe the
+        # state before the last event. Nothing in this package reads them after
+        # solve() -- the post-processing works off the snapshots -- but leaving
+        # the solver in an inconsistent state is a trap for anyone who resumes
+        # or inspects it, so square it away here.
+        if self._hit_particle_limit:
+            if pt in ("agglomeration", "mix") and self._agg_sampler is not None:
+                self._rebuild_all_propensities()
+                self._agg_sampler = rebuild_sampler(
+                    self._agg_sampler, self._r_agg[: self.a_tot]
+                )
+            if pt in ("breakage", "mix") and self._break_sampler is not None:
+                self._calc_break_rates_full()
+                self._break_sampler = rebuild_sampler(
+                    self._break_sampler, self._break_rate[: self.a_tot]
+                )
+
         # Finalize nucleation after MC loop
         # Handles case where NO MC events occurred during simulation
         if hasattr(self, 'nucleation') and self.nucleation is not None:
