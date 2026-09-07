@@ -320,7 +320,7 @@ Beispiel: Vc_ref=1e-6 m³, Vc=2e-6 m³, W=50
 | `compression_kernel` | Porositätskompression (legacy) |
 | `liquid_dist_kernel` | Partikelauswahl für Flüssigkeit |
 | `agglomeration_acceptance_kernel` | Kollisionsakzeptanz (Stokes) |
-| `porosity_compression_kernel` | Kontinuierliche Kompression |
+| `porosity_compression_kernel` | Kontinuierliche Kompression (`porosity_compression`, `porosity_compression_dynamik`, `porosity_compression_dynamik_rumpf`) |
 | `liquid_internalization_kernel` | Kontinuierliche Internalisierung |
 | `liq_internalisation_agglomeration_kernel` | Internalisierung bei Agglomeration |
 

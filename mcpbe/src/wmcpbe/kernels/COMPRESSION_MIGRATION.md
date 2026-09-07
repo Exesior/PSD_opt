@@ -121,6 +121,16 @@ kernel = get_continuous_kernel(
 poro_new = kernel.compute(poro=0.5, dt=0.1)
 ```
 
+**Drehzahlabhängige Varianten** (gleiche Formel, `rate` → `k`):
+
+| Name | `k` |
+|---|---|
+| `porosity_compression_dynamik` | `rate · n_mixer^c_mixer` (Default `c_mixer = C_BREAK`; `c_mixer = 0` → identisch zu `porosity_compression`) |
+| `porosity_compression_dynamik_rumpf` | `rate · n_mixer^c_mixer / σ(ε,S)` — durch die Rumpf-Festigkeit geteilt; `compute_array` braucht `solver=` (Sättigung, Sauter-Durchmesser) |
+
+`n_mixer` muss zu jedem anderen drehzahlgetriebenen Kernel im Lauf passen
+(`assert_consistent_mixer_speed`, harter Fehler).
+
 ### 2. Liquid Internalization Kernel
 
 **Formel:** `dl_intern/dt = k_int × l_ex × (v_pore - l_intern)`

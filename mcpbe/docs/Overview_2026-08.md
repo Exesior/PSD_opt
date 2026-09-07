@@ -662,6 +662,24 @@ Kompression ist **ausschließlich reduktiv**: Partikel mit `ε ≤ ε_min` bleib
 unverändert (das schließt porenfreie Partikel automatisch mit ein, weil
 `ε_min ≥ 0`).
 
+Die Ratenkonstante `k` kommt aus dem gewählten Kernel:
+
+| Kernel | `k` |
+|---|---|
+| `porosity_compression` | fester Fit-Wert (Default 0.02 1/s) |
+| `porosity_compression_dynamik` | `rate · n_mixer^c_mixer` — drehzahlgetrieben wie Aggregation/Bruch. Default `c_mixer = C_BREAK` (Stoßfrequenz × Stoßenergie, dieselbe Herleitung wie beim dynamischen Bruch). `c_mixer = 0` reproduziert `porosity_compression`. |
+| `porosity_compression_dynamik_rumpf` | `rate · n_mixer^c_mixer / σ(ε,S)` — zusätzlich durch die Rumpf-Festigkeit geteilt (nassere/dichtere Granulate verdichten langsamer). |
+
+Beim Rumpf-Kernel hängt `σ` von `ε` ab, die DGL wird also nichtlinear. `σ`
+faktorisiert aber exakt als `φ(S)·(1−ε)/ε` (numerisch gegen `_sigma_jit` des
+Bruchkernels geprüft), und pro Sub-Schritt wird `σ` bei `ε(t)` **eingefroren**
+und dann dieselbe analytische Exponentialformel angewandt (Exponential-Euler).
+Begründung: das Exponentialgesetz ist die Homogenisierung diskreter Einzelstöße,
+`σ` wirkt pro Stoß bei der aktuellen Porosität; über einen Sub-Schritt von O(1)
+MC-Ereignissen ist das Einfrieren die natürliche Diskretisierung, kein
+Näherungsfehler, und der Rest-Fehler O(k·dt) ist mit `k·dt ≈ 1e-3` unerheblich.
+Das Schema ist unbedingt stabil und hält Asymptote und Monotonie exakt.
+
 Danach wird das Volumen so nachgezogen, dass **`V_solid` exakt konstant bleibt**:
 
 ```
@@ -855,11 +873,11 @@ wirft das Fehlen dort einen `ValueError` mit einer Liste der verfügbaren Kernel
 | Steckplatz | Beantwortet die Frage | Implementierungen |
 |---|---|---|
 | `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005` |
-| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `fittable` |
-| `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf` |
+| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `stokes_dynamik`, `fittable` |
+| `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf`, `powerlaw_rumpf_dynamic` |
 | `porosity_growth_kernel` | Wie entwickelt sich der Porenraum? | `volume_mixing`, `cone_model`, `incomplete_mixing` |
 | `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted` |
-| `porosity_compression_kernel` | Wie schnell kollabieren Poren? | `porosity_compression` |
+| `porosity_compression_kernel` | Wie schnell kollabieren Poren? | `porosity_compression`, `porosity_compression_dynamik`, `porosity_compression_dynamik_rumpf` |
 | `liquid_internalization_kernel` | Wie schnell zieht Flüssigkeit in die Poren? | `liquid_internalization` |
 | `liq_internalisation_agglomeration_kernel` | Wie viel Film wird beim Stoß eingeschlossen / beim Bruch freigesetzt? | `liq_internalisation_agglomeration` |
 

@@ -333,13 +333,16 @@ class KernelManager:
         
         # Porosity Compression Kernel
         # Note: Legacy compression_kernel_name is deprecated - use continuous_processes instead
+        # The configured name selects the kernel (was hard-wired to
+        # 'porosity_compression' before the mixer-speed variants existed);
+        # get_continuous_kernel rejects an unknown name loudly.
         if self.porosity_compression_kernel_name is not None:
             try:
                 from wmcpbe.kernels.continuous_processes import get_continuous_kernel
             except ImportError:
                 from .kernels.continuous_processes import get_continuous_kernel
             self.porosity_compression_kernel = get_continuous_kernel(
-                'porosity_compression',
+                self.porosity_compression_kernel_name,
                 **self.porosity_compression_kernel_params
             )
         else:

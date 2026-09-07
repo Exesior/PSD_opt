@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from wmcpbe import MCPBESolver
+from wmcpbe.kernels.mixer_speed import C_BREAK, N_MIXER_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,22 @@ POWER_LAW = {"p1": 1e-2, "p2": 1.0, "g": 1000.0, "breakrval": 1}
 # scenarios do not silently inherit the BaseSolver default.
 BREAK_ATTRS = {"break_dW_max": 50.0, "BREAKFVAL": 2}
 
+# Mixer-speed compression variants. The dynamic kernels replace the fixed rate
+# k of `porosity_compression` with k = rate * n_mixer**c_mixer (the `_rumpf`
+# one additionally / sigma(eps, S)). The rate values below are picked so that at
+# n_mixer = 20 the effective k reproduces the 0.1 that
+# `granulation_rumpf_dynamic_1d` uses with the static kernel -- the three
+# granulation scenarios then differ ONLY in how the compression rate is formed.
+_COMPRESSION_K_TARGET = 0.1
+_COMPRESSION_N_FACTOR = N_MIXER_DEFAULT ** C_BREAK
+_COMPRESSION_DYNAMIK_RATE = _COMPRESSION_K_TARGET / _COMPRESSION_N_FACTOR
+# Reference strength: dry regime, eps = 0.4, x_s = 34 um (the monodisperse init
+# diameter), default k_rumpf = 2.5, gamma = 0.072 -> sigma = phi(S=0)*(1-eps)/eps.
+_COMPRESSION_SIGMA_REF = (0.072 / 34e-6) * 2.5 * (1.0 - 0.4) / 0.4
+_COMPRESSION_DYNAMIK_RUMPF_RATE = (
+    _COMPRESSION_K_TARGET * _COMPRESSION_SIGMA_REF / _COMPRESSION_N_FACTOR
+)
+
 
 SCENARIOS: Dict[str, Scenario] = {
     s.name: s
@@ -416,6 +433,180 @@ SCENARIOS: Dict[str, Scenario] = {
                 "Production wet granulation (EKE + stokes_dynamik + "
                 "powerlaw_rumpf_dynamic + cone_model + nucleation + continuous "
                 "processes). Mirrors Trials/test_powerlaw_rumpf_dynamic_full.py."
+            ),
+        ),
+        # Two deliberate copies of granulation_rumpf_dynamic_1d that change ONLY
+        # the porosity-compression slot: the mixer-speed variant, and the
+        # mixer-speed + Rumpf-strength variant. Same seed, same everything else,
+        # so a fingerprint diff against granulation_rumpf_dynamic_1d isolates
+        # exactly the compression-kernel effect. Both keep n_mixer = 20 to match
+        # the other mixer-speed kernels (assert_consistent_mixer_speed).
+        Scenario(
+            name="granulation_compression_dynamik_1d",
+            dim=1,
+            process_type="mix",
+            a0=1000,
+            t_end=120.0,
+            maxiter=1600,
+            seed=205,
+            agg_kernel_name="eke_darelius2005",
+            agg_kernel_params={"corr_beta": 5e-8, "n_mixer": 20.0},
+            agg_acceptance_kernel_name="stokes_dynamik",
+            agg_acceptance_kernel_params={
+                "U_coll_ref": 0.0794,
+                "n_mixer": 20.0,
+                "binder_viscosity": 0.1,
+                "rho_solid": 600.0,
+                "rho_liquid": 1000.0,
+                "h_a": 500e-9,
+            },
+            break_kernel_name="powerlaw_rumpf_dynamic",
+            break_kernel_params={
+                "p1": 1e13,
+                "p2": 1.0,
+                "n_mixer": 20.0,
+                "breakrval": 4,
+                "k": 2.5,
+                "alpha": 1.0,
+                "gamma": 0.072,
+                "delta": 0.0,
+                "x_s": None,
+            },
+            porosity_growth_kernel_name="cone_model",
+            porosity_compression_kernel_name="porosity_compression_dynamik",
+            porosity_compression_kernel_params={
+                "rate": _COMPRESSION_DYNAMIK_RATE,
+                "min_porosity": 0.2,
+                "n_mixer": 20.0,
+            },
+            liquid_internalization_kernel_name="liquid_internalization",
+            liquid_internalization_kernel_params={"k_int": 1e11},
+            liq_internalisation_agglomeration_kernel_name=(
+                "liq_internalisation_agglomeration"
+            ),
+            solver_attrs={
+                "agg_propensity_mode": "moment",
+                "recon_enable": False,
+                "agg_dW_min": 1.0,
+                "agg_dW_max": 20.0,
+                "break_dW_max": 50.0,
+                "SIZEEVAL": 0,
+            },
+            init_particles={
+                "particle_diameter": 34e-6,
+                "initial_porosity": 0.0,
+                "initial_particles": 1000,
+                "initial_weight": 600.0,
+                "control_volume": 1.0,
+            },
+            granulation=True,
+            nucleation_params=dict(
+                enabled=True,
+                volumetric_flow_rate=1.635e-10,
+                droplet_diameter=20e-6,
+                liquid_addition_start=0.0,
+                liquid_addition_duration=20.0,
+                batch_size=20,
+            ),
+            continuous_params=dict(
+                enabled=True,
+                k_int=1e11,
+                compression_enabled=True,
+                compression_rate=0.1,
+                min_porosity=0.2,
+            ),
+            notes=(
+                "granulation_rumpf_dynamic_1d with the mixer-speed compression "
+                "kernel (k = rate * n_mixer**C_BREAK) instead of a fixed rate. "
+                "rate is calibrated so k == 0.1 exactly at n_mixer = 20, so the "
+                "fingerprint is EXPECTED to equal granulation_rumpf_dynamic_1d "
+                "-- a drop-in-equivalence guard. The conservation suite still "
+                "exercises the dynamik compute_array path independently."
+            ),
+        ),
+        Scenario(
+            name="granulation_compression_dynamik_rumpf_1d",
+            dim=1,
+            process_type="mix",
+            a0=1000,
+            t_end=120.0,
+            maxiter=1600,
+            seed=205,
+            agg_kernel_name="eke_darelius2005",
+            agg_kernel_params={"corr_beta": 5e-8, "n_mixer": 20.0},
+            agg_acceptance_kernel_name="stokes_dynamik",
+            agg_acceptance_kernel_params={
+                "U_coll_ref": 0.0794,
+                "n_mixer": 20.0,
+                "binder_viscosity": 0.1,
+                "rho_solid": 600.0,
+                "rho_liquid": 1000.0,
+                "h_a": 500e-9,
+            },
+            break_kernel_name="powerlaw_rumpf_dynamic",
+            break_kernel_params={
+                "p1": 1e13,
+                "p2": 1.0,
+                "n_mixer": 20.0,
+                "breakrval": 4,
+                "k": 2.5,
+                "alpha": 1.0,
+                "gamma": 0.072,
+                "delta": 0.0,
+                "x_s": None,
+            },
+            porosity_growth_kernel_name="cone_model",
+            porosity_compression_kernel_name="porosity_compression_dynamik_rumpf",
+            porosity_compression_kernel_params={
+                "rate": _COMPRESSION_DYNAMIK_RUMPF_RATE,
+                "min_porosity": 0.2,
+                "n_mixer": 20.0,
+                "k": 2.5,
+                "alpha": 1.0,
+                "gamma": 0.072,
+                "delta": 0.0,
+                "x_s": None,
+            },
+            liquid_internalization_kernel_name="liquid_internalization",
+            liquid_internalization_kernel_params={"k_int": 1e11},
+            liq_internalisation_agglomeration_kernel_name=(
+                "liq_internalisation_agglomeration"
+            ),
+            solver_attrs={
+                "agg_propensity_mode": "moment",
+                "recon_enable": False,
+                "agg_dW_min": 1.0,
+                "agg_dW_max": 20.0,
+                "break_dW_max": 50.0,
+                "SIZEEVAL": 0,
+            },
+            init_particles={
+                "particle_diameter": 34e-6,
+                "initial_porosity": 0.0,
+                "initial_particles": 1000,
+                "initial_weight": 600.0,
+                "control_volume": 1.0,
+            },
+            granulation=True,
+            nucleation_params=dict(
+                enabled=True,
+                volumetric_flow_rate=1.635e-10,
+                droplet_diameter=20e-6,
+                liquid_addition_start=0.0,
+                liquid_addition_duration=20.0,
+                batch_size=20,
+            ),
+            continuous_params=dict(
+                enabled=True,
+                k_int=1e11,
+                compression_enabled=True,
+                compression_rate=0.1,
+                min_porosity=0.2,
+            ),
+            notes=(
+                "granulation_rumpf_dynamic_1d with the mixer-speed + "
+                "Rumpf-strength compression kernel "
+                "(k = rate * n_mixer**C_BREAK / sigma(eps, S))."
             ),
         ),
     )

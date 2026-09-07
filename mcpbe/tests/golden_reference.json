@@ -8,7 +8,7 @@
     "sum_W": 259.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.0816013000003295
+    "seconds": 0.06338639999739826
   },
   {
     "scenario": "agg_shear_1d_large",
@@ -19,7 +19,7 @@
     "sum_W": 1854.0,
     "solid_volume": 1.0471975511965975e-15,
     "liquid_volume": 0.0,
-    "seconds": 0.061049700001603924
+    "seconds": 0.051419800030998886
   },
   {
     "scenario": "agg_constant_1d",
@@ -30,7 +30,7 @@
     "sum_W": 239.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.0624074000006658
+    "seconds": 0.05260619998443872
   },
   {
     "scenario": "agg_sum_1d",
@@ -41,7 +41,7 @@
     "sum_W": 257.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.06452699999863398
+    "seconds": 0.055763799988199025
   },
   {
     "scenario": "agg_brownian_1d",
@@ -52,7 +52,7 @@
     "sum_W": 499.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.0004662000028474722
+    "seconds": 0.00045849999878555536
   },
   {
     "scenario": "agg_shear_2d",
@@ -63,7 +63,7 @@
     "sum_W": 286.0,
     "solid_volume": 2.6179938779914936e-16,
     "liquid_volume": 0.0,
-    "seconds": 199.86765949999972
+    "seconds": 144.45539280003868
   },
   {
     "scenario": "break_powerlaw_1d",
@@ -74,7 +74,7 @@
     "sum_W": 2244.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.5658556000016688
+    "seconds": 0.37892719998490065
   },
   {
     "scenario": "mix_1d",
@@ -85,7 +85,7 @@
     "sum_W": 517.0,
     "solid_volume": 2.617993877991494e-16,
     "liquid_volume": 0.0,
-    "seconds": 0.21519930000067689
+    "seconds": 0.09036360000027344
   },
   {
     "scenario": "granulation_1d",
@@ -96,7 +96,7 @@
     "sum_W": 381.0,
     "solid_volume": 2.0943951023931952e-16,
     "liquid_volume": 1.0000000000000005e-18,
-    "seconds": 0.09091039999839268
+    "seconds": 0.03794559999369085
   },
   {
     "scenario": "granulation_rumpf_dynamic_1d",
@@ -107,6 +107,28 @@
     "sum_W": 566607.0,
     "solid_volume": 1.2347715765669322e-08,
     "liquid_volume": 3.2700000007301148e-09,
-    "seconds": 51.949522400002024
+    "seconds": 47.02090719999978
+  },
+  {
+    "scenario": "granulation_compression_dynamik_1d",
+    "hash": "712d78a171a9f7f8755a853828d3178c1fe7686f20d59fcc8203890598c16b77",
+    "events": 1599,
+    "a_tot": 2889,
+    "sim_time": 115.95754607763341,
+    "sum_W": 566607.0,
+    "solid_volume": 1.2347715765669322e-08,
+    "liquid_volume": 3.2700000007301148e-09,
+    "seconds": 49.88959310000064
+  },
+  {
+    "scenario": "granulation_compression_dynamik_rumpf_1d",
+    "hash": "1afd9ab637f8945419098886ca1067bc3620bd02dab5cb72a46ce7fe50ed462f",
+    "events": 1599,
+    "a_tot": 2894,
+    "sim_time": 115.85502353396156,
+    "sum_W": 566986.0,
+    "solid_volume": 1.2347715765669324e-08,
+    "liquid_volume": 3.2700000007301148e-09,
+    "seconds": 45.741478400013875
   }
 ]

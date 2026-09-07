@@ -132,7 +132,8 @@ class PorosityCompressionKernel(CompressionKernel):
 
         return float(porosity_new)
 
-    def compute_array(self, porosity: np.ndarray, dt: float) -> np.ndarray:
+    def compute_array(self, porosity: np.ndarray, dt: float,
+                      solver=None) -> np.ndarray:
         """Vectorised form of :meth:`compute`.
 
         Bit-identical to a loop of scalar calls: the decay factor
@@ -143,6 +144,9 @@ class PorosityCompressionKernel(CompressionKernel):
             porosity: Current porosities; NaN entries ("Vollkoerper") and
                       values <= 0.0 (poreless) pass through unchanged.
             dt:       Time step [s]
+            solver:   Not used (this kernel's rate is a fixed fit value);
+                      accepted for a uniform signature across compression
+                      kernels.
 
         Returns:
             Updated porosities, same shape as ``porosity``.

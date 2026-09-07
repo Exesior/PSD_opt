@@ -394,6 +394,23 @@ Pro `.step(t, dt)`:
    `V_solid` exakt konstant. Übersteigt die Sättigung dabei 1, wird
    überschüssige Flüssigkeit externalisiert.
 
+   Die Ratenkonstante `k` ist wählbar:
+   - `porosity_compression`: fester Fit-Wert (Default 0.02 1/s).
+   - `porosity_compression_dynamik`: `k = rate · n_mixer^c_mixer`, drehzahl­getrieben
+     wie die Aggregations- und Bruchkernel. Default `c_mixer = C_BREAK`
+     (Stoßfrequenz × Stoßenergie, genau wie beim dynamischen Bruch — Verdichtung
+     und Bruch sind derselbe Stoß-Plastifizierungs­mechanismus). `c_mixer = 0`
+     schaltet die Drehzahl ab und reproduziert `porosity_compression`.
+   - `porosity_compression_dynamik_rumpf`: zusätzlich durch die Rumpf-Granulat­festigkeit
+     geteilt, `k(ε,S) = rate · n_mixer^c_mixer / σ(ε,S)` — festere (nassere,
+     dichtere) Granulate verdichten langsamer. `σ` faktorisiert exakt als
+     `φ(S)·(1−ε)/ε`; die DGL bleibt separierbar, wird aber pro Sub-Schritt mit
+     bei `ε(t)` eingefrorenem `σ` gelöst (Exponential-Euler). Begründung: das
+     Exponentialgesetz ist die Homogenisierung diskreter Einzelstöße, `σ` wirkt
+     pro Stoß; über einen Sub-Schritt von O(1) MC-Ereignissen ist das Einfrieren
+     die natürliche Diskretisierung, und der Fehler O(k·dt) ist mit k·dt ≈ 1e-3
+     vernachlässigbar.
+
 ## 3.5 `ParticleMerger` (`particle_merger.py`)
 
 Verhindert, dass redundante Kindpartikel entstehen. Jedes neu erzeugte Partikel
@@ -447,7 +464,7 @@ Liste der verfügbaren Kernel.
 | `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf`, `powerlaw_rumpf_dynamic` |
 | `porosity_growth_kernel` | Wie entwickelt sich der Porenraum? | `volume_mixing`, `cone_model`, `incomplete_mixing` |
 | `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted` |
-| `porosity_compression_kernel` | Wie schnell kollabieren Poren? | `porosity_compression` |
+| `porosity_compression_kernel` | Wie schnell kollabieren Poren? | `porosity_compression`, `porosity_compression_dynamik`, `porosity_compression_dynamik_rumpf` |
 | `liquid_internalization_kernel` | Wie schnell zieht Flüssigkeit in die Poren? | `liquid_internalization` |
 | `liq_internalisation_agglomeration_kernel` | Wie viel Film wird beim Stoß eingeschlossen? | `liq_internalisation_agglomeration` |
 
@@ -490,6 +507,19 @@ rechnet mit seinem eigenen `g`, überschreibt `solver.G` aber nicht. Weicht sein
 Das ist wichtig, weil `solver.G` auch von der Nucleation gelesen wird (für die
 Kollisionsgeschwindigkeit). Ohne diese Regel folgte die Nucleation
 stillschweigend dem Bruchmodell.
+
+**Die Mischerdrehzahl `n_mixer`** ist der zweite solche Fall. Sie treibt fünf
+Kernel — `eke_darelius2005`, `etm_darelius2005`, `stokes_dynamik`,
+`powerlaw_rumpf_dynamic` und `porosity_compression_dynamik(_rumpf)` — die alle
+`kernels/mixer_speed.py` importieren (gemeinsame Defaults, DEM-Exponenten
+`C_FREQ`/`C_VEL`/`C_BREAK`). Hier gibt es keine Vorrangregel: es gibt *einen*
+Mischer. `assert_consistent_mixer_speed` (aufgerufen in `kernel_integration.py`
+über alle sieben Steckplätze) wirft daher einen **harten Fehler**, wenn zwei
+aktive Kernel unterschiedliche `n_mixer` konfiguriert haben. Ein Kernel gilt als
+drehzahlgetrieben, sobald er ein `n_mixer`-Attribut hat — mehr als
+`self.n_mixer` setzen ist nicht nötig. Nur die *Exponenten* übertragen sich aus
+der DEM-Studie; jeder Kernel absorbiert seinen Vorfaktor in einen eigenen
+Fit-Parameter, und `n_mixer` ist nur bis auf einen konstanten Faktor definiert.
 
 ---
 

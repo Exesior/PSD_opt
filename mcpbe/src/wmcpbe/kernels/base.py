@@ -446,6 +446,36 @@ class CompressionKernel(KernelBase):
         """
         pass
 
+    def compute_array(self, porosity: np.ndarray, dt: float,
+                      solver: Optional[Any] = None) -> np.ndarray:
+        """
+        Compute new porosities for a whole particle slice.
+
+        ``ContinuousProcessesHandler._apply_compression`` calls this once per
+        Monte-Carlo event, so a Python loop here costs O(n) interpreter
+        overhead per event. Kernels whose new porosity is a pure function of
+        the old one should override this with a vectorised expression; the
+        default implementation loops over :meth:`compute` and is therefore
+        always correct, just not fast.
+
+        ``solver`` is passed through unconditionally by the handler. Kernels
+        that need per-particle context (saturation, granule size) read it here;
+        the others ignore it.
+
+        Args:
+            porosity: Current porosities [-], shape (n,)
+            dt:       Time step [s]
+            solver:   Reference to solver for per-particle context (optional)
+
+        Returns:
+            porosity_new: Updated porosities, shape (n,)
+        """
+        poro = np.asarray(porosity, dtype=float)
+        out = np.empty(poro.shape[0], dtype=float)
+        for i in range(poro.shape[0]):
+            out[i] = self.compute(float(poro[i]), dt, solver=solver)
+        return out
+
 
 # =============================================================================
 # Liquid Internalization Kernels (time-based)

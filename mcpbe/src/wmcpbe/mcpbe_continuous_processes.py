@@ -357,7 +357,12 @@ class ContinuousProcessesHandler:
         # Step 1: new porosity
         # ------------------------------------------------------------------
         if self.compression_kernel is not None:
-            poro_new = self.compression_kernel.compute_array(poro_old, dt)
+            # `solver` is passed through unconditionally (as for the breakage
+            # rate array): kernels that need per-particle context -- saturation,
+            # granule size for a Rumpf strength -- read it, the others ignore
+            # it. `poro_old` is the pre-step copy, so a strength-resisted
+            # kernel evaluates sigma at the porosity BEFORE this step.
+            poro_new = self.compression_kernel.compute_array(poro_old, dt, solver=solver)
         else:
             # Fallback: analytical exponential decay towards min_porosity.
             rate = self.config.compression_rate

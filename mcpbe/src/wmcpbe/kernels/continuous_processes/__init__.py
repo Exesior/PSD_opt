@@ -6,6 +6,10 @@ during the simulation via operator splitting (not tied to discrete events).
 
 Available kernels:
     - porosity_compression: Exponential porosity decay under shear
+    - porosity_compression_dynamik: as above, rate driven by the mixer speed
+      (k = rate * n_mixer ** c_mixer)
+    - porosity_compression_dynamik_rumpf: as above, additionally divided by the
+      Rumpf granule strength sigma(eps, S)
     - liquid_internalization: Capillary-driven liquid internalization
 
 Usage:
@@ -26,12 +30,18 @@ from ..base import (
 
 # Import all kernel implementations
 from .porosity_compression import PorosityCompressionKernel
+from .porosity_compression_dynamik import PorosityCompressionDynamikKernel
+from .porosity_compression_dynamik_rumpf import (
+    PorosityCompressionDynamikRumpfKernel,
+)
 from .liquid_internalization import LiquidInternalizationKernel
 from .liq_internalisation_agglomeration import LiquidInternalisationAgglomerationKernel
 
 # Registry of available kernels
 CONTINUOUS_KERNELS: dict[str, Type] = {
     'porosity_compression': PorosityCompressionKernel,
+    'porosity_compression_dynamik': PorosityCompressionDynamikKernel,
+    'porosity_compression_dynamik_rumpf': PorosityCompressionDynamikRumpfKernel,
     'liquid_internalization': LiquidInternalizationKernel,
     'liq_internalisation_agglomeration': LiquidInternalisationAgglomerationKernel,
 }
@@ -72,5 +82,7 @@ __all__ = [
     'get_continuous_kernel',
     'list_continuous_kernels',
     'PorosityCompressionKernel',
+    'PorosityCompressionDynamikKernel',
+    'PorosityCompressionDynamikRumpfKernel',
     'LiquidInternalizationKernel',
 ]

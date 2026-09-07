@@ -56,6 +56,13 @@ SOLID_SCENARIOS = [
     # only the golden-reference fingerprint did, and a hash says nothing about
     # mass conservation, sampler consistency or state bounds.
     "granulation_rumpf_dynamic_1d",
+    # Same configuration with the mixer-speed compression kernels. V_solid must
+    # stay exactly constant whatever porosity the kernel returns -- it only
+    # supplies `porosity`, and `_apply_compression` writes porosity and V_dry
+    # over one mask (audit B-07). The `_rumpf` variant also exercises the
+    # per-particle sigma(eps, S) path inside compute_array.
+    "granulation_compression_dynamik_1d",
+    "granulation_compression_dynamik_rumpf_1d",
 ]
 
 

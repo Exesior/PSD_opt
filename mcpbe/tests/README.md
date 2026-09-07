@@ -21,14 +21,14 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 
 | Datei | Zweck |
 |---|---|
-| `bench/scenarios.py` | Zehn vollständig spezifizierte, geseedete Simulationen. Einzige Quelle für Solver-Konfigurationen in Tests und Benchmarks. |
+| `bench/scenarios.py` | Zwölf vollständig spezifizierte, geseedete Simulationen. Einzige Quelle für Solver-Konfigurationen in Tests und Benchmarks. |
 | `bench/golden_reference.py` | Bitgenaue Regressions-Fingerprints (SHA-256 über alle float64-Bytes). |
 | `bench/bench_wmcpbe.py` | Wandzeit-Benchmark mit Vorher/Nachher-Vergleich. |
 | `bench/profile_wmcpbe.py` | `cProfile` für ein einzelnes Szenario. |
 | `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`../docs/historical/MOMENT_MODE.md`](../docs/historical/MOMENT_MODE.md)). |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `test_merger_lookup_equivalence.py` | `merger_lookup` in {scan, hash, hash_lazy} bleibt physikalisch äquivalent. |
-| `golden_reference.json` | **Aktuelle Baseline**, aufgenommen auf `a4aa35a` + Referenzszenario. Zehn Szenarien, Gesamtlaufzeit ~190 s. |
+| `golden_reference.json` | **Aktuelle Baseline**. Zwölf Szenarien (inkl. der beiden drehzahlabhängigen Kompressionsvarianten), Gesamtlaufzeit ~310 s. |
 
 ---
 
@@ -103,11 +103,11 @@ Jedes Szenario ist über ein **festes Ereignisbudget** begrenzt
 direkt proportional zu den Kosten pro Monte-Carlo-Ereignis, und die Suite bleibt
 unabhängig von den Kernelparametern in einem vorhersagbaren Rahmen.
 
-Zwei Szenarien dominieren die Wandzeit: `agg_shear_2d` (~110 s, 2D hat keinen
-kompilierten Batch-Pfad) und `granulation_rumpf_dynamic_1d` (~76 s, EKE ist
-nicht separierbar und laeuft daher über den O(n²)-Pfad). Alle übrigen zusammen
-bleiben unter einer Sekunde; ein kompletter Golden-Reference-Durchlauf liegt bei
-~190 s.
+`agg_shear_2d` dominiert die Wandzeit (~110-175 s, 2D hat keinen kompilierten
+Batch-Pfad). Danach folgen die drei `granulation_*_dynamic/dynamik_1d`-Szenarien
+(je ~55-76 s, EKE ist nicht separierbar und laeuft über den O(n²)-Pfad). Alle
+übrigen zusammen bleiben unter einer Sekunde; ein kompletter
+Golden-Reference-Durchlauf liegt bei ~310 s.
 
 | Szenario | dim | Prozess | n₀ | Ereignisse | Deckt ab |
 |---|---|---|---|---|---|
@@ -120,7 +120,9 @@ bleiben unter einer Sekunde; ein kompletter Golden-Reference-Durchlauf liegt bei
 | `break_powerlaw_1d` | 1 | Breakage | 500 | 1500 | Bruchrate + Fragment-CDF |
 | `mix_1d` | 1 | Mix | 500 | 300 | schlimmster Fall: beide Sampler pro Ereignis |
 | `granulation_1d` | 1 | Agglomeration | 400 | 300 | + Nucleation, Internalisierung, Kompression |
-| `granulation_rumpf_dynamic_1d` | 1 | Mix | 1000 | 1600 | **Produktionsfall**: EKE + stokes_dynamik + powerlaw_rumpf_dynamic + cone_model, mit allen Handlern. Einziges Szenario mit **Bruchereignis bei aktiven Handlern**. ~76 s |
+| `granulation_rumpf_dynamic_1d` | 1 | Mix | 1000 | 1600 | **Produktionsfall**: EKE + stokes_dynamik + powerlaw_rumpf_dynamic + cone_model, mit allen Handlern. Einziges Szenario mit **Bruchereignis bei aktiven Handlern**. ~55-76 s |
+| `granulation_compression_dynamik_1d` | 1 | Mix | 1000 | 1600 | wie oben, aber `porosity_compression_dynamik` (k = rate·n_mixer^C_BREAK). rate kalibriert → Fingerprint = `granulation_rumpf_dynamic_1d` (Drop-in-Äquivalenz). |
+| `granulation_compression_dynamik_rumpf_1d` | 1 | Mix | 1000 | 1600 | wie oben, aber `porosity_compression_dynamik_rumpf` (k = rate·n_mixer^C_BREAK / σ(ε,S)). Übt den Pro-Partikel-σ-Pfad in `compute_array`. |
 
 `granulation_rumpf_dynamic_1d` spiegelt
 [`Trials/test_powerlaw_rumpf_dynamic_full.py`](../src/wmcpbe/Trials/test_powerlaw_rumpf_dynamic_full.py)
