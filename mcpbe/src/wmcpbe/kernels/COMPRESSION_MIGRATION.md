@@ -126,7 +126,7 @@ poro_new = kernel.compute(poro=0.5, dt=0.1)
 | Name | `k` |
 |---|---|
 | `porosity_compression_dynamik` | `rate · n_mixer^c_mixer` (Default `c_mixer = C_BREAK`; `c_mixer = 0` → identisch zu `porosity_compression`) |
-| `porosity_compression_dynamik_rumpf` | `rate · n_mixer^c_mixer / σ(ε,S)` — durch die Rumpf-Festigkeit geteilt; `compute_array` braucht `solver=` (Sättigung, Sauter-Durchmesser) |
+| `porosity_compression_dynamik_rumpf` | `(rate · n_mixer^c_mixer) / σ(ε,S)` — `1/σ` erweitert den Antriebsterm `(ε − ε_min)`; Klammern: `(n^c_mixer) / σ`, nicht `n^(c_mixer/σ)`. `compute_array` braucht `solver=` (Sättigung, Sauter-Durchmesser) |
 
 `n_mixer` muss zu jedem anderen drehzahlgetriebenen Kernel im Lauf passen
 (`assert_consistent_mixer_speed`, harter Fehler).
@@ -255,8 +255,7 @@ print(f"Porosity nach 0.1s: {result:.3f}")
 ## 📚 Weiterführende Dokumentation
 
 - **Kernel-Katalog**: `kernels/README.md` (seit 20.08.2026 der einzige; `KERNEL_UEBERSICHT.md` ist darin aufgegangen)
-- **Quickstart**: `../../../docs/historical/QUICKSTART.md`
-- **Fundamentals**: `../../../docs/historical/Fundamentals.md`
+- **Fundamentals**: `../../../docs/Fundamentals.md`
 - **Continuous Processes Code**: `mcpbe_continuous_processes.py`
 
 ---

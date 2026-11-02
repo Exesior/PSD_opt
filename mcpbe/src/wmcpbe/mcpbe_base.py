@@ -2407,7 +2407,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                     print(
                         f"[MC-PBE] Calculate t={elapsed_time:.6g} after {self._iter_count} events "
                         f"(real agg={self.real_agg_events:.6g}, real break={self.real_break_events:.6g}) "
-                        f"[n_comp={n_comp:.0f}, n_phys={n_phys:.3e}] [{elapsed_real:.2f} ms]"
+                        f"[n_comp={n_comp:.0f}, n_phys={n_phys:.3e} 1/m^3] [{elapsed_real:.2f} ms]"
                     )
             
             # Continuous / scheduled processes run AFTER the MC event, via

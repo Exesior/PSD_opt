@@ -230,7 +230,8 @@ BREAK_ATTRS = {"break_dW_max": 50.0, "BREAKFVAL": 2}
 
 # Mixer-speed compression variants. The dynamic kernels replace the fixed rate
 # k of `porosity_compression` with k = rate * n_mixer**c_mixer (the `_rumpf`
-# one additionally / sigma(eps, S)). The rate values below are picked so that at
+# one is additionally divided by sigma(eps, S): k = (rate * n_mixer**c_mixer)
+# / sigma). The rate values below are picked so that at
 # n_mixer = 20 the effective k reproduces the 0.1 that
 # `granulation_rumpf_dynamic_1d` uses with the static kernel -- the three
 # granulation scenarios then differ ONLY in how the compression rate is formed.
@@ -606,7 +607,7 @@ SCENARIOS: Dict[str, Scenario] = {
             notes=(
                 "granulation_rumpf_dynamic_1d with the mixer-speed + "
                 "Rumpf-strength compression kernel "
-                "(k = rate * n_mixer**C_BREAK / sigma(eps, S))."
+                "(k = (rate * n_mixer**C_BREAK) / sigma(eps, S))."
             ),
         ),
     )

@@ -13,7 +13,7 @@ sein eigenes `pyproject.toml` und kann einzeln installiert werden.
 
 | Paket | Inhalt |
 |---|---|
-| **`mcpbe/`** | Monte-Carlo-Solver. Enthält `wmcpbe` — den **gewichteten** Solver für Nassgranulation, um den es in diesem Dokument geht — sowie den älteren ungewichteten `mcpbe` und die vereinfachte Variante `wmcpbe_granulation`. `src/historical_versions/` archiviert frühere Entwicklungsstände (nicht Teil des aktuellen Codes, siehe Kommentar am Kopf jeder Datei dort). |
+| **`mcpbe/`** | Monte-Carlo-Solver. Enthält `wmcpbe` — den **gewichteten** Solver für Nassgranulation, um den es in diesem Dokument geht — sowie den älteren ungewichteten `mcpbe` und die vereinfachte Variante `wmcpbe_granulation`. |
 | `dpbe/` | Diskreter Solver (Finite Volumen, Cell Average Technique). Schwesterprojekt zu `mcpbe`: dieselben Kernel, anderer Lösungsweg. |
 | `qmom/` | Momentenmethoden (QMOM, HyQMOM, GQMOM, CQMOM). |
 | `pbe-core/` | Gemeinsame Basis aller Solver: `BaseSolver`, JIT-Kernel, Plotter, mathematische Hilfsfunktionen. |
@@ -193,7 +193,6 @@ Angelegt werden sie über `solver.create_nucleation_handler(...)` und
 | `mlp_breakage_adapter.py` | Bruchraten aus einem neuronalen Netz |
 | `kernels/` | Die austauschbaren Physik-Modelle, siehe Teil 4 |
 | `framework/` | Wiederholungen mit unabhängigen Seeds, siehe Teil 6 |
-| `Trials/` | Ausführbare Studien und Testskripte |
 
 ---
 
@@ -339,8 +338,7 @@ aufrufen.
 **Bias-Korrektur (Ji & Rhein, Gl. 33/36–41):** Weil das ausgeführte Paket durch
 das verfügbare Gewicht *beider* Partner begrenzt ist, muss die
 Ziehwahrscheinlichkeit durch genau diese Grenze geteilt werden, und die
-Teilrate trägt einen `W_i`-Vorfaktor. Herleitung:
-[`Bias_Correction_und_Gewichtsdisziplin.md`](historical/Bias_Correction_und_Gewichtsdisziplin.md).
+Teilrate trägt einen `W_i`-Vorfaktor.
 
 **`agg_propensity_mode`** steuert, wie `R_i*` berechnet wird: `"pairwise"`
 (O(n²), bitgenau) oder `"moment"` (O(n), geschlossene Form für die separablen
@@ -401,10 +399,13 @@ Pro `.step(t, dt)`:
      (Stoßfrequenz × Stoßenergie, genau wie beim dynamischen Bruch — Verdichtung
      und Bruch sind derselbe Stoß-Plastifizierungs­mechanismus). `c_mixer = 0`
      schaltet die Drehzahl ab und reproduziert `porosity_compression`.
-   - `porosity_compression_dynamik_rumpf`: zusätzlich durch die Rumpf-Granulat­festigkeit
-     geteilt, `k(ε,S) = rate · n_mixer^c_mixer / σ(ε,S)` — festere (nassere,
-     dichtere) Granulate verdichten langsamer. `σ` faktorisiert exakt als
-     `φ(S)·(1−ε)/ε`; die DGL bleibt separierbar, wird aber pro Sub-Schritt mit
+   - `porosity_compression_dynamik_rumpf`: `1/σ` erweitert den Antriebsterm
+     `(ε − ε_min)` der DGL, d.h. `k(ε,S) = (rate · n_mixer^c_mixer) / σ(ε,S)`
+     — Klammern beachten: `(n^c_mixer) / σ`, **nicht** `n^(c_mixer/σ)`. Der
+     Drehzahl-Exponent `c_mixer` bleibt unberührt; die Rumpf-Festigkeit sitzt
+     im Vorfaktor. Festere (nassere, dichtere) Granulate verdichten langsamer.
+     `σ` faktorisiert exakt als `φ(S)·(1−ε)/ε`; die DGL bleibt separierbar, wird
+     aber pro Sub-Schritt mit
      bei `ε(t)` eingefrorenem `σ` gelöst (Exponential-Euler). Begründung: das
      Exponentialgesetz ist die Homogenisierung diskreter Einzelstöße, `σ` wirkt
      pro Stoß; über einen Sub-Schritt von O(1) MC-Ereignissen ist das Einfrieren
@@ -459,8 +460,8 @@ Liste der verfügbaren Kernel.
 
 | Steckplatz | Beantwortet die Frage | Implementierungen |
 |---|---|---|
-| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005` |
-| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `stokes_dynamik`, `fittable` |
+| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005`, `kinetic_blend` |
+| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `stokes_dynamik`, `stokes_eke_dynamik`, `fittable` |
 | `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf`, `powerlaw_rumpf_dynamic` |
 | `porosity_growth_kernel` | Wie entwickelt sich der Porenraum? | `volume_mixing`, `cone_model`, `incomplete_mixing` |
 | `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted` |
@@ -508,9 +509,10 @@ Das ist wichtig, weil `solver.G` auch von der Nucleation gelesen wird (für die
 Kollisionsgeschwindigkeit). Ohne diese Regel folgte die Nucleation
 stillschweigend dem Bruchmodell.
 
-**Die Mischerdrehzahl `n_mixer`** ist der zweite solche Fall. Sie treibt fünf
-Kernel — `eke_darelius2005`, `etm_darelius2005`, `stokes_dynamik`,
-`powerlaw_rumpf_dynamic` und `porosity_compression_dynamik(_rumpf)` — die alle
+**Die Mischerdrehzahl `n_mixer`** ist der zweite solche Fall. Sie treibt die
+Kernel `eke_darelius2005`, `etm_darelius2005`, `kinetic_blend`, `stokes_dynamik`,
+`stokes_eke_dynamik`, `powerlaw_rumpf_dynamic` und
+`porosity_compression_dynamik(_rumpf)`, die alle
 `kernels/mixer_speed.py` importieren (gemeinsame Defaults, DEM-Exponenten
 `C_FREQ`/`C_VEL`/`C_BREAK`). Hier gibt es keine Vorrangregel: es gibt *einen*
 Mischer. `assert_consistent_mixer_speed` (aufgerufen in `kernel_integration.py`
@@ -669,21 +671,3 @@ unterscheidet, die beide „ohne Poren" heißen:
 Beide führen auf `V_solid = V_dry`, aber nur die erste muss überall per
 `np.isnan()` abgefangen werden. Eine Übersetzung beider auf „non-porous"
 würde diese Unterscheidung einebnen.
-
-## Weiterführende Dokumente
-
-Dieses Dokument beschreibt den **Ist-Zustand**. Wie er zustande kam — Herleitungen,
-Audits, Fehleranalysen — steht in
-[`historical/`](historical/). Die wichtigsten:
-
-| Dokument | Inhalt |
-|---|---|
-| [`Bias_Correction_und_Gewichtsdisziplin.md`](historical/Bias_Correction_und_Gewichtsdisziplin.md) | Herleitung der Propensity-Korrektur und der Gewichtsdisziplin |
-| [`Audit_2026-08-17.md`](historical/Audit_2026-08-17.md) | Systematisches Audit auf schlafende Probleme, 25 Befunde |
-| [`MOMENT_MODE.md`](historical/MOMENT_MODE.md) | Herleitung des O(n)-Momentenmodus |
-| [`Kompression_und_Parametervalidierung.md`](historical/Kompression_und_Parametervalidierung.md) | Warum die Parametervalidierung eingeführt wurde |
-| [`Nucleation_Propensity_Blockade.md`](historical/Nucleation_Propensity_Blockade.md) | Propensity-Aktualität nach Nucleation |
-| [`Parallelisierung_Wiederholungen.md`](historical/Parallelisierung_Wiederholungen.md) | Entwurf des Wiederholungs-Frameworks |
-
-Offene Befunde aus dem Dokumentationsdurchgang:
-[`historical/Befunde_2026-08-20.md`](historical/Befunde_2026-08-20.md).

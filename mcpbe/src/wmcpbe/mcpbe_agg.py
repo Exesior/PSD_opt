@@ -48,6 +48,7 @@ from .kernels.aggregation.jit_kernels import (
     MOMENT_KERNELS,
     PARALLEL_MIN_N,
     kernel_p0,
+    kernel_p1,
     pick_partner_pairdelta,
     rebuild_r_pairdelta_moment,
     rebuild_r_pairdelta_pairwise,
@@ -193,13 +194,15 @@ class MCPBEAgg:
     # ------------------------------------------------------------------
     # Partner selection (paper Eq. 40)
     # ------------------------------------------------------------------
-    def _compiled_kernel_spec(self) -> tuple[int, float] | None:
-        """``(kernel_id, p0)`` if the compiled fast path applies, else ``None``.
+    def _compiled_kernel_spec(self) -> tuple[int, float, float] | None:
+        """``(kernel_id, p0, p1)`` if the compiled fast path applies, else ``None``.
 
         The compiled kernels fold the scalar collision efficiency ``alpha`` into
         ``p0``. That is only exact for ``dim == 1``, where ``alpha`` is a single
         number shared by every pair; in 2D it depends on the component mix of the
-        pair and the generic Python path is used instead.
+        pair and the generic Python path is used instead. ``p1`` is a second
+        kernel scalar that is NOT a prefactor (the velocity exponent of
+        ``kinetic_blend``); it is 0.0 for every other kernel and never scaled.
         """
         if int(self.dim) != 1:
             return None
@@ -213,7 +216,7 @@ class MCPBEAgg:
         alpha = self._alpha_scalar()
         if alpha <= 0.0:
             return None
-        return KERNEL_IDS[name], kernel_p0(name, kernel) * alpha
+        return KERNEL_IDS[name], kernel_p0(name, kernel) * alpha, kernel_p1(name, kernel)
 
     def _alpha_scalar(self) -> float:
         """Scalar collision efficiency for ``dim == 1``."""
@@ -488,7 +491,7 @@ class MCPBEAgg:
         spec = self._compiled_kernel_spec()
 
         if spec is not None:
-            kid, p0 = spec
+            kid, p0, p1 = spec
             if mode == "moment" and name in MOMENT_KERNELS:
                 alpha = self._alpha_scalar()
                 F, G, beta_ii, _ = separable_tables(name, kernel, R)
@@ -506,7 +509,7 @@ class MCPBEAgg:
                     if a >= PARALLEL_MIN_N
                     else rebuild_r_pairdelta_pairwise_serial
                 )
-                fn(kid, p0, R, W, delta, dW_const, out)
+                fn(kid, p0, R, W, delta, dW_const, out, p1)
             return
 
         self._raw_propensities_generic(R, W, delta, dW_const, out)
@@ -756,9 +759,9 @@ class MCPBEAgg:
         u_sel = float(self._rng.random())
         spec = self._compiled_kernel_spec()
         if spec is not None:
-            kid, p0 = spec
+            kid, p0, p1 = spec
             j, pick_w = pick_partner_pairdelta(
-                kid, p0, i, R, W, delta, dW_const, partner_total, u_sel
+                kid, p0, i, R, W, delta, dW_const, partner_total, u_sel, p1
             )
         else:
             j, pick_w = self._pick_partner_kernel(

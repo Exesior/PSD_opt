@@ -40,6 +40,12 @@ import numpy as np
 from .fenwick_new import FenwickSampler
 
 
+#: A droplet budget (in physical droplets) at or below this counts as used up.
+#: Budgets are volume quotients, so "exactly used up" can arrive as 1e-16; see
+#: NucleationHandler._snap_droplet_count.
+_DROPLET_BUDGET_EPS = 1e-9
+
+
 class InitializationType(Enum):
     """Deprecated marker for how the addition window was specified.
 
@@ -588,13 +594,20 @@ class NucleationHandler:
         Called once the accumulated liquid must be placed even though no further
         whole droplet will be triggered: at window close (from :meth:`step`) for a
         run whose window ends before ``t_total``, otherwise at simulation end
-        (from :meth:`finalize_after_solve`). Uses fractional droplet distribution
-        for remainders between 0.5 and 1.0 droplets to avoid systematic under-addition.
+        (from :meth:`finalize_after_solve`).
 
         Physical Model:
-            Instead of discarding sub-droplet remainders (e.g., 0.82 droplets),
-            distribute the EXACT remaining volume as a "fractional droplet".
-            This avoids systematic bias while maintaining mass conservation.
+            1. Whole droplets still in the account are placed like every other
+               droplet.
+            2. The fraction below one droplet (e.g. 0.62) is added as ONE
+               SMALLER droplet of exactly that volume (decision Eric,
+               2026-09-30: the droplet size is a monodisperse approximation
+               anyway, so one smaller last droplet is acceptable). It is placed
+               exactly like a normal droplet -- the nucleus is sized to its
+               smaller volume and the particle(s) it wets get the whole of it.
+            Both steps repeat until the budget is placed, so no liquid is left
+            behind (mass conservation) and no particle ever receives a fraction
+            of a droplet.
 
         Args:
             at_time: Simulated time this placement is attributed to [s]. Used only
@@ -603,87 +616,40 @@ class NucleationHandler:
         """
         if not hasattr(self, '_liquid_remainder') or self._liquid_remainder <= 0:
             return
-        
+
         v_droplet = self.config.droplet_volume
-        n_droplets_exact = self._liquid_remainder / v_droplet
-        
+        n_droplets_exact = self._snap_droplet_count(self._liquid_remainder / v_droplet)
+
         # Discard only truly negligible remainders (< 0.001 droplets)
         # THRESHOLD REDUCED: From 0.1 to 0.001 to minimize systematic liquid loss
         if n_droplets_exact < 0.001:
             self._log(f"Keeping {self._liquid_remainder:.3e} m^3 ({n_droplets_exact:.6f} droplets) as numerical remainder", "DEBUG")
             return
-        
+
         self._ensure_samplers()
-        vc_scale = self._Vc_reference / self.solver.Vc
-        
-        # Case 1: Significant remainder (≥ 1 droplet) - distribute integer droplets
-        # Case 2: Fractional remainder (0.1-1.0 droplets) - distribute exact volume
-        if n_droplets_exact >= 1.0:
-            n_droplets_full = int(n_droplets_exact)
+
+        # (1) Whole droplets still in the account.
+        n_droplets_full = int(n_droplets_exact)
+        if n_droplets_full >= 1:
             self._log(f"Distributing {n_droplets_full} remaining droplets (exact: {n_droplets_exact:.2f}) at t={at_time:.4f}s", "DEBUG")
-            
-            v_target = n_droplets_full * v_droplet
-            v_distributed = 0.0
-            max_consecutive_failures = max(1, n_droplets_full // 10 + 1)
-            consecutive_failures = 0
-            
-            while v_distributed < v_target and consecutive_failures < max_consecutive_failures:
-                v_remaining = v_target - v_distributed
-                n_physical_remaining = v_remaining / v_droplet
-                dW, v_eff = self._distribute_one_droplet_with_dW(
-                    v_droplet, max_physical_droplets=n_physical_remaining)
-
-                # Refresh the sampler per droplet; see the reasoning in
-                # _distribute_liquid_volume.
-                self._ensure_samplers()
-
-                if dW > 0:
-                    effective_dW = dW * vc_scale
-                    # v_eff, not v_droplet: on a capped event each physical
-                    # particle receives less than a full droplet, so booking
-                    # v_droplet here would charge more than was delivered.
-                    v_event = v_eff * effective_dW
-                    v_distributed += v_event
-                    self._droplets_added_total += v_event / v_droplet
-                    self._liquid_volume_added_total += v_event
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-
+            v_distributed, _n, _f = self._place_droplet_budget(
+                v_droplet, float(n_droplets_full),
+                max_consecutive_failures=max(1, n_droplets_full // 10 + 1))
             self._liquid_remainder -= v_distributed
-        
-        else:
-            # Fractional droplet: distribute exact remaining volume
-            # Note: _liquid_remainder is PHYSICAL volume (already scaled by flow_rate_per_particle).
-            # We distribute it as a single computational event with capped dW.
-            self._log(f"Distributing fractional droplet ({n_droplets_exact:.2f} × {v_droplet:.3e} m^3) at t={at_time:.4f}s", "DEBUG")
-            
-            # CRITICAL: Pass ACTUAL droplet volume and cap max_physical_droplets!
-            # This ensures dW is capped correctly: dW <= n_droplets_exact / vc_scale
-            # Without this cap, dW would be W[i]/2.0 (~46.5) and the particle would
-            # receive dW × v_droplet = 46.5 × 5.236e-13 = 2.43e-11 m^3 (83x too much!)
-            dW, v_eff = self._distribute_one_droplet_with_dW(
-                v_droplet=v_droplet,  # Actual droplet volume for saturation calc
-                max_physical_droplets=n_droplets_exact  # Cap: only 0.56 physical droplets!
-            )
 
-            if dW > 0:
-                effective_dW = dW * vc_scale
-                # Capping shrinks the amount PER PARTICLE (v_eff), not dW.
-                # The liquid actually delivered is therefore
-                # effective_dW * v_eff -- booking the nominal v_droplet
-                # instead drives _liquid_remainder negative.
-                v_physical_distributed = effective_dW * v_eff
+        # (2) The fraction below one droplet as ONE smaller droplet. Only when
+        #     step (1) placed all whole droplets -- otherwise the "smaller"
+        #     droplet would be larger than a nominal one.
+        n_rest = self._liquid_remainder / v_droplet
+        if 0.001 <= n_rest < 1.0:
+            v_small = self._liquid_remainder
+            self._log(f"Distributing the rest as one smaller droplet ({n_rest:.3f} × {v_droplet:.3e} m^3) at t={at_time:.4f}s", "DEBUG")
+            v_distributed, n_placed, failures = self._place_droplet_budget(
+                v_small, 1.0, max_consecutive_failures=1000)
+            self._liquid_remainder -= v_distributed
+            if failures:
+                self._log(f"WARNING: smaller rest droplet only {n_placed:.3f} placed", "WARNING")
 
-                # Statistics count NOMINAL droplets, consistent with the volume.
-                self._droplets_added_total += v_physical_distributed / v_droplet
-                self._liquid_volume_added_total += v_physical_distributed
-                self._liquid_remainder -= v_physical_distributed
-                
-                self._log(f"Distributed fractional droplet: {v_physical_distributed:.3e} m^3 (dW={dW:.4f}, effective_dW={effective_dW:.4f})", "DEBUG")
-            else:
-                self._log("WARNING: Failed to distribute fractional droplet", "WARNING")
-        
         # Sanity check
         if self._liquid_remainder < -1e-15:
             raise RuntimeError(
@@ -1092,7 +1058,92 @@ class NucleationHandler:
         # Sample weighted by W -> uniform over physical particles
         return int(self._weight_sampler.sample(self._rng))
         
-    def _distribute_liquid_volume(self, v_liquid_to_distribute: float, 
+    @staticmethod
+    def _snap_droplet_count(n: float) -> float:
+        """Round a droplet budget to the nearest whole number if within 1e-9.
+
+        Budgets are volume quotients (``v_rest / v_droplet``) and sums of event
+        weights, so a budget that should be exactly 1 can arrive as
+        0.9999999999999998. Unsnapped, the loop would place a droplet on
+        0.9999999999999998 particles and then run a second event for the 2e-16
+        left over -- a packet of weight ~1e-16, built through ~70 forced merges.
+        """
+        r = round(n)
+        if abs(n - r) <= _DROPLET_BUDGET_EPS * max(1.0, abs(n)):
+            return float(r)
+        return float(n)
+
+    def _place_droplet_budget(self, v_droplet: float, n_budget: float,
+                              max_consecutive_failures: int) -> tuple:
+        """Place ``n_budget`` physical droplets of volume ``v_droplet``.
+
+        The one loop behind every droplet placement -- during the addition
+        window (:meth:`_distribute_liquid_volume`) and for the rest at window
+        close (:meth:`_distribute_remaining_liquid`). Each event wets whole
+        droplets only (see :meth:`_distribute_one_droplet_with_dW`); an event
+        can place less than the budget when the drawn particle carries less
+        weight, so the loop repeats until the budget is used up.
+
+        Statistics are booked in NOMINAL droplets (``config.droplet_volume``),
+        so a smaller rest droplet counts as the fraction it is.
+
+        Parameters
+        ----------
+        v_droplet : float
+            Volume of each droplet [m^3].
+        n_budget : float
+            Physical droplets to place (may be fractional).
+        max_consecutive_failures : int
+            Stop after this many events in a row that placed nothing.
+
+        Returns
+        -------
+        (v_distributed, n_placed, n_failures) : tuple[float, float, int]
+            Physical liquid volume placed [m^3], physical droplets placed, and
+            the number of consecutive failed events at exit.
+        """
+        vc_scale = self._Vc_reference / self.solver.Vc
+        v_nominal = self.config.droplet_volume
+        v_distributed = 0.0
+        n_placed = 0.0
+        consecutive_failures = 0
+
+        while consecutive_failures < max_consecutive_failures:
+            n_remaining = self._snap_droplet_count(n_budget - n_placed)
+            if n_remaining <= _DROPLET_BUDGET_EPS:
+                break
+
+            dW, v_eff = self._distribute_one_droplet_with_dW(
+                v_droplet, max_physical_droplets=n_remaining)
+
+            # Refresh the sampler after EVERY droplet. The droplet just took
+            # weight off the particle it hit, possibly created a new particle
+            # and possibly forced an agglomeration -- the next droplet has to
+            # draw from the state AFTER all of that.
+            #
+            # Doing this once before the loop instead would leave the sampler
+            # on stale weights from the second droplet onwards, and particles
+            # created within this step would be unreachable for the rest of it.
+            # Weighted drawing over ALL available particles is precisely what
+            # `batch_size` is for: it is the droplet's W, analogous to a
+            # particle's W. At batch_size = 1 one event is exactly one physical
+            # droplet landing on one particle.
+            self._ensure_samplers()
+
+            if dW > 0:
+                effective_dW = dW * vc_scale
+                v_event = v_eff * effective_dW
+                v_distributed += v_event
+                n_placed += effective_dW
+                self._droplets_added_total += v_event / v_nominal
+                self._liquid_volume_added_total += v_event
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+
+        return v_distributed, n_placed, consecutive_failures
+
+    def _distribute_liquid_volume(self, v_liquid_to_distribute: float,
                                    is_manual_trigger: bool = False) -> None:
         """Turn a liquid volume into droplets and place them on particles.
 
@@ -1162,64 +1213,22 @@ class NucleationHandler:
         # Ensure sampler is built
         self._ensure_samplers()
         
-        # Distribute droplets with DSMC weight handling.
-        # Track accumulated liquid VOLUME (not droplet count) to avoid floating-point
-        # accumulation errors. Compute target volume from integer droplet count.
+        # Distribute whole droplets with DSMC weight handling. The budget is the
+        # integer droplet count; the loop counts placed droplets and snaps the
+        # rest (see _place_droplet_budget / _snap_droplet_count).
         v_target = n_droplets_full * v_droplet
-        v_distributed = 0.0
         max_consecutive_failures = 1000
-        consecutive_failures = 0
-        
+
         # For manual trigger: track progress
         if is_manual_trigger and n_droplets_full > 100:
             self._log(f"Manual trigger: distributing {n_droplets_full} droplets", "INFO")
-        
-        while v_distributed < v_target and consecutive_failures < max_consecutive_failures:
-            # Convert remaining volume to physical droplets for dW capping
-            v_remaining = v_target - v_distributed
-            n_physical_remaining = v_remaining / v_droplet
-            
-            dW, v_eff = self._distribute_one_droplet_with_dW(
-                v_droplet, max_physical_droplets=n_physical_remaining)
 
-            # Refresh the sampler after EVERY droplet. The droplet just took
-            # weight off the particle it hit, possibly created a new particle
-            # and possibly forced an agglomeration -- the next droplet has to
-            # draw from the state AFTER all of that.
-            #
-            # Doing this once before the loop instead would leave the sampler
-            # on stale weights from the second droplet onwards, and particles
-            # created within this step would be unreachable for the rest of it.
-            # Weighted drawing over ALL available particles is precisely what
-            # `batch_size` is for: it is the droplet's W, analogous to a
-            # particle's W. At batch_size = 1 one event is exactly one physical
-            # droplet landing on one particle.
-            self._ensure_samplers()
+        v_distributed, _n_placed, consecutive_failures = self._place_droplet_budget(
+            v_droplet, float(n_droplets_full), max_consecutive_failures)
 
-            if dW > 0:
-                effective_dW = dW * vc_scale
-                # v_eff rather than v_droplet -- see _distribute_remaining_liquid:
-                # capped events deliver less than a full droplet.
-                v_event = v_eff * effective_dW
-                v_distributed += v_event
-                self._droplets_added_total += v_event / v_droplet
-                self._liquid_volume_added_total += v_event
-                consecutive_failures = 0
-                
-                # Progress report for manual trigger every 10%
-                if is_manual_trigger and n_droplets_full > 100:
-                    progress = v_distributed / v_target * 100
-                    if int(progress) % 10 == 0 and progress > 0:
-                        # Avoid duplicate prints
-                        pass  # Progress tracking would need state variable
-            else:
-                consecutive_failures += 1
-                
-                if consecutive_failures >= max_consecutive_failures:
-                    if is_manual_trigger:
-                        self._log(f"Stopping after {consecutive_failures} consecutive failures", "WARNING")
-                    break
-        
+        if consecutive_failures >= max_consecutive_failures and is_manual_trigger:
+            self._log(f"Stopping after {consecutive_failures} consecutive failures", "WARNING")
+
         # Update remainder: subtract ACTUALLY distributed liquid volume
         self._liquid_remainder -= v_distributed
         
@@ -1358,13 +1367,37 @@ class NucleationHandler:
         If the drawn particle cannot take the droplet, it is agglomerated with
         further particles until enough ``V_dry`` has been collected.
 
+        Whole droplets only
+        -------------------
+        Every particle this event wets receives the WHOLE droplet
+        ``v_droplet`` -- never a fraction of it. The packet ``dW`` (how many
+        particles are wetted) is therefore fixed BEFORE the forced
+        agglomeration, from what the budget allows::
+
+            dW_packet = min(batch_size, max_physical_droplets / vc_scale)
+
+        and every forced merge of this droplet runs with exactly that packet
+        (``dW_cap`` of :meth:`_perform_nucleation_agglomeration`). So one
+        droplet builds exactly as many nuclei as it wets: with a budget of one
+        droplet, ONE nucleus is built and it gets the whole droplet.
+
+        Until 2026-09-30 the forced merges used the agglomeration batch cap
+        ``agg_dW_max`` instead and the budget was enforced afterwards by
+        shrinking the liquid per particle. One droplet then built e.g. 3.19
+        (f = 1e-7) or 5 nuclei of ~69 primary particles each, and each got
+        only 1/3.19 or 1/5 of the droplet -- 3-5x too much powder was drawn
+        into nuclei. See ``mcpbe/docs/historical/
+        Bias_Correction_und_Gewichtsdisziplin.md``, §6.3(a), Nachtrag.
+
         Steps
         -----
         1. Draw particle ``i`` weighted by ``W``.
-        2. ``new_liquid = current_liquid + v_droplet``.
-        3. While ``V_dry < new_liquid``: agglomerate with a partner ``j`` and
-           update ``V_dry`` and ``new_liquid`` from the merged particle.
-        4. Derive ``dW`` from the collected weight ``W_i``.
+        2. Fix the droplet packet ``dW_packet`` (see above).
+        3. ``new_liquid = current_liquid + v_droplet``; while
+           ``V_dry < new_liquid``: agglomerate with a partner ``j`` (packet
+           ``dW_packet``) and update ``V_dry`` and ``new_liquid`` from the
+           merged particle.
+        4. ``dW = min(dW_packet, W_i)`` -- the particles actually wetted.
         5. Porosity from the porosity-growth kernel.
         6. Saturation (updated on every droplet, never recomputed from
            scratch -- see :meth:`_compute_saturation_for_liquid`).
@@ -1379,23 +1412,18 @@ class NucleationHandler:
         Parameters
         ----------
         v_droplet : float
-            Droplet volume [m^3].
+            Droplet volume [m^3]. Every wetted particle receives exactly this.
         max_physical_droplets : float, optional
-            Upper limit on physical droplets, capping ``dW`` such that
+            Budget: at most this many physical droplets may be placed, i.e.
             ``effective_dW = dW * vc_scale <= max_physical_droplets``.
 
         Returns
         -------
         tuple[float, float]
-            ``(dW, v_droplet_effective)`` -- the weight this event consumed and
-            the droplet size it ACTUALLY delivered.
-
-            When ``max_physical_droplets`` binds, it is not ``dW`` that shrinks
-            but the amount per particle. The caller must therefore book the
-            delivered liquid as ``dW * vc_scale * v_droplet_effective``; using
-            the nominal ``v_droplet`` subtracts too much from
-            ``_liquid_remainder`` and drives it negative. Without capping,
-            ``v_droplet_effective == v_droplet``.
+            ``(dW, v_droplet)`` -- the weight this event consumed and the
+            droplet volume each wetted particle received. The second value is
+            always the ``v_droplet`` passed in; it is kept in the return value
+            so the callers' bookkeeping (``dW * vc_scale * v``) stays explicit.
 
         See Also
         --------
@@ -1415,9 +1443,23 @@ class NucleationHandler:
 
         if i < 0 or i >= a_tot:
             return 0.0, 0.0
-        
+
         # ==========================================
-        # SCHRITT 2: V_dry sammeln bis >= v_liquid
+        # STEP 2: droplet packet -- fixed BEFORE the forced agglomeration
+        # ==========================================
+        # As many particles as the budget has whole droplets, never more. The
+        # forced merges below use this same packet, so the number of nuclei
+        # built equals the number of droplets placed (no nucleus shares a
+        # droplet, no nucleus stays dry).
+        vc_scale = self._Vc_reference / solver.Vc
+        dW_packet = float(self.config.batch_size)
+        if max_physical_droplets is not None:
+            if max_physical_droplets <= 0.0:
+                return 0.0, 0.0
+            dW_packet = min(dW_packet, max_physical_droplets / vc_scale)
+
+        # ==========================================
+        # SCHRITT 3: V_dry sammeln bis >= v_liquid
         # ==========================================
         V_dry_sum = float(solver.V_flat[-1, i])
         current_liquid = float(solver.liquid_volume[i]) if hasattr(solver, 'liquid_volume') else 0.0
@@ -1438,8 +1480,9 @@ class NucleationHandler:
             if j < 0 or j >= solver.a_tot:
                 break
             
-            # Manuelles Agglomerieren (mit PorosityGrowthKernel!)
-            child_idx = self._perform_nucleation_agglomeration(i, j)
+            # Manuelles Agglomerieren (mit PorosityGrowthKernel!), mit dem
+            # Tropfen-Paket -- nicht mit agg_dW_max (siehe STEP 2).
+            child_idx = self._perform_nucleation_agglomeration(i, j, dW_cap=dW_packet)
             if child_idx < 0 or child_idx >= solver.a_tot:
                 break
             
@@ -1458,47 +1501,29 @@ class NucleationHandler:
             return 0.0, 0.0  # Nicht genug Feststoff gefunden
 
         # ==========================================
-        # SCHRITT 3: dW berechnen (DSMC-compliant)
+        # SCHRITT 4: dW berechnen (DSMC-compliant)
         # ==========================================
         W_i = float(solver.W[i])
         if W_i <= 0:
             return 0.0, 0.0
-        
+
         # Effective batch size (paper Eq. 33): the event consumes EXACTLY dW,
         # so the final event drains a particle to precisely 0.0 and no residual
-        # weights can arise.
-        dW = min(self.config.batch_size, W_i)
+        # weights can arise. dW never exceeds the droplet packet, so every
+        # wetted particle gets the whole droplet -- no volume capping.
+        dW = min(dW_packet, W_i)
 
-        # Volume capping.
-        #
-        # The cap is a VOLUME condition, not a weight condition: in total
-        # max_physical_droplets * v_droplet of physical liquid should be
-        # delivered. So instead of shrinking the packet, the amount PER
-        # PARTICLE is shrunk -- dW stays on the delta grid, and
-        #
-        #     dW * vc_scale * v_eff  ==  max_physical_droplets * v_droplet
-        #
-        # holds exactly. That is also the physically correct reading: a
-        # particle receives less liquid, rather than "a fraction of a particle
-        # receives a full droplet". Shrinking dW to the continuous quotient
-        # max_physical_droplets/vc_scale instead is what produced fractional
-        # residual weights.
-        if max_physical_droplets is not None and max_physical_droplets > 0:
-            vc_scale = self._Vc_reference / self.solver.Vc
-            max_dW_allowed = max_physical_droplets / vc_scale
-            if dW > max_dW_allowed:
-                v_eff = v_droplet * max_dW_allowed / dW
-                if v_eff <= 0.0:
-                    return 0.0, 0.0
-                # Rebuild new_liquid from the smaller amount. Capacity was
-                # checked above against the LARGER v_droplet, so it stays
-                # conservatively valid.
-                v_droplet = v_eff
-                new_liquid = current_liquid + v_droplet
-
+        # Fail loud: placing more droplets than the budget holds would mean the
+        # packet logic above is broken, not a rounding issue.
+        if (max_physical_droplets is not None
+                and dW * vc_scale > max_physical_droplets * (1.0 + 1e-12)):
+            raise RuntimeError(
+                f"Nucleation: droplet event would place {dW * vc_scale:.6g} physical "
+                f"droplets, budget is {max_physical_droplets:.6g}."
+            )
 
         # ==========================================
-        # SCHRITT 4: Porositaet bestimmen (Kernel-spezifisch!)
+        # SCHRITT 5: Porositaet bestimmen (Kernel-spezifisch!)
         # ==========================================
         # Kernel-spezifische Behandlung fuer first contact
         is_first_contact = (current_liquid == 0.0)
@@ -1510,7 +1535,7 @@ class NucleationHandler:
         )
 
         # ==========================================
-        # SCHRITT 5: Saturation berechnen (jeder Tropfen!)
+        # SCHRITT 6: Saturation berechnen (jeder Tropfen!)
         # ==========================================
         sat_new = self._compute_saturation_for_liquid(
             src_idx=i,
@@ -1522,7 +1547,7 @@ class NucleationHandler:
         )
         
         # ==========================================
-        # STEP 6: book the target state (merge or create)
+        # STEP 7: book the target state (merge or create)
         # ==========================================
         # Goes through the shared ParticleMerger, so matching rules and hash
         # index are the same as for agglomeration and breakage.
@@ -1543,8 +1568,7 @@ class NucleationHandler:
         if solver.W[i] <= 0.0:
             self._remove_particle_tracked(i)
 
-        # From here on `v_droplet` is the amount ACTUALLY delivered per
-        # physical droplet -- possibly reduced by the capping above.
+        # Every wetted particle received the whole droplet `v_droplet`.
         return dW, v_droplet
 
     def _resolve_nucleation_geometry(self, i: int, new_liquid: float,
@@ -1921,7 +1945,8 @@ class NucleationHandler:
         # Record weight change
         self._record_weight_change(new_idx, dW)
     
-    def _perform_nucleation_agglomeration(self, i: int, j: int) -> int:
+    def _perform_nucleation_agglomeration(self, i: int, j: int,
+                                          dW_cap: Optional[float] = None) -> int:
         """Force an agglomeration of ``i`` and ``j`` to gain dry volume.
 
         Used when the drawn particle cannot hold the droplet
@@ -1933,6 +1958,11 @@ class NucleationHandler:
         ----------
         i, j : int
             Indices of the two particles.
+        dW_cap : float, optional
+            Packet size of this merge. The droplet path passes its own
+            droplet packet here, so that exactly as many nuclei are built as
+            droplets are placed. ``None`` -> the agglomeration batch cap
+            (``agg_dW_max``).
 
         Returns
         -------
@@ -1959,12 +1989,13 @@ class NucleationHandler:
         
         try:
             # Call the manual agglomeration method and return child index
-            return self._manual_agglomerate_particles(i, j)
+            return self._manual_agglomerate_particles(i, j, dW_cap=dW_cap)
             
         finally:
             solver._in_nucleation = old_in_nucleation
     
-    def _manual_agglomerate_particles(self, i: int, j: int) -> int:
+    def _manual_agglomerate_particles(self, i: int, j: int,
+                                      dW_cap: Optional[float] = None) -> int:
         """Merge particles ``i`` and ``j`` without touching the propensities.
 
         The propensity rebuild is O(n); running it once per droplet inside the
@@ -1986,6 +2017,9 @@ class NucleationHandler:
         ----------
         i, j : int
             Indices of the two particles.
+        dW_cap : float, optional
+            Packet size of this merge, replacing the agglomeration batch cap
+            ``agg_dW_max``. See :meth:`_perform_nucleation_agglomeration`.
 
         Returns
         -------
@@ -1998,10 +2032,10 @@ class NucleationHandler:
             bookkeeping
         """
         solver = self.solver
-        
+
         if i >= solver.a_tot or j >= solver.a_tot:
             return -1
-        
+
         # === DEBUG NUC-AGG: VOR MANUELLER AGG ===
         if getattr(solver, 'mcpbe_debug_mass', False) and getattr(solver, 'mcpbe_debug_nuc', True):
             # Globale Masse VOR der Agg berechnen
@@ -2065,9 +2099,17 @@ class NucleationHandler:
         # the final event on a particle drains it to exactly 0 and no residual
         # weight can survive. For i == j one event consumes 2*dW from the SAME
         # packet, hence the W_i/2 cap (2*(0.5*W_i) == W_i is exact in IEEE-754).
-        dW_const = float(
-            getattr(solver, "_agg_dW_const", None) or solver._prepare_agg_delta_config()
-        )
+        #
+        # Packet size: in the droplet path this is the DROPLET packet (dW_cap),
+        # not agg_dW_max -- one droplet may only build as many nuclei as it
+        # wets. Taking agg_dW_max here built e.g. 3.19 nuclei for one droplet,
+        # which then had to share it (see _distribute_one_droplet_with_dW).
+        if dW_cap is not None:
+            dW_const = float(dW_cap)
+        else:
+            dW_const = float(
+                getattr(solver, "_agg_dW_const", None) or solver._prepare_agg_delta_config()
+            )
         delta_i = min(dW_const, Wi)
         delta_j = min(dW_const, Wj)
         if i == j:

@@ -5,6 +5,7 @@ Optimization algorithm based on ray-Tune
 # import uuid
 import os
 import sqlite3
+from datetime import datetime
 from filelock import FileLock
 import json
 import numpy as np
@@ -21,6 +22,89 @@ from .opt_core_ray import OptCoreRay
 from .opt_core_multi_ray import OptCoreMultiRay
 
 from ray._private import state
+
+
+# Extra per-candidate columns of the warm-start SQLite (besides id, data_name,
+# param_json, score). Filled from the trial result where the adapter provides the
+# values (wet_granulation adapter via OptCoreRay.step), NULL otherwise.
+_EXTRA_COLUMNS = (
+    ("status", "TEXT"),            # ok | partial | timeout_partial | timeout | failed | setup_error
+    ("n_rep_ok", "INTEGER"),       # evaluated MC replicates
+    ("n_rep_total", "INTEGER"),    # planned MC replicates
+    ("eval_seconds", "REAL"),      # wall time of the candidate
+    ("failure_reason", "TEXT"),    # per-replicate reasons, e.g. "seed=..: reached MAX_PARTICLES"
+    ("worker_pid", "INTEGER"),     # Ray worker process that evaluated the candidate
+    ("reuse_num", "INTEGER"),      # actor reuse counter at that candidate
+    ("finished_at", "TEXT"),       # local time the candidate finished
+)
+
+
+def _extras_from_result(result):
+    """Pick the values of the extra SQLite columns out of a Ray Tune result dict."""
+    result = result or {}
+    finished = result.get("finished_at", result.get("timestamp"))
+    if finished is not None:
+        finished = datetime.fromtimestamp(float(finished)).isoformat(sep=" ", timespec="milliseconds")
+    return {
+        "status": result.get("status"),
+        "n_rep_ok": result.get("n_rep_ok"),
+        "n_rep_total": result.get("n_rep_total"),
+        "eval_seconds": result.get("eval_seconds"),
+        "failure_reason": result.get("failure_reason"),
+        "worker_pid": result.get("pid"),
+        "reuse_num": result.get("reuse_num"),
+        "finished_at": finished,
+    }
+
+
+def _sql_value(value):
+    """numpy scalars -> plain Python values (sqlite3 cannot bind numpy types)."""
+    return value.item() if hasattr(value, "item") else value
+
+
+class _ProgressReporter(tune.Callback):
+    """Print progress and optionally persist completed trials in batches."""
+
+    def __init__(self, total, checkpoint_interval=0, checkpoint=None):
+        self._total = int(total)
+        self._done = 0
+        self._best = float("inf")
+        self._t_sum = 0.0
+        self._checkpoint_interval = int(checkpoint_interval)
+        if self._checkpoint_interval < 0:
+            raise ValueError("checkpoint_interval must be non-negative.")
+        self._checkpoint = checkpoint
+        self._params = []
+        self._scores = []
+        self._extras = []
+
+    def on_trial_result(self, iteration, trials, trial, result, **info):
+        self._done += 1
+        loss = result.get("loss", float("nan"))
+        dt = float(result.get("time_this_iter_s", float("nan")))
+        if loss == loss and loss < self._best:      # NaN-safe
+            self._best = loss
+        if loss == loss:
+            self._params.append(dict(trial.config))
+            self._scores.append(float(loss))
+            self._extras.append(_extras_from_result(result))
+        if dt == dt:
+            self._t_sum += dt
+        avg = self._t_sum / max(self._done, 1)
+        status = result.get("status")
+        tag = (f"   [{status} {result.get('n_rep_ok')}/{result.get('n_rep_total')}]"
+               if status is not None else "")
+        print(f"[fit {self._done}/{self._total}]  MSE = {loss:.4e}   "
+              f"best = {self._best:.4e}   ({dt:.1f} s, Ø {avg:.1f} s){tag}", flush=True)
+        if (self._checkpoint is not None and self._checkpoint_interval
+                and self._done % self._checkpoint_interval == 0):
+            self._checkpoint(self._done, self._params, self._scores, self._extras)
+
+    def on_trial_error(self, iteration, trials, trial, **info):
+        self._done += 1
+        print(f"[fit {self._done}/{self._total}]  TRIAL ERROR  ({getattr(trial, 'trial_id', '?')})",
+              flush=True)
+
 
 class OptBaseRay():
     def __init__(self, base):
@@ -177,49 +261,85 @@ class OptBaseRay():
         if queue_length < base.core.num_jobs:
             base.core.num_jobs = queue_length
     
-    def _save_warm_params(self, db_path, data_name, all_params, all_score):
+    def _save_warm_params(self, db_path, data_name, all_params, all_score, all_extras=None):
         assert len(all_params) == len(all_score)
+        if all_extras is None:
+            all_extras = [{}] * len(all_params)
+        assert len(all_extras) == len(all_params)
+        extra_names = [name for name, _ in _EXTRA_COLUMNS]
         lock_path = db_path + ".lock"
-    
+
         with FileLock(lock_path):  # Ensure concurrent safety
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-    
+
             # Create a table（if not exist）
-            cursor.execute("""
+            extra_ddl = "".join(f",\n                {name} {sqltype}" for name, sqltype in _EXTRA_COLUMNS)
+            cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS warm_params (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data_name TEXT,
                 param_json TEXT,
-                score REAL
+                score REAL{extra_ddl}
             )
             """)
-    
+            # Files written before the extra columns existed: add them.
+            have = {row[1] for row in cursor.execute("PRAGMA table_info(warm_params)")}
+            for name, sqltype in _EXTRA_COLUMNS:
+                if name not in have:
+                    cursor.execute(f"ALTER TABLE warm_params ADD COLUMN {name} {sqltype}")
+
             # delete the old data_name (if exist)
             cursor.execute("DELETE FROM warm_params WHERE data_name = ?", (data_name,))
-    
+            # Rewriting the same <N>.sqlite (checkpoint + final save) would otherwise
+            # continue the AUTOINCREMENT ids (N+1 .. 2N). Empty table -> ids restart at 1.
+            if cursor.execute("SELECT COUNT(*) FROM warm_params").fetchone()[0] == 0:
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'warm_params'")
+
             # insert new values
-            records = [(data_name, json.dumps(p), s) for p, s in zip(all_params, all_score)]
-            cursor.executemany("INSERT INTO warm_params (data_name, param_json, score) VALUES (?, ?, ?)", records)
-    
+            cols = ["data_name", "param_json", "score"] + extra_names
+            records = [(data_name, json.dumps(p), s,
+                        *[_sql_value((e or {}).get(name)) for name in extra_names])
+                       for p, s, e in zip(all_params, all_score, all_extras)]
+            cursor.executemany(f"INSERT INTO warm_params ({', '.join(cols)}) "
+                               f"VALUES ({', '.join('?' * len(cols))})", records)
+
             conn.commit()
             conn.close()
-    
-            
+
+
     def _load_warm_params(self, db_path, data_name):
         if not os.path.exists(db_path):
             return [], []
-    
+
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-    
-        cursor.execute("SELECT param_json, score FROM warm_params WHERE data_name = ?", (data_name,))
+
+        cursor.execute("SELECT param_json, score FROM warm_params WHERE data_name = ? ORDER BY id", (data_name,))
         rows = cursor.fetchall()
         conn.close()
-    
+
         all_params = [json.loads(p) for p, _ in rows]
         all_score = [s for _, s in rows]
         return all_params, all_score
+
+    def _load_warm_extras(self, db_path, data_name):
+        """Extra columns of a warm-start file, row-aligned with `_load_warm_params`.
+
+        Older files without these columns give dicts of None.
+        """
+        if not os.path.exists(db_path):
+            return []
+        names = [name for name, _ in _EXTRA_COLUMNS]
+        conn = sqlite3.connect(db_path)
+        try:
+            have = {row[1] for row in conn.execute("PRAGMA table_info(warm_params)")}
+            select = ", ".join(name if name in have else "NULL" for name in names)
+            rows = conn.execute(f"SELECT {select} FROM warm_params WHERE data_name = ? ORDER BY id",
+                                (data_name,)).fetchall()
+        finally:
+            conn.close()
+        return [dict(zip(names, row)) for row in rows]
     
     
     def optimierer_ray(self, opt_params_space=None, exp_data_paths=None,known_params=None, evaluated_params=None):
@@ -270,17 +390,27 @@ class OptBaseRay():
             # When not set to multi or optimization of 1d-data, the exp_data_paths contain the name of that data.
             # x_uni_exp, data_exp = base.core.p.get_all_data(exp_data_paths)
             data_name = os.path.basename(exp_data_paths)
+
+        # Keep the SQLite lookup key identical to the key used when saving.
+        if data_name.startswith("Sim_"):
+            data_name = data_name[len("Sim_"):]
+        if data_name.endswith(".xlsx"):
+            data_name = data_name[:-len(".xlsx")]
             
         # Reuse the previous parameters as warm-up for new optimization
         resume_unfinished = getattr(base.core, 'resume_unfinished', False)
         result_dir = getattr(base.core, 'result_dir', base.core.tune_storage_path)
         evaluated_params_full = []
         evaluated_rewards_full = []
-        
+        evaluated_extras_full = []
+
+        n_prev = int(getattr(base.core, 'n_iter_prev', 0))
         if resume_unfinished:
-            n_prev = getattr(base.core, 'n_iter_prev', 0)
             warm_params_path = os.path.join(result_dir, f"{n_prev}.sqlite")
             evaluated_params_full, evaluated_rewards_full = self._load_warm_params(warm_params_path, data_name)
+            evaluated_extras_full = self._load_warm_extras(warm_params_path, data_name)
+            if len(evaluated_extras_full) != len(evaluated_params_full):
+                evaluated_extras_full = [{}] * len(evaluated_params_full)
             # evaluated_rewards = None
                 
         # Set up the Ray Tune search space    
@@ -339,14 +469,23 @@ class OptBaseRay():
             evaluated_params=evaluated_params_for_algo,
             evaluated_rewards=evaluated_rewards_for_algo,
         )
-        # Clean up the data name for output storage 
-        if data_name.startswith("Sim_"):
-            data_name = data_name[len("Sim_"):]
-        if data_name.endswith(".xlsx"):
-            data_name = data_name[:-len(".xlsx")]
         # Define the directory name creator for each trial
         def trial_dirname_creator(trial):
             return f"trial_{trial.trial_id}"
+
+        checkpoint_interval = int(getattr(base.core, "checkpoint_interval", 0))
+
+        def save_progress(done, current_params, current_scores, current_extras):
+            n_checkpoint = n_prev + int(done)
+            checkpoint_path = os.path.join(result_dir, f"{n_checkpoint}.sqlite")
+            self._save_warm_params(
+                checkpoint_path,
+                data_name,
+                list(evaluated_params_full) + list(current_params),
+                list(evaluated_rewards_full) + list(current_scores),
+                list(evaluated_extras_full) + list(current_extras),
+            )
+            print(f"[checkpoint] {n_checkpoint} completed trials -> {checkpoint_path}", flush=True)
         # Set up the trainable function based on the multi_flag
         # if not base.multi_flag:
         #     trainable = tune.with_parameters(OptCoreRay, core_params=base.core_params, pop_params=base.pop_params,
@@ -412,6 +551,11 @@ class OptBaseRay():
             name = data_name,
             verbose = base.core.verbose, # verbose=0: no trial info, 1: basic info, 2: detailed info
             stop={"training_iteration": 1},
+            callbacks=[_ProgressReporter(
+                int(base.core.n_iter) + n_prev,
+                checkpoint_interval=checkpoint_interval,
+                checkpoint=save_progress if checkpoint_interval else None,
+            )],
             )
         )
         # Run the optimization process
@@ -425,21 +569,30 @@ class OptBaseRay():
         # Collect *current* trials
         curr_params = []
         curr_scores = []
+        curr_extras = []
         for trial in results:
             config = trial.config
             score = trial.metrics.get("loss", None)
             if score is not None:
                 curr_params.append(config)
                 curr_scores.append(float(score))
-        
+                curr_extras.append(_extras_from_result(trial.metrics))
+        # Completion order, as in the checkpoint files -> `id` means the same in every file.
+        order = sorted(range(len(curr_params)),
+                       key=lambda i: (curr_extras[i]["finished_at"] is None, curr_extras[i]["finished_at"] or ""))
+        curr_params = [curr_params[i] for i in order]
+        curr_scores = [curr_scores[i] for i in order]
+        curr_extras = [curr_extras[i] for i in order]
+
         # Merge: history (full) + current
         # NOTE: this guarantees every sqlite contains the full history up to that iteration.
         merged_params = list(evaluated_params_full) + list(curr_params)
         merged_scores = list(evaluated_rewards_full) + list(curr_scores)
-        
+        merged_extras = list(evaluated_extras_full) + list(curr_extras)
+
         n_save = int(base.core.n_iter) + int(getattr(base.core, "n_iter_prev", 0))
         warm_params_path = os.path.join(result_dir, f"{n_save}.sqlite")
-        self._save_warm_params(warm_params_path, data_name, merged_params, merged_scores)
+        self._save_warm_params(warm_params_path, data_name, merged_params, merged_scores, merged_extras)
         # Get the best result from the optimization
         opt_result = results.get_best_result(metric="loss", mode="min")
         opt_exp_data_paths = data_name
@@ -528,4 +681,3 @@ class OptBaseRay():
         else:
             # Limit the number of concurrent trials using ConcurrencyLimiter
             return ConcurrencyLimiter(search_alg, max_concurrent=base.core.max_concurrent, batch=batch)
-

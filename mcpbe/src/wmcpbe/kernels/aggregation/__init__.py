@@ -9,6 +9,8 @@ Available kernels:
     - eke_darelius2005: Equipartition of Kinetic Energy, mixer-speed driven
                         (dry mixing, no shear rate needed)
     - etm_darelius2005: Equipartition of Translational Momentum (dry mixing)
+    - kinetic_blend: one fit factor `blend` from equal speed (0) over EKE (1)
+                     to ETM (2), mixer-speed driven
 
 Usage:
     >>> from wmcpbe.kernels.aggregation import get_aggregation_kernel
@@ -26,6 +28,7 @@ from .constant import ConstantKernel
 from .sum_kernel import SumKernel
 from .eke_darelius2005 import EKEDareliusKernel
 from .etm_darelius2005 import ETMDareliusKernel
+from .kinetic_blend import KineticBlendKernel
 
 # Registry of available kernels
 AGG_KERNELS: dict[str, Type[AggregationKernel]] = {
@@ -35,6 +38,7 @@ AGG_KERNELS: dict[str, Type[AggregationKernel]] = {
     'sum': SumKernel,
     'eke_darelius2005': EKEDareliusKernel,
     'etm_darelius2005': ETMDareliusKernel,
+    'kinetic_blend': KineticBlendKernel,
 }
 
 
@@ -86,4 +90,5 @@ __all__ = [
     'SumKernel',
     'EKEDareliusKernel',
     'ETMDareliusKernel',
+    'KineticBlendKernel',
 ]

@@ -623,6 +623,14 @@ MC-Ereignisse stattfanden.
 wie oft `Vc` inzwischen verdoppelt wurde. Deshalb:
 `effective_dW = dW · (Vc_ref / Vc)`.
 
+**Nur ganze Tropfen (seit 30.09.2026).** Das Tropfen-Paket
+`dW_packet = min(batch_size, Budget / vc_scale)` wird *vor* der
+Zwangsagglomeration festgelegt, und die Zwangs-Merges laufen mit genau diesem
+Paket (`dW_cap`). Ein Tropfen baut damit genau so viele Nuklei, wie er benetzt,
+und jeder bekommt den ganzen Tropfen. Der Rest unter einem Tropfen am
+Fensterende wird als ein kleinerer Tropfen zugegeben. Vorher baute ein Tropfen
+3–5 Nuklei und verteilte sich auf alle (Befund F-17).
+
 **Warum eine eigene Agglomerationsroutine?** `_manual_agglomerate_particles` ist
 absichtlich **nicht** `mcpbe_agg::_merge_pair`. Innerhalb der Tropfenschleife darf
 kein Propensity-Rebuild laufen – das wäre O(n) *pro Tropfen* statt pro Ereignis.
@@ -668,7 +676,7 @@ Die Ratenkonstante `k` kommt aus dem gewählten Kernel:
 |---|---|
 | `porosity_compression` | fester Fit-Wert (Default 0.02 1/s) |
 | `porosity_compression_dynamik` | `rate · n_mixer^c_mixer` — drehzahlgetrieben wie Aggregation/Bruch. Default `c_mixer = C_BREAK` (Stoßfrequenz × Stoßenergie, dieselbe Herleitung wie beim dynamischen Bruch). `c_mixer = 0` reproduziert `porosity_compression`. |
-| `porosity_compression_dynamik_rumpf` | `rate · n_mixer^c_mixer / σ(ε,S)` — zusätzlich durch die Rumpf-Festigkeit geteilt (nassere/dichtere Granulate verdichten langsamer). |
+| `porosity_compression_dynamik_rumpf` | `(rate · n_mixer^c_mixer) / σ(ε,S)` — `1/σ` erweitert den Antriebsterm `(ε − ε_min)` der DGL. Klammern beachten: `(n^c_mixer) / σ`, **nicht** `n^(c_mixer/σ)`; `c_mixer` bleibt unberührt, die Festigkeit sitzt im Vorfaktor. Nassere/dichtere Granulate verdichten langsamer. |
 
 Beim Rumpf-Kernel hängt `σ` von `ε` ab, die DGL wird also nichtlinear. `σ`
 faktorisiert aber exakt als `φ(S)·(1−ε)/ε` (numerisch gegen `_sigma_jit` des
@@ -779,8 +787,7 @@ Event für *fast jedes* Partikel neu schreiben. Der Index muss also jedes Event
 neu aufgebaut werden, und *eine* skalare Key-Berechnung (`np.log10` + `round`
 ×3–4) kostet mehr als *ein* vektorisierter Vergleich gegen alle aktiven
 Partikel. Gemessen an `powerlaw_rumpf_dynamic_full` (n_comp ≈ 2 700):
-**431 s (hash) → 55 s (scan)**. Details:
-[`historical/Merger_Lookup_Strategy_2026-09.md`](historical/Merger_Lookup_Strategy_2026-09.md).
+**431 s (hash) → 55 s (scan)**.
 
 Der lineare Scan liefert außerdem immer den **kleinsten** passenden Index; der
 Hash iteriert ein Set. Wenn mehrere Partikel innerhalb der Toleranz liegen,
@@ -872,8 +879,8 @@ wirft das Fehlen dort einen `ValueError` mit einer Liste der verfügbaren Kernel
 
 | Steckplatz | Beantwortet die Frage | Implementierungen |
 |---|---|---|
-| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005` |
-| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `stokes_dynamik`, `fittable` |
+| `agg_kernel` | Wie oft stoßen zwei Partikel zusammen? β(r₁,r₂) | `shear_chin1998`, `brownian_tsouris1995`, `constant`, `sum`, `eke_darelius2005`, `etm_darelius2005`, `kinetic_blend` |
+| `agglomeration_acceptance_kernel` | Bleibt der Stoß haften? | `stokes_krit`, `stokes_dynamik`, `stokes_eke_dynamik`, `fittable` |
 | `break_kernel` | Wie oft bricht ein Partikel? S(V) | `power_law`, `powerlaw_rumpf`, `powerlaw_rumpf_dynamic` |
 | `porosity_growth_kernel` | Wie entwickelt sich der Porenraum? | `volume_mixing`, `cone_model`, `incomplete_mixing` |
 | `liquid_dist_kernel` | Welches Partikel trifft der Tropfen? | `uniform_weighted` |
@@ -1103,10 +1110,10 @@ anhält, kostet Minuten.
 ### Ausführen
 
 ```bash
-"C:/Users/ericb/anaconda3/envs/Masterarbeitv4/python.exe" -m wmcpbe.Trials.test_powerlaw_rumpf_full
+python -m pytest tests -v
 ```
 
-Aus dem Verzeichnis `mcpbe/src`. Für saubere Unicode-Ausgabe zusätzlich
+Aus dem Verzeichnis `mcpbe/` (Einrichtung und weitere Kommandos: `tests/README.md`). Für saubere Unicode-Ausgabe zusätzlich
 `PYTHONIOENCODING=utf-8` setzen, sonst brechen `print()`-Aufrufe mit Sonderzeichen
 auf einer cp1252-Konsole ab.
 

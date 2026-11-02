@@ -8,6 +8,8 @@ Available kernels:
     - stokes_krit: Stokes criterion (Braumann et al. 2007)
     - stokes_dynamik: Stokes criterion with mixer-speed-dependent collision
                       velocity (dry mixing)
+    - stokes_eke_dynamik: as stokes_dynamik, but every pair hits with the same
+                          ENERGY (EKE) instead of the same velocity
     - fittable: Simple fit parameter (rng < u_acc)
 
 Usage:
@@ -30,12 +32,14 @@ from ..base import AggAcceptanceKernel, reject_unknown_params
 # Import all kernel implementations
 from .stokes_krit import StokesKritKernel
 from .stokes_dynamik import StokesDynamikKernel
+from .stokes_eke_dynamik import StokesEkeDynamikKernel
 from .fittable import FittableKernel
 
 # Registry of available kernels
 AGG_ACCEPTANCE_KERNELS: dict[str, Type[AggAcceptanceKernel]] = {
     'stokes_krit': StokesKritKernel,
     'stokes_dynamik': StokesDynamikKernel,
+    'stokes_eke_dynamik': StokesEkeDynamikKernel,
     'fittable': FittableKernel,
 }
 
@@ -85,5 +89,6 @@ __all__ = [
     'list_agglomeration_acceptance_kernels',
     'StokesKritKernel',
     'StokesDynamikKernel',
+    'StokesEkeDynamikKernel',
     'FittableKernel',
 ]

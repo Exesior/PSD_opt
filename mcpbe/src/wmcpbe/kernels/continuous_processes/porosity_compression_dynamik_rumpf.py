@@ -4,13 +4,25 @@ Mixer-speed-driven porosity compression with a Rumpf-strength resistance.
 Same consolidation picture as :mod:`.porosity_compression_dynamik` -- porosity
 decays exponentially towards ``min_porosity``, the rate driven by the mixer
 speed -- but the granule resists consolidation in proportion to its strength.
-The rate is divided by the Rumpf granule strength ``sigma(eps, S)``:
+The Rumpf granule strength ``sigma(eps, S)`` divides the RATE PREFACTOR (the
+"base factor"); it is NOT an exponent. Start from the plain law
+``deps/dt = -k * (eps - eps_min)`` and let ``1 / sigma`` multiply the driving
+term ``(eps - eps_min)``:
 
-    k(eps, S)  = rate * n_mixer ** c_mixer / sigma(eps, S)
+    deps/dt    = -(rate * n_mixer ** c_mixer) * (eps - eps_min) * (1 / sigma(eps, S))
+               = -[ (rate * n_mixer ** c_mixer) / sigma(eps, S) ] * (eps - eps_min)
+
+    k(eps, S)  = (rate * n_mixer ** c_mixer) / sigma(eps, S)         # note the parentheses:
+                                                                     # (n ** c_mixer) / sigma,
+                                                                     # NOT n ** (c_mixer / sigma)
     eps(t+dt)  = eps_min + (eps(t) - eps_min) * exp(-k(eps(t), S) * dt)
 
-This mirrors the dynamic breakage kernel exactly: both breakage and
-consolidation scale as ``n ** C_BREAK / sigma(eps, S)`` -- the same
+"``1 / sigma`` on ``(eps - eps_min)``" and "``sigma`` in the denominator of
+``k``" are the SAME equation -- multiplication commutes. The mixer-speed
+exponent ``c_mixer`` is untouched by the Rumpf term.
+
+This mirrors the dynamic breakage kernel: both breakage and consolidation
+scale as ``(n ** C_BREAK) / sigma(eps, S)`` -- the same
 plastic-deformation-per-impact mechanism, differing only in outcome (rupture at
 a high impact-energy / strength ratio vs. a permanent density increase). Wetter
 and denser granules resist consolidation, which is what consolidation
@@ -82,7 +94,7 @@ class PorosityCompressionDynamikRumpfKernel(CompressionKernel):
 
     Parameters:
         rate: Compaction prefactor [Pa/s] (default: 21.35). The effective rate
-              is ``k = rate * n_mixer ** c_mixer / sigma(eps, S)``. The default
+              is ``k = (rate * n_mixer ** c_mixer) / sigma(eps, S)``. The default
               absorbs the ~8 kPa strength scale; see ``_RATE_DEFAULT``. NOT
               comparable to the ``rate`` of :mod:`.porosity_compression` or
               :mod:`.porosity_compression_dynamik`.
@@ -146,8 +158,10 @@ class PorosityCompressionDynamikRumpfKernel(CompressionKernel):
         self.n_mixer = float(self.params['n_mixer'])
         self.c_mixer = float(self.params['c_mixer'])
 
-        # Folded mixer-speed prefactor: rate * n_mixer ** c_mixer. Divided by
-        # sigma(eps, S) per particle to get the effective rate.
+        # Folded mixer-speed prefactor (rate * n_mixer ** c_mixer). The
+        # effective rate is this DIVIDED BY sigma(eps, S) per particle:
+        # k_eff = rate_nc / sigma, i.e. (n ** c_mixer) / sigma, never
+        # n ** (c_mixer / sigma).
         self.rate_nc = self.rate * self.n_mixer ** self.c_mixer
 
         self.k_rumpf = float(self.params['k'])

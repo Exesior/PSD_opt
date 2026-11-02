@@ -61,6 +61,7 @@ Complexity (n = number of computational particles):
     brownian        O(n^2)      O(n log n)
     eke             O(n^2)      -            (not separable)
     etm             O(n^2)      -            (not separable)
+    kinetic_blend   O(n^2)      -            (not separable)
 
 Why EKE/ETM have no moment form: their velocity factor is the square root of a
 *sum*, ``sqrt(1/r_i^k + 1/r_j^k)``. A moment form needs
@@ -68,6 +69,14 @@ Why EKE/ETM have no moment form: their velocity factor is the square root of a
 the sum, so no finite decomposition exists. They still get the compiled
 pairwise path, because they are pure functions of ``(p0, r_i, r_j)`` - the same
 shape as shear and brownian - and therefore fit into ``_beta_of`` directly.
+
+The second scalar ``p1``
+------------------------
+``kinetic_blend`` needs one number that is NOT a prefactor: the velocity
+exponent ``k = 3 * blend`` in ``sqrt(r_i^-k + r_j^-k)``. It travels as ``p1``
+through ``_beta_of``, the two pairwise rebuilds and ``pick_partner_pairdelta``,
+always as the LAST argument with default 0.0. Every other kernel ignores it,
+and callers written before ``p1`` existed keep working unchanged.
 """
 
 from __future__ import annotations
@@ -86,6 +95,7 @@ KID_SHEAR = 2
 KID_BROWNIAN = 3
 KID_EKE = 4
 KID_ETM = 5
+KID_KINETIC_BLEND = 6
 
 #: Maps kernel name -> (kid, parameter extractor). ``p0`` folds every constant
 #: prefactor into a single number so the compiled kernels stay branch-cheap.
@@ -96,12 +106,13 @@ KERNEL_IDS = {
     "brownian_tsouris1995": KID_BROWNIAN,
     "eke_darelius2005": KID_EKE,
     "etm_darelius2005": KID_ETM,
+    "kinetic_blend": KID_KINETIC_BLEND,
 }
 
 #: Kernel names with a compiled batch implementation here.
 BATCH_KERNELS = frozenset(
     {"shear_chin1998", "brownian_tsouris1995", "constant", "sum",
-     "eke_darelius2005", "etm_darelius2005"}
+     "eke_darelius2005", "etm_darelius2005", "kinetic_blend"}
 )
 
 #: Kernel names that are separable and therefore have an O(n log n) moment form.
@@ -124,25 +135,29 @@ PARALLEL_MIN_N = 800
 
 
 @njit(cache=True)
-def _beta_of(kid, p0, ri, rj):
-    """``beta(i,j)`` for the built-in single-prefactor kernels.
+def _beta_of(kid, p0, ri, rj, p1=0.0):
+    """``beta(i,j)`` for the built-in compiled kernels.
 
     ``p0`` carries the folded prefactor:
-        constant  -> corr_beta
-        sum       -> corr_beta
-        shear     -> corr_beta * g
-        brownian  -> 2 * corr_beta * kT / (3 * viscosity)
-        eke       -> corr_beta * n_mixer**c_mixer
-        etm       -> corr_beta * n_mixer**c_mixer
+        constant       -> corr_beta
+        sum            -> corr_beta
+        shear          -> corr_beta * g
+        brownian       -> 2 * corr_beta * kT / (3 * viscosity)
+        eke            -> corr_beta * n_mixer**c_mixer
+        etm            -> corr_beta * n_mixer**c_mixer
+        kinetic_blend  -> corr_beta * n_mixer**c_mixer
 
-    The first four are also separable and therefore have a moment form; EKE and
-    ETM are not (see the module docstring) and only ever reach this function
-    through the pairwise path.
+    ``p1`` is only read by kinetic_blend: the velocity exponent k = 3 * blend.
 
-    The EKE/ETM branches must stay bit-for-bit identical to ``_beta_eke_jit`` /
-    ``_beta_etm_jit`` in the kernel modules, which is what those kernels'
-    ``compute_beta`` calls. ``verify_jit_kernels`` asserts the equality, so keep
-    the association order as written.
+    The first four are also separable and therefore have a moment form; EKE,
+    ETM and kinetic_blend are not (see the module docstring) and only ever
+    reach this function through the pairwise path.
+
+    The EKE/ETM/kinetic_blend branches must stay bit-for-bit identical to
+    ``_beta_eke_jit`` / ``_beta_etm_jit`` / ``_beta_kinetic_blend_jit`` in the
+    kernel modules, which is what those kernels' ``compute_beta`` calls.
+    ``verify_jit_kernels`` asserts the equality, so keep the association order
+    as written.
     """
     if kid == KID_CONSTANT:
         return p0
@@ -170,6 +185,19 @@ def _beta_of(kid, p0, ri, rj):
         _cj = rj * rj * rj
         _inv = 1.0 / (_ci * _ci) + 1.0 / (_cj * _cj)
         return p0 * _rsum * _rsum * math.sqrt(_inv)
+    elif kid == KID_KINETIC_BLEND:
+        if ri <= 0.0 or rj <= 0.0:
+            return 0.0
+        _rsum = ri + rj
+        if p1 == 3.0:
+            _inv = 1.0 / (ri * ri * ri) + 1.0 / (rj * rj * rj)
+        elif p1 == 6.0:
+            _ci = ri * ri * ri
+            _cj = rj * rj * rj
+            _inv = 1.0 / (_ci * _ci) + 1.0 / (_cj * _cj)
+        else:
+            _inv = ri ** (-p1) + rj ** (-p1)
+        return p0 * _rsum * _rsum * math.sqrt(_inv)
     return 0.0
 
 
@@ -190,7 +218,7 @@ def _self_delta(delta_i, Wi):
 
 
 @njit(cache=True, parallel=True)
-def rebuild_r_pairdelta_pairwise(kid, p0, R, W, delta, dW_const, r_out):
+def rebuild_r_pairdelta_pairwise(kid, p0, R, W, delta, dW_const, r_out, p1=0.0):
     """Exact O(n^2) pair-delta propensities. Numerical ground truth."""
     a = W.shape[0]
     for i in prange(a):
@@ -208,7 +236,7 @@ def rebuild_r_pairdelta_pairwise(kid, p0, R, W, delta, dW_const, r_out):
             Wj = W[j]
             if dj <= 0.0 or Wj <= 0.0:
                 continue
-            bij = _beta_of(kid, p0, ri, R[j])
+            bij = _beta_of(kid, p0, ri, R[j], p1)
             if bij <= 0.0:
                 continue
             pair_delta = di if di < dj else dj
@@ -216,7 +244,7 @@ def rebuild_r_pairdelta_pairwise(kid, p0, R, W, delta, dW_const, r_out):
         if Wi > 1.0:
             sd = _self_delta(di, Wi)
             if sd > 0.0:
-                bii = _beta_of(kid, p0, ri, ri)
+                bii = _beta_of(kid, p0, ri, ri, p1)
                 if bii > 0.0:
                     s += (Wi - 1.0) * bii / sd
         val = Wi * s
@@ -224,7 +252,7 @@ def rebuild_r_pairdelta_pairwise(kid, p0, R, W, delta, dW_const, r_out):
 
 
 @njit(cache=True)
-def rebuild_r_pairdelta_pairwise_serial(kid, p0, R, W, delta, dW_const, r_out):
+def rebuild_r_pairdelta_pairwise_serial(kid, p0, R, W, delta, dW_const, r_out, p1=0.0):
     """Serial twin of :func:`rebuild_r_pairdelta_pairwise` (bit-identical)."""
     a = W.shape[0]
     for i in range(a):
@@ -242,7 +270,7 @@ def rebuild_r_pairdelta_pairwise_serial(kid, p0, R, W, delta, dW_const, r_out):
             Wj = W[j]
             if dj <= 0.0 or Wj <= 0.0:
                 continue
-            bij = _beta_of(kid, p0, ri, R[j])
+            bij = _beta_of(kid, p0, ri, R[j], p1)
             if bij <= 0.0:
                 continue
             pair_delta = di if di < dj else dj
@@ -250,7 +278,7 @@ def rebuild_r_pairdelta_pairwise_serial(kid, p0, R, W, delta, dW_const, r_out):
         if Wi > 1.0:
             sd = _self_delta(di, Wi)
             if sd > 0.0:
-                bii = _beta_of(kid, p0, ri, ri)
+                bii = _beta_of(kid, p0, ri, ri, p1)
                 if bii > 0.0:
                     s += (Wi - 1.0) * bii / sd
         val = Wi * s
@@ -463,7 +491,7 @@ def kernel_p0(name: str, kernel) -> float:
         return float(kernel.corr_beta) * float(kernel.g)
     if name == "brownian_tsouris1995":
         return 2.0 * float(kernel.corr_beta) * float(kernel.kT) / (3.0 * float(kernel.viscosity))
-    if name in ("eke_darelius2005", "etm_darelius2005"):
+    if name in ("eke_darelius2005", "etm_darelius2005", "kinetic_blend"):
         # Read the value the kernel already computed rather than recomputing
         # corr_beta * n_mixer**c_mixer here. Recomputing would be correct to
         # within a rounding of the pow(), and a rounding difference in the
@@ -473,8 +501,22 @@ def kernel_p0(name: str, kernel) -> float:
     raise ValueError(f"{name!r} is not a built-in compiled kernel")
 
 
+def kernel_p1(name: str, kernel) -> float:
+    """Second compiled scalar consumed by :func:`_beta_of` (not a prefactor).
+
+    Only ``kinetic_blend`` uses it (velocity exponent k = 3 * blend, read back
+    from the kernel so both paths use the identical value). Every other
+    compiled kernel gets 0.0, which its ``_beta_of`` branch never reads.
+    """
+    if name == "kinetic_blend":
+        return float(kernel.p1)
+    if name in KERNEL_IDS:
+        return 0.0
+    raise ValueError(f"{name!r} is not a built-in compiled kernel")
+
+
 @njit(cache=True)
-def pick_partner_pairdelta(kid, p0, i, R, W, delta, dW_const, partner_total, u_sel):
+def pick_partner_pairdelta(kid, p0, i, R, W, delta, dW_const, partner_total, u_sel, p1=0.0):
     """Draw partner ``j`` proportional to ``W_j beta(i,j) / dW_ij``.
 
     ``partner_total`` is ``R_i* / W_i`` - the same quantity the propensity
@@ -506,7 +548,7 @@ def pick_partner_pairdelta(kid, p0, i, R, W, delta, dW_const, partner_total, u_s
             sd = _self_delta(di, Wi)
             if sd <= 0.0:
                 continue
-            bii = _beta_of(kid, p0, ri, ri)
+            bii = _beta_of(kid, p0, ri, ri, p1)
             if bii <= 0.0:
                 continue
             wij = (Wi - 1.0) * bii / sd
@@ -515,7 +557,7 @@ def pick_partner_pairdelta(kid, p0, i, R, W, delta, dW_const, partner_total, u_s
             dj = delta[j]
             if Wj <= 0.0 or dj <= 0.0:
                 continue
-            bij = _beta_of(kid, p0, ri, R[j])
+            bij = _beta_of(kid, p0, ri, R[j], p1)
             if bij <= 0.0:
                 continue
             pair_delta = di if di < dj else dj

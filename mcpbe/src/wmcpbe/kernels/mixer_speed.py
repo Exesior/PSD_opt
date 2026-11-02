@@ -5,7 +5,10 @@ Several kernels are driven by the mixer speed rather than by a shear rate:
 
     eke_darelius2005        collision frequency
     etm_darelius2005        collision frequency
+    kinetic_blend           collision frequency (equal speed / EKE / ETM)
     stokes_dynamik          collision velocity (acceptance)
+    stokes_eke_dynamik      collision velocity of a reference pair (acceptance,
+                            other pairs scaled by equal collision energy)
     powerlaw_rumpf_dynamic  breakage rate
 
 They all read the SAME physical quantity - there is one mixer, turning at one

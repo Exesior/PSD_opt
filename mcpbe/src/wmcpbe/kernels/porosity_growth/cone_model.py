@@ -53,11 +53,15 @@ Layering (strongly unequal particles):
 Parameters:
     k_agg: shape correction factor for agglomeration [-]
            Scales dV before it is added to the pore volume.
-           Typical: 0.1 - 2.0 (fitted to experiment)
+           Physical range: [0, 1]. The cone-pill/layering geometry (dV) is
+           itself a physical maximum-value estimate of the enclosed pore
+           space, so k_agg only dampens it towards that estimate; values
+           above 1 are not physically meaningful.
 
     k_break: shape correction factor for breakage [-]
            Scales dV before it is subtracted from the pore volume.
-           Typical: 0.01 - 0.5 (smaller, see below)
+           Physical range: [0, 1]. 0 = breakage loses no pore volume;
+           values above 1 are not physically meaningful (see below).
 
     Why two factors?
         - Agglomeration: one cone between two particles, dV applies directly.
@@ -119,9 +123,11 @@ class ConeModelKernel(PorosityGrowthKernel):
     Parameters:
         k_agg: Shape correction factor for agglomeration (default: 1.0)
                Scales ΔV added to pore volume during merging.
-               Physical interpretation: Fraction of geometric ΔV that 
-               becomes accessible pore space.
-               
+               Physical interpretation: Fraction of geometric ΔV (itself a
+               physical maximum-value estimate) that becomes accessible pore
+               space. Range [0, 1]; values above 1 are not physically
+               meaningful.
+
         k_break: Shape correction factor for breakage (default: 1.0)
                  Scales ΔV subtracted from pore volume during fragmentation.
                  Physical interpretation: Accounts for (n-1) cones in series
@@ -192,13 +198,12 @@ class ConeModelKernel(PorosityGrowthKernel):
             raise ValueError("k_agg must be non-negative")
         if params['k_break'] < 0:
             raise ValueError("k_break must be non-negative")
-        # Warn if k_break is large (can cause negative pores)
+        # Warn if k_break > 1 (can cause negative pore volumes for multi-fragment breakage)
         if params['k_break'] > 1.0:
             import warnings
             warnings.warn(
                 f"k_break={params['k_break']} is large. "
-                "This may cause negative pore volumes for multi-fragment breakage. "
-                "Recommended range: 0.01 - 0.5",
+                "This may cause negative pore volumes for multi-fragment breakage.",
                 UserWarning,
                 stacklevel=2
             )
@@ -466,7 +471,8 @@ class ConeModelKernel(PorosityGrowthKernel):
         # Step 5: Add new pores from contact geometry
         # ==========================================
         # V_pore_new = V_pore_old + k_agg × ΔV
-        # Note: k_agg=0.5 (default) dampens pore growth to prevent runaway
+        # Note: k_agg in [0, 1] dampens pore growth towards the geometric
+        # maximum-value estimate dV (default k_agg=1.0, i.e. no damping)
         delta_pore = self.k_agg * ΔV
         
         # GUARD: Prevent excessive pore addition

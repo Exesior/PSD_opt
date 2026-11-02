@@ -54,8 +54,8 @@ Das kostet Duplikation, und das ist Absicht. Historisch gab es ein geteiltes
 `breakage/_base_rate.py` und Vererbung zwischen Kerneln -- beides ist am
 20.08.2026 entfernt worden. Heute steht die BREAKRVAL-Basisrate woertlich
 identisch in allen drei Bruchkerneln, `powerlaw_rumpf_dynamic` hat eine eigene
-Kopie des Rumpf-Festigkeitsmodells und `stokes_dynamik` eine eigene Kopie der
-Stokes-Logik.
+Kopie des Rumpf-Festigkeitsmodells, und `stokes_dynamik` und
+`stokes_eke_dynamik` haben je eine eigene Kopie der Stokes-Logik.
 
 ### Damit die Kopien nicht auseinanderlaufen
 
@@ -171,7 +171,7 @@ nicht die Integration mit dem Solver.
 
 ```bash
 # Vom Projekt-Root aus mit -m Flagge
-cd C:/Users/ericb/Documents/GitHub/PSD_opt/mcpbe/src
+cd mcpbe/src
 python -m wmcpbe.kernels.breakage.blueprint
 ```
 

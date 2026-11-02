@@ -39,9 +39,9 @@ anderen Kernel, oder ein geteiltes privates Hilfsmodul.
 
 Das kostet Duplikation, und zwar bewusst. Die BREAKRVAL-Basisrate steht wörtlich
 identisch in allen drei Bruchkerneln; `powerlaw_rumpf_dynamic` hat eine eigene
-Kopie des Rumpf-Festigkeitsmodells; `stokes_dynamik` eine eigene Kopie der
-Stokes-Logik. Früher gab es dafür ein geteiltes `_base_rate.py` und Vererbung —
-beides ist entfernt.
+Kopie des Rumpf-Festigkeitsmodells; `stokes_dynamik` und `stokes_eke_dynamik`
+haben je eine eigene Kopie der Stokes-Logik. Früher gab es dafür ein geteiltes
+`_base_rate.py` und Vererbung — beides ist entfernt.
 
 Damit die Kopien nicht auseinanderlaufen, prüft
 `Trials/test_dry_mixer_kernels.py` das dreifach:
@@ -158,6 +158,7 @@ Partikels, keine Paarwechselwirkung, daher ohne Konzentrationsabhängigkeit.)
 | `sum` | `corr_beta · (V₁+V₂)` | `corr_beta`=1e-9 |
 | `eke_darelius2005` | `corr_beta · n^c · (r₁+r₂)² · √(1/r₁³+1/r₂³)` | `corr_beta`=1e-11, `n_mixer`=20.0, `c_mixer`=0.0995 |
 | `etm_darelius2005` | `corr_beta · n^c · (r₁+r₂)² · √(1/r₁⁶+1/r₂⁶)` | `corr_beta`=1e-16, `n_mixer`=20.0, `c_mixer`=0.0995 |
+| `kinetic_blend` | `corr_beta · n^c · (r₁+r₂)² · √(r₁^(−3b)+r₂^(−3b))` | `corr_beta`=1e-11, `blend`=1.0 (0 gleich schnell, 1 EKE, 2 ETM), `n_mixer`=20.0, `c_mixer`=0.0995 |
 
 ### Breakage — `compute_rate` → S [1/s]
 
@@ -181,6 +182,7 @@ Partikels, keine Paarwechselwirkung, daher ohne Konzentrationsabhängigkeit.)
 |---|---|
 | `stokes_krit` | `U_coll`=1.0, `binder_viscosity`=5, `rho_solid`=2500.0, `rho_liquid`=1000.0, `h_a`=5e-7, `debug`=False |
 | `stokes_dynamik` | `U_coll_ref`=0.0794, `n_mixer`=20.0, `c_vel`=0.2852, + die vier oben |
+| `stokes_eke_dynamik` | wie `stokes_dynamik` (Bezugspaar = Primärpartikel, aus `solver.V0` gelesen, kein Parameter) |
 | `fittable` | `u_acc`=1.0 |
 
 ### Liquid Distribution
@@ -282,6 +284,31 @@ Gleiches Bild, andere Annahme: jedes Granulat bekommt denselben zufälligen
 beiden Vorfaktoren sind nicht austauschbar. β ∝ 1/r für gleich große Partikel,
 also noch stärkere Bevorzugung der Feinanteile. Darelius fand ETM bei *hohen*,
 EKE bei *niedrigen* Rührerdrehzahlen besser.
+
+#### `kinetic_blend` — gleich schnell ↔ EKE ↔ ETM
+
+Ein Kernel für die ganze kinetische Familie. Ein Fitfaktor `blend` legt fest,
+wie die Zufallsgeschwindigkeit mit der Masse skaliert, v ∝ m^(−blend/2):
+
+```
+β(i,j) = corr_beta · n_mixer^c_mixer · (r_i + r_j)² · √(r_i^(−3·blend) + r_j^(−3·blend))
+```
+
+| `blend` | Annahme | β gleich großer Partikel |
+|---|---|---|
+| 0 | alle gleich schnell | ∝ r² |
+| 1 | gleiche Energie = **EKE** (bitgenau `eke_darelius2005`) | ∝ r^0.5 |
+| 2 | gleicher Impuls = **ETM** (bitgenau `etm_darelius2005`) | ∝ r⁻¹ |
+
+Zwischenwerte interpolieren stetig; erlaubt ist [0, 2], Default 1 (EKE).
+`corr_beta` hat die Einheit [m^(1+1.5·blend)/s], ist also an `blend` gekoppelt
+und muss mit `blend` neu gefittet werden. Für Vergleiche zwischen Werten von
+`blend` kalibriert man `corr_beta` auf ein Bezugspaar (z. B. Feingut 17 µm +
+Granulat 100 µm Radius).
+
+Kompilierter Pfad: `KID_KINETIC_BLEND`; der Exponent `k = 3·blend` läuft als
+zweiter Skalar `p1` durch `_beta_of` (alle anderen Kernel bekommen `p1 = 0`
+und ignorieren ihn). Nicht separierbar, also keine Momentenform.
 
 ---
 
@@ -406,6 +433,40 @@ Bei `n_mixer == 1.0` ist der Kernel **bitgenau identisch** zu `stokes_krit` mit
 `U_coll = U_coll_ref` (`1^c == 1` für jedes `c`) — ein mathematischer, kein
 physikalischer Ankerpunkt.
 
+#### `stokes_eke_dynamik`
+
+Wie `stokes_dynamik`, aber mit der Annahme des EKE-Aggregationskernels: Jedes
+Paar stößt mit **derselben Energie**, nicht mit derselben Geschwindigkeit. Die
+Stoßgeschwindigkeit hängt deshalb von der reduzierten Masse des Paares ab:
+
+```
+μ_ij   = m_i·m_j / (m_i + m_j)
+U_ij   = U_coll(n) · √(μ_ref / μ_ij),     U_coll(n) = U_coll_ref · n_mixer^c_vel
+m_ref  = rho_solid · (1 − ε₀) · π/6 · x_s³,   μ_ref = m_ref / 2     (Primärpartikel)
+St     = m_harm · U_ij / (3π η R_harm²),  St_crit wie oben
+```
+
+`U_coll(n)` ist die Stoßgeschwindigkeit von **zwei Primärpartikeln**; für dieses
+Paar entscheidet der Kernel wie `stokes_dynamik`. Die Primärpartikel nimmt der
+Kernel wie `powerlaw_rumpf` aus den Ursprungspartikeln: `x_s` ist der
+Sauterdurchmesser von `solver.X0`, `ε₀` die Ursprungsporosität. Einmal beim
+ersten Gebrauch berechnet, kein Parameter: Dichte und Porosität werden je System
+ohnehin gesetzt, und ein neues System braucht einen neuen Fit. `ε₀` kommt aus
+`solver.V0` (1 − V_solid/V_dry), nicht aus `solver.porosity0`, weil Adapter und
+Trial-Skripte die Porosität erst nach `_initialize_particles()` setzen und dort
+noch 0 steht. Eine Obergrenze der
+Geschwindigkeit gibt es nicht (ein Partikel kann bis zu (1+e)-mal schneller
+als das Werkzeug werden). Die 2-mm-Partikel der DEM wären ein schlechter
+Bezug: Mit EKE-Skalierung käme 34-µm-Feingut auf rund 95 m/s.
+
+Warum das zählt: Das Stokes-Kriterium ist eine Impulsbilanz (`m_harm·U` gegen
+das Bremsvermögen des Films); die Geschwindigkeit geht nur über den Impuls ein.
+Mit gleicher Energie gilt für gleich große Paare `St ∝ r^(−1/2)` statt `St ∝ r`.
+Paare kleben dann **oberhalb** einer kritischen Größe statt unterhalb; eine
+Wachstumsgrenze muss dann aus dem Bruch kommen. Herleitung, Skalierung und ein
+statischer Check auf AJ30-Kollisionsprotokollen: Dokument „stokes_eke_dynamik“
+vom 01.10.2026. Noch nicht in einem Lauf getestet und nicht kalibriert.
+
 #### `fittable`
 
 Reiner Fit-Parameter: akzeptiert mit Wahrscheinlichkeit `u_acc`. `u_acc = 0`
@@ -427,17 +488,17 @@ Laufen per Operator-Splitting **nach** jedem MC-Ereignis.
 > **und** `V_flat[-1]`, ändert also den Durchmesser. Da jeder
 > Agglomerationskernel eine Funktion der Radien ist, veralten dadurch die
 > gespeicherten Propensities. Seit 20.08.2026 löst der Solver nach
-> `continuous_processes.step()` einen Rebuild aus. Siehe
-> `../../../docs/historical/Nucleation_Propensity_Blockade.md`, Abschnitt 8.
+> `continuous_processes.step()` einen Rebuild aus.
 
 ---
 
 ### Mischerdrehzahl: `mixer_speed.py`
 
-Vier Kernel werden von der Mischerdrehzahl angetrieben: `eke_darelius2005`,
-`etm_darelius2005`, `stokes_dynamik`, `powerlaw_rumpf_dynamic`. Sie lesen alle
-**dieselbe** physikalische Größe — es gibt einen Mischer, der sich mit einer
-Drehzahl dreht.
+Diese Kernel werden von der Mischerdrehzahl angetrieben: `eke_darelius2005`,
+`etm_darelius2005`, `kinetic_blend`, `stokes_dynamik`, `stokes_eke_dynamik`,
+`powerlaw_rumpf_dynamic` (dazu die Kompressionskernel
+`porosity_compression_dynamik(_rumpf)`). Sie lesen alle **dieselbe**
+physikalische Größe — es gibt einen Mischer, der sich mit einer Drehzahl dreht.
 
 | Konstante | Wert | Bedeutung |
 |---|---|---|
@@ -653,7 +714,7 @@ akzeptiertem Ereignis über alle aktiven Partikel.
 | Kernel | pairwise | moment |
 |---|---|---|
 | `constant`, `sum`, `shear_chin1998`, `brownian_tsouris1995` | O(n²) | **O(n log n)** |
-| `eke_darelius2005`, `etm_darelius2005` | O(n²) | – nicht separierbar |
+| `eke_darelius2005`, `etm_darelius2005`, `kinetic_blend` | O(n²) | – nicht separierbar |
 
 `solver.agg_propensity_mode = "moment"` wählt die Momentenform, wo es sie gibt,
 und fällt sonst still auf den kompilierten pairwise-Pfad zurück.
@@ -677,6 +738,9 @@ laufen dort, weil α dann vom Komponentengemisch des Paares abhängt.
   mechanistic approach using population balances*, Powder Technology 160, 209–218
 * Braumann, A. et al. (2007) — Granulation mit heterogener Binderverteilung
   (Stokes-Kriterium)
+* Ennis, B.J., Tardos, G., Pfeffer, R. (1991) — *A microlevel-based
+  characterization of granulation phenomena*, Powder Technology 65, 257–272
+  (kritische Stokes-Zahl)
 * Rumpf, H. (1979) — *Grundlagen der Agglomeration*
 * Iveson, S.M. et al. (2001) — Sättigungsregime, Powder Technology
 * Ji & Rhein — gewichtetes DSMC, Bias-Korrektur
@@ -691,5 +755,3 @@ laufen dort, weil α dann vom Komponentengemisch des Paares abhängt.
 | [COMPRESSION_MIGRATION.md](COMPRESSION_MIGRATION.md) | Umstieg vom entfernten Compression-Modul |
 | `../../../docs/README.md` | Solver-Grundlagen |
 | `../../../docs/README.md` | Gesamtüberblick |
-| `../../../docs/historical/Bias_Correction_und_Gewichtsdisziplin.md` | Herleitung der Propensity-Korrektur |
-| `../../../docs/historical/Nucleation_Propensity_Blockade.md` | Propensity-Aktualität, beide Ursachen |

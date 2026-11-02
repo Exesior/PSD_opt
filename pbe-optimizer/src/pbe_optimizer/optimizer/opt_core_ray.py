@@ -182,7 +182,12 @@ class OptCoreRay(OptCore, tune.Trainable):
         if execution_time < self.wait_time and self.actor_wait:
             time.sleep(self.wait_time - execution_time)
             
-        result = {"loss": loss, "reuse_num": self.reuse_num, "exp_paths": self.exp_data_paths}    
+        result = {"loss": loss, "reuse_num": self.reuse_num, "exp_paths": self.exp_data_paths,
+                  "finished_at": end_time}
+        # Per-candidate diagnostics from adapters that provide them (wet_granulation:
+        # status, n_rep_ok, n_rep_total, eval_seconds, failure_reason). They are stored
+        # as extra columns of the warm-start SQLite (opt_base_ray._EXTRA_COLUMNS).
+        result.update(getattr(self.p, "eval_info", None) or {})
         return result
     
     def save_checkpoint(self, checkpoint_dir):

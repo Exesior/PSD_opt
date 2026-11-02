@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable, Dict, Type
 import numpy as np
 from .dpbe_adapter import DPBEAdapter
 from .mcpbe_adapter import MCPBEAdapter
+from .wet_granulation_adapter import WetGranulationAdapter
 
 @runtime_checkable
 class SolverProtocol(Protocol):
@@ -233,6 +234,7 @@ def validate_solver(obj: Any) -> None:
 REGISTRY: Dict[str, Type] = {
     "dpbe": DPBEAdapter,
     "mcpbe": MCPBEAdapter,
+    "wet_granulation": WetGranulationAdapter,
     
     # "other": OtherAdapter,
 }
