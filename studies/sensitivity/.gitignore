@@ -1,0 +1,5 @@
+# Rechenergebnisse nicht ins Repo (eine Studie ~ 0.5 GB, ~25 kB je Lauf)
+ergebnisse_*/
+kalibrierung/runs/
+test_ausgabe_synthetisch/
+__pycache__/
