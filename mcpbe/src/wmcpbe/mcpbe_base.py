@@ -45,7 +45,6 @@ from .mcpbe_time_helper import MCPBETimeHelper
 # scan and hash are statistically equivalent (mass exact, PSD within ~1 %) and
 # usually bit-identical; scan is also the more deterministic path (it returns the
 # lowest matching index, the hash iterates a set).
-# See docs/historical/Merger_Lookup_Strategy_2026-09.md.
 _MERGER_LOOKUP_MODES = {
     # merger_lookup : (use_hash_index, full_reindex)
     "scan":      (False, True),
@@ -2224,8 +2223,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 W_prev_active = self.W[:self.a_tot].copy()
                 # Pre-event copies of the continuous-phase state, so that ALL
                 # *_save_left snapshots below are recorded at the same instant
-                # (t_left) as V_save_left / W_save_left. See F-07 in
-                # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
+                # (t_left) as V_save_left / W_save_left.
                 poro_prev_active = self.porosity[:self.a_tot].copy()
                 sat_prev_active = self.saturation[:self.a_tot].copy()
                 liq_prev_active = self.liquid_volume[:self.a_tot].copy()
@@ -2336,8 +2334,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # left snapshots (state before this event). All of these are
                 # pre-event copies captured under the `will_save` guard above, so
                 # V/W/liquid_volume/porosity/saturation on the left side are all
-                # consistent with each other (state at t_left). See F-07 in
-                # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
+                # consistent with each other (state at t_left).
                 self.V_save_left.append(V_prev_active.copy())
                 self.W_save_left.append(W_prev_active.copy())
                 self.liquid_volume_save_left.append(liq_prev_active.copy())
@@ -2442,7 +2439,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # 2.5e-2 for the breakage rates by the end of a 4 s run.
                 # `_agg_sampler` is built from `_r_agg`, so this biased the
                 # event timing and the partner draw, not just a diagnostic
-                # array. See mcpbe/docs/historical/Nucleation_Propensity_Blockade.md.
+                # array.
                 #
                 # Deliberately NOT gated on "did compression actually change
                 # anything". The handler does know (it computes
@@ -2478,8 +2475,7 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
                 # a nucleated particle was UNREACHABLE for the pair draw until
                 # something rebuilt. With `INITIAL_POROSITY = 0` nothing did --
                 # measured 0 agglomerations across 13 parameter variants, one of
-                # them with 21812 collisions. See
-                # mcpbe/docs/historical/Nucleation_Propensity_Blockade.md.
+                # them with 21812 collisions.
                 #
                 # The call stays even though its return value is no longer read:
                 # `consume_population_changed()` RESETS the handler's flag, and
@@ -2512,13 +2508,11 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # future code path that moves weight would have to remember to set
             # the flag, and forgetting it fails SILENTLY -- the run just carries
             # on with stale propensities. That is exactly how the nucleation
-            # propensity blockade happened (see
-            # mcpbe/docs/historical/Nucleation_Propensity_Blockade.md), and it
+            # propensity blockade happened, and it
             # cost days to find. The price here is one rebuild per REJECTED
             # event; with a continuous-process handler attached it is zero,
             # because the old `state_changed` gate was true on every iteration
-            # anyway. Halving the call count is finding F-04 in
-            # mcpbe/docs/historical/REFACTORING_FINDINGS.md.
+            # anyway.
             if pt in ("agglomeration", "mix"):
                 self._rebuild_all_propensities()
                 self._agg_sampler = rebuild_sampler(
@@ -2538,7 +2532,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
             # particles that are actually there -- i.e. the merger stops
             # merging, which is the whole point of having it.
             # Only particles whose binned key really moved touch a bucket.
-            # See mcpbe/docs/historical/Audit_2026-08-17.md, B-04.
             if merger_reindex is not None:
                 merger_reindex()
 
@@ -3333,7 +3326,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
     #: "V_solid == V_dry", a forgotten assignment would have CREATED mass
     #: instead of failing. One default now, everywhere: 0.0 (poreless), which
     #: is the modern convention and matches ``_initialize_particles``.
-    #: See mcpbe/docs/historical/Audit_2026-08-17.md, B-10.
     _RELEASED_SLOT_FILL: dict[str, float] = {}
 
     def _particle_arrays(self) -> list[tuple[np.ndarray, float]]:
@@ -3420,7 +3412,6 @@ class MCPBEBase(MCPBETimeHelper, BaseSolver):
         particle, every fragment and every nucleation child carried
         ``d(V_solid)`` instead of ``d(V_dry)``, i.e. a radius too small by
         ``(1 - porosity)**(1/3)`` and a ``beta`` too small by ``(1 - porosity)``.
-        See mcpbe/docs/historical/Audit_2026-08-17.md, B-01.
         """
         self.V_flat[-1, idx] = v_dry
         self.X[idx] = float(self._vol2diam(v_dry))

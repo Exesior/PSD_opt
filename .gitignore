@@ -50,10 +50,6 @@ poetry.lock
 # local virtualenv
 .venv/
 
-# regression fingerprints must be tracked (the repo-wide *.json rule
-# above would otherwise hide them)
-!mcpbe/tests/golden_reference.json
-
 # WMCPBE Trials: generated debug-run text reports (*.csv/*.log outputs are
 # already covered by the rules above). analyze_logs.py itself stays tracked.
 mcpbe/src/wmcpbe/Trials/debug_logs/*.txt
@@ -68,3 +64,45 @@ mcpbe/src/wmcpbe/Trials/debug_logs/*.txt
 # therefore committed once.
 scripts/test/parallel.log
 scripts/test/cpu_profile.svg
+
+# ---------------------------------------------------------------------------
+# Published repository = solver packages + studies/ (state of the thesis
+# submission, 2026-11). Everything below stays on disk but out of the repo.
+# ---------------------------------------------------------------------------
+
+# Claude Code / agent working files
+.claude/
+.agents/
+
+# Local trial, debug and archive folders
+/Trials/
+mcpbe/src/wmcpbe/Trials/
+mcpbe/src/historical_versions/
+mcpbe/docs/historical/
+
+# Local helper scripts (hard-coded local paths)
+/run_search.py
+/run_jit_search.py
+/search_jit.py
+/search_nucleation.py
+/search_prepare_break.py
+/run_tests.bat
+
+# Ray Tune output, wherever a run writes it
+*tfevents*
+.validate_storage_marker
+
+# Study outputs (regenerable). The inputs are re-included at the end.
+studies/optimization/wet_granulation_ray/
+studies/optimization/wet_granulation_opt_results*/
+studies/optimization/kernel_vergleich_input/
+studies/optimization/kernel_vergleich_results/
+studies/sensitivity/pruefung_R_ncomp500/
+studies/sensitivity/FRAGEN_FUER_MORGEN.md
+studies/merger/npz/
+studies/merger/seriell/
+mcpbe/studies/operator_splitting/results/
+
+# Processed measurement data for the fit: inputs, must be tracked (the
+# repo-wide *.xlsx rule above would otherwise hide them)
+!studies/optimization/data/*.xlsx

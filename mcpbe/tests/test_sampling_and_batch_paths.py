@@ -20,9 +20,6 @@
 
    The existing test ``test_sampler_totals_match_arrays`` could not see this:
    it runs without active nucleation.
-
-See ``mcpbe/docs/historical/Kompression_und_Parametervalidierung.md`` and
-``mcpbe/docs/historical/Nucleation_Propensity_Blockade.md``.
 """
 
 from __future__ import annotations

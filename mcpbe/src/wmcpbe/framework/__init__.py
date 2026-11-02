@@ -24,8 +24,6 @@ Layers, each aware only of the one below it:
 The package lives inside ``wmcpbe/`` and is therefore importable as
 ``wmcpbe.framework``. Executable studies built on top of it live in
 ``wmcpbe/Trials/``.
-
-See ``mcpbe/docs/historical/Parallelisierung_Wiederholungen.md``.
 """
 
 from __future__ import annotations

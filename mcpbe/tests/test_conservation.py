@@ -10,8 +10,7 @@ non-porous primary particles (``porosity`` is NaN).
 
 Both quantities are *extensive*: they carry the weight ``W``. Everything stored
 in the state arrays is *intensive* (per physical particle), which is the single
-most common source of conservation bugs in this code base - see
-``mcpbe/docs/historical/REFACTORING_FINDINGS.md``.
+most common source of conservation bugs in this code base.
 
 Run standalone for a readable report::
 

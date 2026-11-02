@@ -25,14 +25,16 @@ getestet mit numpy 2.3.5, numba 0.63.1.
 | `bench/golden_reference.py` | Bitgenaue Regressions-Fingerprints (SHA-256 über alle float64-Bytes). |
 | `bench/bench_wmcpbe.py` | Wandzeit-Benchmark mit Vorher/Nachher-Vergleich. |
 | `bench/profile_wmcpbe.py` | `cProfile` für ein einzelnes Szenario. |
-| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment` (Hintergrund: [`../docs/historical/MOMENT_MODE.md`](../docs/historical/MOMENT_MODE.md)). |
+| `bench/compare_propensity_modes.py` | Genauigkeit, Skalierung und Ensemble-Äquivalenz von `pairwise` vs. `moment`. |
 | `test_conservation.py` | Massenerhaltung Fest-/Flüssigphase, Zustandsgrenzen, Sampler-Konsistenz. |
 | `test_merger_lookup_equivalence.py` | `merger_lookup` in {scan, hash, hash_lazy} bleibt physikalisch äquivalent. |
-| `golden_reference.json` | **Aktuelle Baseline**. Zwölf Szenarien (inkl. der beiden drehzahlabhängigen Kompressionsvarianten), Gesamtlaufzeit ~310 s. |
 
 ---
 
 ## Regression prüfen (das Wichtigste)
+
+Eine Baseline liegt nicht im Repository. Vor dem ersten `check` auf einem als gut
+bekannten Stand mit `record` (unten) eine aufnehmen.
 
 ```bash
 python -m tests.bench.golden_reference check --ref tests/golden_reference.json
@@ -54,7 +56,7 @@ Referenz nach einer *beabsichtigten* Ergebnisänderung neu aufnehmen (gleiches
 `record`-Kommando wie oben).
 
 > Das ist ein bewusster Schritt. Vorher klären, **warum** sich Ergebnisse ändern,
-> und den Grund in `../docs/historical/REFACTORING_FINDINGS.md` festhalten.
+> und den Grund in der Commit-Nachricht festhalten.
 
 ---
 
@@ -122,10 +124,10 @@ Golden-Reference-Durchlauf liegt bei ~310 s.
 | `granulation_1d` | 1 | Agglomeration | 400 | 300 | + Nucleation, Internalisierung, Kompression |
 | `granulation_rumpf_dynamic_1d` | 1 | Mix | 1000 | 1600 | **Produktionsfall**: EKE + stokes_dynamik + powerlaw_rumpf_dynamic + cone_model, mit allen Handlern. Einziges Szenario mit **Bruchereignis bei aktiven Handlern**. ~55-76 s |
 | `granulation_compression_dynamik_1d` | 1 | Mix | 1000 | 1600 | wie oben, aber `porosity_compression_dynamik` (k = rate·n_mixer^C_BREAK). rate kalibriert → Fingerprint = `granulation_rumpf_dynamic_1d` (Drop-in-Äquivalenz). |
-| `granulation_compression_dynamik_rumpf_1d` | 1 | Mix | 1000 | 1600 | wie oben, aber `porosity_compression_dynamik_rumpf` (k = rate·n_mixer^C_BREAK / σ(ε,S)). Übt den Pro-Partikel-σ-Pfad in `compute_array`. |
+| `granulation_compression_dynamik_rumpf_1d` | 1 | Mix | 1000 | 1600 | wie oben, aber `porosity_compression_dynamik_rumpf` (k = (rate·n_mixer^C_BREAK) / σ(ε,S)). Übt den Pro-Partikel-σ-Pfad in `compute_array`. |
 
 `granulation_rumpf_dynamic_1d` spiegelt
-[`Trials/test_powerlaw_rumpf_dynamic_full.py`](../src/wmcpbe/Trials/test_powerlaw_rumpf_dynamic_full.py)
+`Trials/test_powerlaw_rumpf_dynamic_full.py` (lokales Studienskript, nicht im Repository)
 (gleicher Seed, gleiche Kernelparameter, gleiche monodisperse Initialisierung).
 Das grosse Ereignisbudget ist Absicht: das Rumpf-Festigkeitsmodell laesst
 Partikel erst brechen, wenn sie poroes und nass geworden sind — das erste

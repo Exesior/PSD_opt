@@ -16,8 +16,7 @@ Because the executed batch is capped by the available weight of *both* partners
 (``dW_ij = min(dW_i, dW_j)``, ``dW_i = min(dW, W_i)``), the sampling probability
 has to be divided by exactly that cap, and the partial rate carries a ``W_i``
 prefactor. Partner ``j`` is drawn proportional to ``W_j beta(i,j)/dW_ij``
-(Eq. 40), not proportional to ``W_j`` alone. Derivation and verification:
-``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md``.
+(Eq. 40), not proportional to ``W_j`` alone.
 
 Volume semantics (see also ``.agents/informations.txt``)
 -------------------------------------------------------
@@ -444,7 +443,7 @@ class MCPBEAgg:
         # delta_i = min(dW_const, W_i)  [paper Eq. 33], zeroed where W is
         # non-finite or non-positive. No epsilon threshold is needed: every
         # weight-consuming path drains a particle to exactly 0 (see
-        # mcpbe_time_helper and mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md).
+        # mcpbe_time_helper).
         dW_const = float(getattr(self, "_agg_dW_const", None) or self._prepare_agg_delta_config())
         delta = buf["delta"][:a]
         np.minimum(W, dW_const, out=delta)
@@ -899,7 +898,6 @@ class MCPBEAgg:
                 # to the dW being added -- and it silently changed the
                 # particle's merger hash key behind the index's back. Breakage
                 # never did this; the two paths had drifted.
-                # See mcpbe/docs/historical/Audit_2026-08-17.md, B-15.
                 return new_idx
             # else: new particle created, continue with initialization below
         else:
@@ -983,7 +981,7 @@ class MCPBEAgg:
     # documented method would have had no effect at all.
     # The shared, side-effect-free computation now lives in
     # `compute_merged_liquid()` at the bottom of this module and is called from
-    # `_merge_pair`. See mcpbe/docs/historical/Audit_2026-08-17.md, B-09.
+    # `_merge_pair`.
 
     def _consume_parent_weight(self, i: int, j: int, dW: float) -> None:
         """Remove ``dW`` physical particles from each parent.
@@ -1067,7 +1065,7 @@ def compute_merged_liquid(
     needs these values *before* the particle exists (``liquid_target`` is one of
     the ParticleMerger's match criteria). This replaces the dead
     ``MCPBEAgg._merge_liquid``, which held a second copy of the same rule and
-    could never run. See mcpbe/docs/historical/Audit_2026-08-17.md, B-09.
+    could never run.
 
     ``liquid_volume`` is intensive, so the child receives the *sum* of the
     parents' liquid -- no ``dW/W`` scaling. A self-collision (``i == j``) merges

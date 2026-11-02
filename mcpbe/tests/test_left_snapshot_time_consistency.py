@@ -7,7 +7,7 @@ arrays (state at ``t_right``). ``compute_psd_cdf_over_time`` uses this
 left/right bracketing for ``time_scheme`` in ``left`` / ``nearest`` / ``interp``
 (``"interp"`` is the default of the repeat-PSD pipeline).
 
-F-07 (``mcpbe/docs/historical/REFACTORING_FINDINGS.md``): only ``V_save_left``
+Only ``V_save_left``
 and ``W_save_left`` used to be genuine pre-event copies.
 ``liquid_volume_save_left`` / ``porosity_save_left`` / ``saturation_save_left``
 were filled from the *current, post-event* arrays, so combining them with

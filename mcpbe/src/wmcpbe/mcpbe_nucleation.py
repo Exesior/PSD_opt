@@ -1386,8 +1386,7 @@ class NucleationHandler:
         shrinking the liquid per particle. One droplet then built e.g. 3.19
         (f = 1e-7) or 5 nuclei of ~69 primary particles each, and each got
         only 1/3.19 or 1/5 of the droplet -- 3-5x too much powder was drawn
-        into nuclei. See ``mcpbe/docs/historical/
-        Bias_Correction_und_Gewichtsdisziplin.md``, §6.3(a), Nachtrag.
+        into nuclei.
 
         Steps
         -----
@@ -1476,7 +1475,6 @@ class NucleationHandler:
             # children created). Checking against the stale value made the
             # bound either too strict (valid new particles rejected, the
             # collection loop aborting early) or too loose (invalid index).
-            # See mcpbe/docs/historical/Audit_2026-08-17.md, N-01.
             if j < 0 or j >= solver.a_tot:
                 break
             
@@ -2357,7 +2355,6 @@ class NucleationHandler:
     # meant to avoid -- an O(n) Python loop over all particles -- and
     # has_reached_target_wt() then ran it a second time. Measured at 1.93
     # passes per throttle check, i.e. doubled rather than saved work.
-    # See mcpbe/docs/historical/Audit_2026-08-17.md, N-03.
     #
     # NOT removed: `target_wt_percent` as a CONFIGURATION parameter. It still
     # converts wt% + solid_mass_in_mixer + densities into an addition duration

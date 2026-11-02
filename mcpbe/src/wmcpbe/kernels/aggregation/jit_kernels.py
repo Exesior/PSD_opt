@@ -15,8 +15,7 @@ the *bias-corrected* partial agglomeration propensity (Ji & Rhein, Eqs. 33/36/37
 The ``1/dW_ij`` factor is what makes the scheme mean-unbiased: the batch actually
 executed is capped by the *available* weight of both partners, so the sampling
 probability has to be scaled by exactly that cap. Dividing the finished sum by
-``dW_i`` alone (the pre-2026-08 form) is biased - see
-``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 2.
+``dW_i`` alone (the pre-2026-08 form) is biased.
 
 Two families of implementations
 -------------------------------
@@ -47,9 +46,6 @@ Two families of implementations
     i.e. a prefix sum of ``g_k`` and a suffix sum of ``W_j g_k``, both O(1) to
     look up once L is sorted by weight. The ``1/W_i`` cancels against the outer
     ``W_i`` factor, so the light-particle branch ends up division-free.
-
-    Full derivation, worked numeric example and the verification protocol:
-    ``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md`` Sec. 4.
 
 Complexity (n = number of computational particles):
 

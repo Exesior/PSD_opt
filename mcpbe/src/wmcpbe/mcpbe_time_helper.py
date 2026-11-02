@@ -44,9 +44,6 @@ Free functions first: pure, numbers in and numbers out, no solver attribute is
 read. ``MCPBETimeHelper`` below binds them to live solver state (``a_tot``,
 ``Vc``, ``W``, ``_r_agg``, ``_break_rate``) and adds the strategy builders that
 ``solve()`` uses.
-
-Former complications and the derivation of the current form:
-``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md``.
 """
 
 from __future__ import annotations
@@ -100,9 +97,6 @@ def delta_from_weights(W: np.ndarray, dW_const: float) -> np.ndarray:
     """Vectorised ``delta_i = min(dW_const, W_i)``, zeroed where ``W`` is unusable.
 
     ``W > 0.0`` is an exact test to catch edge cases.
-
-    Former complications and the derivation:
-    ``mcpbe/docs/historical/Bias_Correction_und_Gewichtsdisziplin.md``.
     """
     delta = np.minimum(np.asarray(W, dtype=float), float(dW_const))
     delta = np.where(np.isfinite(delta) & (delta > 0.0), delta, 0.0)
@@ -319,8 +313,7 @@ class MCPBETimeHelper:
     def _prepare_break_delta_config(self) -> float:
         """Allocate ``_delta_break`` and cache the breakage batch cap (default ``50.0``).
 
-        Intentionally asymmetric to agglomeration's ``1.0``. See
-        ``mcpbe/docs/historical/Audit_2026-08-17.md``, B-06.
+        Intentionally asymmetric to agglomeration's ``1.0``.
         """
         ensure_delta_array(self, "_delta_break")
         return prepare_process_delta_config(

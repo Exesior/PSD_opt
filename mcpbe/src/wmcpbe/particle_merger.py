@@ -27,7 +27,7 @@ Performance Characteristics
   431 s (hash) vs 55 s (scan). The two are statistically equivalent (mass
   exact, PSD within ~1 %) and usually bit-identical; they diverge only when
   several particles match within tolerance and the two lookups break the tie
-  differently. See docs/historical/Merger_Lookup_Strategy_2026-09.md.
+  differently.
 - Long-term benefit: reduced n_comp leads to O(n^2) savings in propensity rebuilds
 
 Mass Conservation Note
@@ -162,7 +162,6 @@ class ParticleMerger:
         # entries and lookups miss the particles that are actually there.
         # Measured at eps_0 = 0.6: merge rate 99.4 % -> 10.9 %, and 99.8 % of
         # all entries under a key that no longer matched the particle.
-        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-04.
         self._key_of: Dict[int, tuple] = {} if use_hash_index else None
         
         # Statistics (for debugging/profiling)

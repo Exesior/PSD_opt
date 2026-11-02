@@ -14,8 +14,6 @@ Asserted here:
   * ``scan`` conserves solid mass exactly and agrees with ``hash`` on merge
     rate / a_tot / mean diameter to a few percent.
 
-See ``mcpbe/docs/historical/Merger_Lookup_Strategy_2026-09.md``.
-
 Run standalone::
 
     python -m tests.test_merger_lookup_equivalence
@@ -130,6 +128,10 @@ def test_merger_lookup_modes_are_equivalent(scenario):
         f"{scenario.name}: merge rate {s['merge_rate']:.3f} (scan) vs "
         f"{h['merge_rate']:.3f} (hash)"
     )
+    # ``hash`` is a relic kept for comparison only (``scan`` is the default) and
+    # is not identical to ``scan``. On granulation_1d (state 2026-11-02) a_tot
+    # ends at 196 (scan) vs 186 (hash), slightly outside the 5 % band, so this
+    # assert fails for that case. Accepted as is.
     assert abs(s["a_tot"] - h["a_tot"]) <= max(5, 0.05 * h["a_tot"]), (
         f"{scenario.name}: a_tot {s['a_tot']} (scan) vs {h['a_tot']} (hash)"
     )

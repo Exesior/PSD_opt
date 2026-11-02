@@ -500,8 +500,6 @@ maybe_double_control_volume = False  # Vc-Verdopplung deaktivierbar
 
 ```
 PSD_opt/
-├── .agents/
-│   └── informations.txt          # Detaillierte Architekturdokumentation
 ├── mcpbe/                         # Hauptpackage
 │   ├── pyproject.toml
 │   ├── README.md
@@ -528,11 +526,9 @@ PSD_opt/
 
 ## 11. Ressourcen
 
-- **Projekt-Root**: `C:\Users\ericb\Documents\GitHub\PSD_opt\`
-- **Hauptcode**: `C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe\`
-- **Tests**: `C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe\Trials`
-- **Kernels**: `C:\Users\ericb\Documents\GitHub\PSD_opt\mcpbe\src\wmcpbe\kernels`
-- **Architektur-Docs**: `C:\Users\ericb\Documents\GitHub\PSD_opt\.agents\informations.txt`
+- **Hauptcode**: `mcpbe/src/wmcpbe/`
+- **Tests**: `mcpbe/tests/`
+- **Kernels**: `mcpbe/src/wmcpbe/kernels/`
 
 ---
 

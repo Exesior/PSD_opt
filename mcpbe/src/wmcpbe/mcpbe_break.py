@@ -94,7 +94,7 @@ class MCPBEBreak:
         # numerical helper to a physical configuration choice: with
         # process_type="agglomeration" this method never runs, so
         # agglomeration-only and nucleation-only setups silently had no dedup
-        # at all (see mcpbe/docs/historical/Audit_2026-08-17.md, B-05/B-22). It now lives in
+        # at all. It now lives in
         # mcpbe_base._ensure_particle_merger(), called from
         # _initialize_samplers() regardless of process_type.
         self._ensure_particle_merger()
@@ -883,7 +883,6 @@ class MCPBEBreak:
                 # DESTROYS solid mass proportional to the fragment porosity.
                 # The agglomeration fallback (mcpbe_agg._merge_pair) always did
                 # this; this branch is a drifted copy of it.
-                # See mcpbe/docs/historical/Audit_2026-08-17.md, B-17.
                 self.set_particle_dry_volume(new_idx, V_dry_frag)
                 if hasattr(self, "liquid_volume"):
                     self.liquid_volume[new_idx] = liq_frag
@@ -1272,7 +1271,6 @@ class MCPBEBreak:
         # last SUCCESSFUL event. real_break_events -- the number the
         # agglomeration/breakage balance is read from, and which is written to
         # real_break_events_save at every output time -- came out too high.
-        # See mcpbe/docs/historical/Audit_2026-08-17.md, B-18.
         self._last_break_dW = 0.0
 
         # DEBUG: Initialize stats EARLY (before ANY return)
